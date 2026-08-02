@@ -1,0 +1,33 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  verify-orchestrate:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install dependencies
+        working-directory: scripts
+        run: bun install --frozen-lockfile
+      - name: Format, lint, typecheck, build, and test source plus packaged contract
+        working-directory: scripts
+        run: bun run verify
+      - name: Committed build artifacts match the source
+        working-directory: scripts
+        run: |
+          git diff --exit-code -- \
+            orchestrate.mjs \
+            ../references/workflow.schema.json \
+            ../references/supervisor-decision.schema.json \
+            src/generated/workflow.internal.schema.json \
+            src/generated/supervisor-decision.internal.schema.json \
+            src/generated/preferences.internal.schema.json

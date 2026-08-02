@@ -1,0 +1,493 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "version": {
+      "type": "number",
+      "enum": [
+        1
+      ]
+    },
+    "updatedAt": {
+      "type": "string"
+    },
+    "providersAvailable": {
+      "type": "object",
+      "properties": {
+        "checkedAt": {
+          "type": "string"
+        },
+        "codex": {
+          "type": "boolean"
+        },
+        "claude": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "checkedAt",
+        "codex",
+        "claude"
+      ],
+      "additionalProperties": false
+    },
+    "global": {
+      "type": "object",
+      "properties": {
+        "updatedAt": {
+          "type": "string"
+        },
+        "providers": {
+          "$ref": "#/$defs/Objects_"
+        },
+        "callback": {
+          "$ref": "#/$defs/Union_"
+        },
+        "writeConflicts": {
+          "anyOf": [
+            {
+              "type": "string",
+              "enum": [
+                "reject",
+                "allow-with-approval"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "concurrency": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "allOf": [
+                {
+                  "exclusiveMinimum": 0
+                }
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "limits": {
+          "$ref": "#/$defs/Union_1"
+        },
+        "worktrees": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "verifyCommands": {
+          "$ref": "#/$defs/Union_2"
+        }
+      },
+      "required": [
+        "updatedAt",
+        "providers",
+        "callback",
+        "writeConflicts",
+        "concurrency",
+        "limits",
+        "worktrees",
+        "verifyCommands"
+      ],
+      "additionalProperties": false
+    },
+    "projects": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "cwd": {
+            "type": "string"
+          },
+          "updatedAt": {
+            "type": "string"
+          },
+          "providers": {
+            "$ref": "#/$defs/Objects_"
+          },
+          "callback": {
+            "$ref": "#/$defs/Union_"
+          },
+          "writeConflicts": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "reject",
+                  "allow-with-approval"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "concurrency": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "allOf": [
+                  {
+                    "exclusiveMinimum": 0
+                  }
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "limits": {
+            "$ref": "#/$defs/Union_1"
+          },
+          "worktrees": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "verifyCommands": {
+            "$ref": "#/$defs/Union_2"
+          }
+        },
+        "required": [
+          "cwd",
+          "updatedAt",
+          "providers",
+          "callback",
+          "writeConflicts",
+          "concurrency",
+          "limits",
+          "worktrees",
+          "verifyCommands"
+        ],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": [
+    "version",
+    "updatedAt",
+    "providersAvailable",
+    "global",
+    "projects"
+  ],
+  "additionalProperties": false,
+  "$defs": {
+    "Objects_1": {
+      "type": "object",
+      "properties": {
+        "model": {
+          "type": "string"
+        },
+        "effort": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "model",
+        "effort"
+      ],
+      "additionalProperties": false
+    },
+    "Arrays_": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "Objects_": {
+      "type": "object",
+      "properties": {
+        "codex": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "mutating": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/$defs/Objects_1"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "readOnly": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/$defs/Objects_1"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "permissionCeiling": {
+                  "type": "string",
+                  "enum": [
+                    "read-only",
+                    "workspace-write",
+                    "danger-full-access"
+                  ]
+                },
+                "inheritEnv": {
+                  "$ref": "#/$defs/Arrays_"
+                }
+              },
+              "required": [
+                "mutating",
+                "readOnly",
+                "permissionCeiling",
+                "inheritEnv"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "claude": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "mutating": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/$defs/Objects_1"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "readOnly": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/$defs/Objects_1"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "approvedPermissionModes": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "enum": [
+                      "plan",
+                      "manual",
+                      "dontAsk",
+                      "acceptEdits",
+                      "auto",
+                      "bypassPermissions"
+                    ]
+                  },
+                  "allOf": [
+                    {
+                      "maxItems": 6
+                    }
+                  ]
+                },
+                "inheritEnv": {
+                  "$ref": "#/$defs/Arrays_"
+                }
+              },
+              "required": [
+                "mutating",
+                "readOnly",
+                "approvedPermissionModes",
+                "inheritEnv"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "codex",
+        "claude"
+      ],
+      "additionalProperties": false
+    },
+    "Union_": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "enum": [
+                "none",
+                "notification",
+                "command",
+                "webhook"
+              ]
+            },
+            "intervalMinutes": {
+              "anyOf": [
+                {
+                  "type": "number",
+                  "allOf": [
+                    {
+                      "exclusiveMinimum": 0
+                    }
+                  ]
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "type",
+            "intervalMinutes"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "Union_1": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "nodeWallTimeMinutes": {
+              "anyOf": [
+                {
+                  "type": "number",
+                  "allOf": [
+                    {
+                      "exclusiveMinimum": 0
+                    }
+                  ]
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "workflowWallTimeMinutes": {
+              "anyOf": [
+                {
+                  "type": "number",
+                  "allOf": [
+                    {
+                      "exclusiveMinimum": 0
+                    }
+                  ]
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "maxAgentStarts": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "allOf": [
+                    {
+                      "exclusiveMinimum": 0
+                    }
+                  ]
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "maxGoalRounds": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "allOf": [
+                    {
+                      "exclusiveMinimum": 0
+                    }
+                  ]
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "nodeWallTimeMinutes",
+            "workflowWallTimeMinutes",
+            "maxAgentStarts",
+            "maxGoalRounds"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "Union_2": {
+      "anyOf": [
+        {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "argv": {
+                "$ref": "#/$defs/Arrays_"
+              },
+              "cwd": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "argv",
+              "cwd"
+            ],
+            "additionalProperties": false
+          },
+          "allOf": [
+            {
+              "maxItems": 3
+            }
+          ]
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  }
+}

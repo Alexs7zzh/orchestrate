@@ -1,0 +1,24 @@
+id = "orchestrate"
+name = "Orchestrate"
+version = "0.1.0"
+min_herdr_version = "0.7.0"
+description = "Read-only panel and actions for Orchestrate workflow runs: report and watch the run that most needs attention, pause or resume it via the orchestrate CLI."
+platforms = ["linux", "macos"]
+
+# herdr resolves command argv[0] via PATH (the plugin root is only the cwd),
+# so the entrypoint script is passed to `sh` as a relative argument.
+[[panes]]
+id = "runs"
+title = "Orchestrate runs"
+placement = "tab"
+command = ["sh", "bin/orchestrate-panel"]
+
+[[actions]]
+id = "pause-latest"
+title = "Orchestrate: pause the most recent active run"
+command = ["sh", "bin/orchestrate-panel", "pause"]
+
+[[actions]]
+id = "resume-latest"
+title = "Orchestrate: resume the most recent paused run"
+command = ["sh", "bin/orchestrate-panel", "resume"]

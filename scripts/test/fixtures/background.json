@@ -1,0 +1,124 @@
+{
+  "version": 1,
+  "name": "background-smoke-test",
+  "objective": "Verify detached scheduling, parallel command execution, event logging, and watch.",
+  "cwd": "/tmp",
+  "concurrency": 2,
+  "heartbeat": {
+    "intervalMinutes": null,
+    "milestones": false,
+    "callback": {
+      "type": "none"
+    }
+  },
+  "limits": {
+    "nodeWallTimeMinutes": null,
+    "workflowWallTimeMinutes": null,
+    "maxAgentStarts": null,
+    "maxGoalRounds": null
+  },
+  "writeConflicts": "reject",
+  "nodes": [
+    {
+      "id": "left",
+      "type": "command",
+      "title": "Left background command",
+      "needs": [],
+      "cwd": null,
+      "workspace": {
+        "mode": "shared",
+        "path": null,
+        "vcs": "none",
+        "writes": [],
+        "exclusiveResources": [],
+        "git": null
+      },
+      "inputs": [],
+      "timeoutMinutes": null,
+      "retry": {
+        "maxAttempts": 1,
+        "delaySeconds": 0
+      },
+      "gate": "none",
+      "argv": [
+        "/usr/bin/env",
+        "node",
+        "-e",
+        "setTimeout(() => process.stdout.write('left complete\\n'), 100)"
+      ],
+      "env": {},
+      "allowedExitCodes": [0]
+    },
+    {
+      "id": "right",
+      "type": "command",
+      "title": "Right background command",
+      "needs": [],
+      "cwd": null,
+      "workspace": {
+        "mode": "shared",
+        "path": null,
+        "vcs": "none",
+        "writes": [],
+        "exclusiveResources": [],
+        "git": null
+      },
+      "inputs": [],
+      "timeoutMinutes": null,
+      "retry": {
+        "maxAttempts": 1,
+        "delaySeconds": 0
+      },
+      "gate": "none",
+      "argv": [
+        "/usr/bin/env",
+        "node",
+        "-e",
+        "setTimeout(() => process.stdout.write('right complete\\n'), 100)"
+      ],
+      "env": {},
+      "allowedExitCodes": [0]
+    },
+    {
+      "id": "join",
+      "type": "command",
+      "title": "Join",
+      "needs": ["left", "right"],
+      "cwd": null,
+      "workspace": {
+        "mode": "shared",
+        "path": null,
+        "vcs": "none",
+        "writes": [],
+        "exclusiveResources": [],
+        "git": null
+      },
+      "inputs": [
+        {
+          "from": "left",
+          "as": "Left result",
+          "include": "path"
+        },
+        {
+          "from": "right",
+          "as": "Right result",
+          "include": "path"
+        }
+      ],
+      "timeoutMinutes": null,
+      "retry": {
+        "maxAttempts": 1,
+        "delaySeconds": 0
+      },
+      "gate": "none",
+      "argv": [
+        "/usr/bin/env",
+        "node",
+        "-e",
+        "const fs=require('fs');const inputs=JSON.parse(fs.readFileSync(process.env.ORCHESTRATE_INPUTS_FILE,'utf8'));if(inputs.length!==2)process.exit(2);process.stdout.write('joined\\n')"
+      ],
+      "env": {},
+      "allowedExitCodes": [0]
+    }
+  ]
+}

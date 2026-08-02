@@ -1,0 +1,8 @@
+{
+  "name": "orchestrate",
+  "version": "1.0.0",
+  "description": "Validated declarative DAG workflows with session-owned completion wake-up.",
+  "author": {
+    "name": "Alex"
+  }
+}

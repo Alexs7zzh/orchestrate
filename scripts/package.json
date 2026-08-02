@@ -1,0 +1,34 @@
+{
+  "name": "@local/orchestrate-runtime",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "bun run schema && bun build src/main.ts --target=node --format=esm --outdir=. --entry-naming=orchestrate.mjs --sourcemap=external --minify && chmod 755 orchestrate.mjs",
+    "check": "tsc --noEmit",
+    "format": "oxfmt .",
+    "format:check": "oxfmt --check .",
+    "lint": "oxlint src test",
+    "lint:fix": "oxlint --fix src test",
+    "schema": "bun src/generate-schema.ts",
+    "test": "bun run build && bun run test:unit && bun run test:contract:built",
+    "test:contract": "bun run build && bun run test:contract:built",
+    "test:contract:built": "bun test test/contract.test.ts",
+    "test:unit": "bun test test/orchestrate.test.ts test/providers.test.ts test/cli.test.ts test/preferences.test.ts test/effect-runtime.test.ts test/wake-runtime.test.ts test/mirror.test.ts test/interactive.test.ts",
+    "verify": "bun run format:check && bun run lint && bun run check && bun run test"
+  },
+  "dependencies": {
+    "ajv": "8.17.1"
+  },
+  "devDependencies": {
+    "@types/bun": "1.2.21",
+    "@types/node": "22.18.6",
+    "effect": "4.0.0-beta.102",
+    "oxfmt": "0.61.0",
+    "oxlint": "1.76.0",
+    "oxlint-tsgolint": "7.0.2001",
+    "typescript": "7.0.2"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

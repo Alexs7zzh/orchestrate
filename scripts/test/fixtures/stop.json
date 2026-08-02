@@ -1,0 +1,48 @@
+{
+  "version": 1,
+  "name": "stop-smoke-test",
+  "objective": "Verify that a stop request reaches the detached worker and its process tree.",
+  "cwd": "/tmp",
+  "concurrency": 1,
+  "heartbeat": {
+    "intervalMinutes": null,
+    "milestones": false,
+    "callback": {
+      "type": "none"
+    }
+  },
+  "limits": {
+    "nodeWallTimeMinutes": null,
+    "workflowWallTimeMinutes": null,
+    "maxAgentStarts": null,
+    "maxGoalRounds": null
+  },
+  "writeConflicts": "reject",
+  "nodes": [
+    {
+      "id": "wait",
+      "type": "command",
+      "title": "Wait until stopped",
+      "needs": [],
+      "cwd": null,
+      "workspace": {
+        "mode": "shared",
+        "path": null,
+        "vcs": "none",
+        "writes": [],
+        "exclusiveResources": [],
+        "git": null
+      },
+      "inputs": [],
+      "timeoutMinutes": null,
+      "retry": {
+        "maxAttempts": 1,
+        "delaySeconds": 0
+      },
+      "gate": "none",
+      "argv": ["/usr/bin/env", "node", "-e", "setInterval(() => {}, 1000)"],
+      "env": {},
+      "allowedExitCodes": [0]
+    }
+  ]
+}

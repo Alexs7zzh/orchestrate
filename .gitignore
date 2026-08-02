@@ -1,0 +1,27 @@
+# Operating-system metadata
+.DS_Store
+
+# Local agent and editor state
+**/.agents/
+**/.claude/
+**/.codex/
+**/.cursor/
+**/*.swp
+**/*.swo
+**/*~
+
+# Local environment files (examples remain trackable)
+**/.env
+**/.env.*
+!**/.env.example
+!**/.env.*.example
+
+# Dependency and test output
+**/.bun/
+**/node_modules/
+**/coverage/
+**/*.tsbuildinfo
+
+# Orchestrate build intermediates and local review state
+/scripts/orchestrate.mjs.map
+/.orchestrate-review.json

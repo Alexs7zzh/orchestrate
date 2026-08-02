@@ -1,0 +1,16 @@
+{
+  "description": "Resume Claude Code when a session-owned Orchestrate run pauses or settles.",
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/orchestrate.mjs\" __wake-hook claude",
+            "timeout": 86400
+          }
+        ]
+      }
+    ]
+  }
+}

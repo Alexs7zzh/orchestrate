@@ -1,0 +1,82 @@
+#!/bin/sh
+# Read-only Orchestrate panel for herdr.
+#
+# Usage:
+#   orchestrate-panel           # pane entrypoint: report + watch the run that
+#                               # most needs attention (paused first, then the
+#                               # most recent active run, then the newest run)
+#   orchestrate-panel pause     # pause the most recent active run
+#   orchestrate-panel resume    # resume the most recent paused run (only works
+#                               # when no digest-bound approval is pending)
+#
+# Everything here shells out to the `orchestrate` CLI and renders or controls
+# runs at node boundaries; it never sends input to provider processes.
+set -u
+
+MODE="${1:-panel}"
+
+if ! command -v orchestrate >/dev/null 2>&1; then
+  echo "orchestrate-panel: no \`orchestrate\` on PATH." >&2
+  echo "Install it with: node <skill-dir>/scripts/orchestrate.mjs setup" >&2
+  exit 1
+fi
+
+# `orchestrate runs` prints "<id>  <status>  <workflow>  <updated>" sorted
+# newest-first; only the first two fields are parsed here.
+pick_run() {
+  # $1: regex the status must match; empty means any run.
+  orchestrate runs 2>/dev/null | awk -v want="$1" '
+    $1 ~ /^[0-9]{14}-[0-9a-f]{8}$/ && (want == "" || $2 ~ want) { print $1; exit }
+  '
+}
+
+case "$MODE" in
+  panel)
+    RUN_ID="$(pick_run '^paused$')"
+    [ -n "$RUN_ID" ] || RUN_ID="$(pick_run '^(starting|running|pausing)$')"
+    [ -n "$RUN_ID" ] || RUN_ID="$(pick_run '')"
+    if [ -z "$RUN_ID" ]; then
+      echo "No orchestrate runs found."
+      printf 'Press Enter to close. '
+      read -r _ignored
+      exit 0
+    fi
+    orchestrate report "$RUN_ID"
+    STATUS="$(orchestrate runs 2>/dev/null | awk -v id="$RUN_ID" '$1 == id { print $2; exit }')"
+    case "$STATUS" in
+      starting | running | pausing)
+        echo
+        echo "Run $RUN_ID is $STATUS; following events (exits when it settles or pauses):"
+        exec orchestrate watch "$RUN_ID"
+        ;;
+      *)
+        echo
+        printf 'Run %s is %s. Press Enter to close. ' "$RUN_ID" "${STATUS:-settled}"
+        read -r _ignored
+        ;;
+    esac
+    ;;
+  pause)
+    RUN_ID="$(pick_run '^(starting|running)$')"
+    if [ -z "$RUN_ID" ]; then
+      echo "orchestrate-panel: no active run to pause." >&2
+      exit 1
+    fi
+    exec orchestrate pause "$RUN_ID"
+    ;;
+  resume)
+    RUN_ID="$(pick_run '^paused$')"
+    if [ -z "$RUN_ID" ]; then
+      echo "orchestrate-panel: no paused run to resume." >&2
+      exit 1
+    fi
+    # Resumes only a plain pause; pending patches, gates, supervisor input,
+    # and limit overrides intentionally still require their explicit
+    # digest-bound flags from a human-driven session.
+    exec orchestrate resume "$RUN_ID"
+    ;;
+  *)
+    echo "orchestrate-panel: unknown mode \"$MODE\" (expected: panel, pause, resume)." >&2
+    exit 2
+    ;;
+esac

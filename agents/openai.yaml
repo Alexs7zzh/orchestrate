@@ -1,0 +1,6 @@
+interface:
+  display_name: "Orchestrate"
+  short_description: "Design and run adaptive multi-agent workflows"
+  default_prompt: "Use $orchestrate to design a validated workflow, present a concise approval brief, wait for approval, and continue through its harness wake path."
+policy:
+  allow_implicit_invocation: true
