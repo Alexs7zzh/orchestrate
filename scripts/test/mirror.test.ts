@@ -217,7 +217,7 @@ describe("herdr mirror mode", () => {
 
   test("a hanging herdr never slows the run beyond the configured timeout", async () => {
     await writeHerdrShim("hang")
-    process.env.ORCHESTRATE_MIRROR_TIMEOUT_MS = "150"
+    process.env.ORCHESTRATE_MIRROR_TIMEOUT_MS = "600"
     const startedAt = Date.now()
     const { exitCode, runId } = await launchMirrored(
       mirrorWorkflow([mockAgent("first"), mockAgent("second")]),
@@ -227,7 +227,7 @@ describe("herdr mirror mode", () => {
     expect(exitCode).toBe(0)
     expect((await readRunState(runDirectory(runId))).status).toBe("completed")
     // The shim sleeps 30s per call; a run that waited on even one mirrored
-    // call past its 150ms timeout could not finish this quickly.
+    // call past its 600ms timeout could not finish this quickly.
     expect(elapsed).toBeLessThan(5_000)
   })
 
