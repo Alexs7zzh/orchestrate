@@ -120,11 +120,13 @@ Phases are strictly ordered; workstreams map onto them (D is split across 1–3 
 - [ ] **`concurrency` keeps meaning max simultaneously-open node panes** (parallel live agents
       are a human-attention budget, not just a CPU one). Confirm the default guidance in
       SKILL.md.
-- [ ] **Dev-branch strategy so daily use survives the rewrite.** `~/.local/bin/orchestrate` and
-      the herdr plugin link point into this checkout; a branch switch swaps the live tool.
-      Before Phase 1: copy the current built `orchestrate.mjs` + `herdr-plugin/` to
-      `~/.local/share/orchestrate-stable/` and repoint the symlinks + plugin link there; develop
-      on a `redesign` branch; flip the links back at Phase 2 dogfooding.
+- [x] **Daily use survives the rewrite via the machine split (2026-08-02).** Development moved
+      to `mini:~/Dev/orchestrate` (fresh git history; laptop working tree imported, mirror shim
+      probe timeout widened for mini's first-exec latency). The laptop checkout at
+      `~/dev/orchestrate` stays untouched as the stable install — its symlinks
+      (`~/.local/bin/orchestrate`, `~/.agents/skills/orchestrate`, herdr plugin link) keep
+      serving daily use. Dogfooding the rewrite (Phase 2+) means installing from mini or
+      syncing a built snapshot back — decide then.
 
 ## Workstream A — workflow board pane
 
