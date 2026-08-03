@@ -1,27 +1,50 @@
-import { execFile } from "node:child_process"
+import { Schema } from "effect"
 import { randomUUID } from "node:crypto"
-import {
-  appendFile,
-  link,
-  mkdir,
-  open,
-  readFile,
-  readdir,
-  rename,
-  rm,
-  writeFile
-} from "node:fs/promises"
+import { mkdir, open, readFile, readdir, rename, rm, stat } from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
-import { promisify } from "node:util"
+import { isDeepStrictEqual } from "node:util"
 
-import type { EventRecord, ProcessIdentity, RunState, WorkflowSpec } from "./types.js"
+import type { EventRecord, HoldState, RunState, UiPreferences, WorkflowSpec } from "./types.js"
 
-import { captureProcessIdentity } from "./process.js"
+import packageJson from "../package.json" with { type: "json" }
+import { EventRecordSchema, RunStateSchema } from "./schema.js"
+import { replayEvents } from "./state-patch.js"
 
-// Version of the on-disk run contract (state layout plus worker semantics).
-// A worker refuses to schedule runs stamped with a different version.
-export const CONTRACT_VERSION = 1
+declare const ORCHESTRATE_BUILD_EMBEDDED: string
+declare const ORCHESTRATE_VERSION_EMBEDDED: string
+
+const RUN_ID = /^\d{14}-[0-9a-f]{8}$/
+const RUN_PREFIX = /^[0-9a-f-]+$/
+const LOCK_WAIT_MS = 10_000
+const LOCK_POLL_MS = 25
+const ownedDataParseOptions = { onExcessProperty: "error" } as const
+const decodeRunState = Schema.decodeUnknownSync(RunStateSchema, ownedDataParseOptions)
+const decodeEvent = Schema.decodeUnknownSync(EventRecordSchema, ownedDataParseOptions)
+
+export function runtimeBuild(): string {
+  if (runtimeBuildForTests !== null) {
+    return runtimeBuildForTests
+  }
+  const exact =
+    typeof ORCHESTRATE_BUILD_EMBEDDED === "string"
+      ? `+${ORCHESTRATE_BUILD_EMBEDDED}`
+      : "+development"
+  const version =
+    typeof ORCHESTRATE_VERSION_EMBEDDED === "string"
+      ? ORCHESTRATE_VERSION_EMBEDDED
+      : packageJson.version
+  return `${packageJson.name}@${version}${exact}`
+}
+
+let runtimeBuildForTests: string | null = null
+
+export function setRuntimeBuildForTests(build: string | null): void {
+  if (typeof ORCHESTRATE_BUILD_EMBEDDED === "string") {
+    throw new TypeError("Runtime build injection is unavailable in embedded production builds.")
+  }
+  runtimeBuildForTests = build
+}
 
 export function stateRoot(): string {
   const explicit = process.env.ORCHESTRATE_STATE_DIR
@@ -36,12 +59,13 @@ export function stateRoot(): string {
   )
 }
 
-export function runDirectory(runId: string): string {
-  return path.join(stateRoot(), "runs", runId)
+export function runsRoot(): string {
+  return path.join(stateRoot(), "runs")
 }
 
-const RUN_ID = /^\d{14}-[0-9a-f]{8}$/
-const RUN_PREFIX = /^[0-9a-f-]+$/
+export function runDirectory(runId: string): string {
+  return path.join(runsRoot(), runId)
+}
 
 export function runStatePath(runDir: string): string {
   return path.join(runDir, "state.json")
@@ -51,288 +75,324 @@ export function workflowPath(runDir: string): string {
   return path.join(runDir, "workflow.json")
 }
 
+export function uiPath(runDir: string): string {
+  return path.join(runDir, "ui.json")
+}
+
 export function eventsPath(runDir: string): string {
-  return path.join(runDir, "events.jsonl")
+  return path.join(runDir, "events.json")
 }
 
-export function stopRequestPath(runDir: string): string {
-  return path.join(runDir, "stop.request")
+export interface NodeDoneSubmission {
+  readonly runId: string
+  readonly nodeId: string
+  readonly token: string
+  readonly outcome: "completed" | "failed"
+  readonly hold: boolean
 }
 
-export function pauseRequestPath(runDir: string): string {
-  return path.join(runDir, "pause.request")
+export function submissionsRoot(): string {
+  const authoritativeRoot = stateRoot()
+  return path.join(
+    path.dirname(authoritativeRoot),
+    `${path.basename(authoritativeRoot)}-submissions`
+  )
+}
+
+export function submissionRunDirectory(runId: string): string {
+  return path.join(submissionsRoot(), runId)
+}
+
+export function submissionDirectory(runId: string, nodeId: string, token: string): string {
+  if (!RUN_ID.test(runId)) {
+    throw new Error(`Invalid full run id "${runId}" for node submission.`)
+  }
+  if (!/^[a-z0-9][a-z0-9-]*(?:--r[1-9][0-9]*)?$/.test(nodeId)) {
+    throw new Error(`Invalid runtime node id "${nodeId}" for node submission.`)
+  }
+  if (!/^[0-9a-f]{64}$/.test(token)) {
+    throw new Error("Invalid node submission token.")
+  }
+  return path.join(submissionRunDirectory(runId), nodeId, token)
+}
+
+export function submissionResultPath(runId: string, nodeId: string, token: string): string {
+  return path.join(submissionDirectory(runId, nodeId, token), "result.txt")
+}
+
+export function completionSubmissionPath(resultPath: string): string {
+  return path.join(path.dirname(resultPath), "completion.json")
+}
+
+export function nodeDirectory(runDir: string, nodeId: string): string {
+  return path.join(runDir, "nodes", nodeId)
+}
+
+export function attemptDirectory(runDir: string, nodeId: string, attempt: number): string {
+  return path.join(nodeDirectory(runDir, nodeId), `attempt-${attempt}`)
 }
 
 export async function ensureStateDirectories(): Promise<void> {
-  await mkdir(path.join(stateRoot(), "runs"), { recursive: true })
-  await mkdir(path.join(stateRoot(), "drafts"), { recursive: true })
+  await mkdir(runsRoot(), { recursive: true, mode: 0o700 })
+  await mkdir(submissionsRoot(), { recursive: true, mode: 0o700 })
 }
 
-export async function atomicWriteJson(filePath: string, value: unknown): Promise<void> {
-  await mkdir(path.dirname(filePath), { recursive: true })
+export async function atomicWriteFile(
+  filePath: string,
+  content: string,
+  mode = 0o600
+): Promise<void> {
+  await mkdir(path.dirname(filePath), { recursive: true, mode: 0o700 })
   const temporary = `${filePath}.${process.pid}.${randomUUID()}.tmp`
-  // The temporary file is fsynced before the rename so a power loss cannot
-  // leave the destination pointing at an empty or truncated file.
+  let preserveTemporaryOnFailure = false
   try {
-    const handle = await open(temporary, "w", 0o600)
+    const handle = await open(temporary, "w", mode)
     try {
-      await handle.writeFile(`${JSON.stringify(value, null, 2)}\n`)
+      const fault = atomicWriteFaultForTests
+      if (
+        fault !== null &&
+        fault.phase !== "directory-sync" &&
+        path.resolve(fault.targetPath) === path.resolve(filePath)
+      ) {
+        atomicWriteFaultForTests = null
+        preserveTemporaryOnFailure = fault.preserveTemporary
+        await handle.writeFile(Buffer.from(content).subarray(0, fault.afterBytes))
+        await handle.sync()
+        throw fault.error
+      }
+      await handle.writeFile(content)
       await handle.sync()
     } finally {
       await handle.close()
     }
     await rename(temporary, filePath)
   } catch (error) {
-    await rm(temporary, { force: true }).catch(() => undefined)
+    if (!preserveTemporaryOnFailure) {
+      await rm(temporary, { force: true }).catch(() => undefined)
+    }
     throw error
   }
   try {
     const directory = await open(path.dirname(filePath), "r")
     try {
+      const fault = atomicWriteFaultForTests
+      if (
+        fault !== null &&
+        fault.phase === "directory-sync" &&
+        path.resolve(fault.targetPath) === path.resolve(filePath)
+      ) {
+        atomicWriteFaultForTests = null
+        throw fault.error
+      }
       await directory.sync()
     } finally {
       await directory.close()
     }
-  } catch {
-    // Directory fsync is best-effort; some platforms refuse it.
+  } catch (error) {
+    if (!isUnsupportedDirectorySync(error)) {
+      throw error
+    }
   }
+}
+
+function isUnsupportedDirectorySync(error: unknown): boolean {
+  const code = (error as NodeJS.ErrnoException).code
+  return code === "EINVAL" || code === "ENOTSUP" || code === "EOPNOTSUPP"
+}
+
+interface AtomicWriteFaultForTests {
+  readonly targetPath: string
+  readonly phase?: "file-write" | "directory-sync"
+  readonly afterBytes: number
+  readonly preserveTemporary: boolean
+  readonly error: Error
+}
+
+let atomicWriteFaultForTests: AtomicWriteFaultForTests | null = null
+
+export function injectAtomicWriteFaultForTests(fault: AtomicWriteFaultForTests | null): void {
+  if (typeof ORCHESTRATE_BUILD_EMBEDDED === "string") {
+    throw new TypeError(
+      "Atomic-write fault injection is unavailable in embedded production builds."
+    )
+  }
+  atomicWriteFaultForTests = fault
+}
+
+export async function atomicWriteJson(filePath: string, value: unknown): Promise<void> {
+  await atomicWriteFile(filePath, `${JSON.stringify(value, null, 2)}\n`)
 }
 
 export async function readJson<T>(filePath: string): Promise<T> {
   return JSON.parse(await readFile(filePath, "utf8")) as T
 }
 
-export async function readRunState(runDir: string): Promise<RunState> {
-  return readJson<RunState>(runStatePath(runDir))
+function assertRunState(value: unknown): asserts value is RunState {
+  try {
+    decodeRunState(value)
+  } catch (error) {
+    throw new Error(`Invalid run state: ${String(error)}.`, { cause: error })
+  }
 }
 
-export async function writeRunState(runDir: string, state: RunState): Promise<void> {
+function assertEvent(value: unknown): asserts value is EventRecord {
+  try {
+    decodeEvent(value)
+  } catch (error) {
+    throw new Error(`Invalid journal event: ${String(error)}.`, { cause: error })
+  }
+}
+
+function assertRuntimeBuild(recorded: string): void {
+  const current = runtimeBuild()
+  if (recorded !== current) {
+    throw new Error(
+      `Run was created by runtime build "${recorded}", but this CLI is "${current}". Use the matching CLI or clean the run.`
+    )
+  }
+}
+
+export async function readEvents(runDir: string): Promise<readonly EventRecord[]> {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(await readFile(eventsPath(runDir), "utf8")) as unknown
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return []
+    }
+    if (error instanceof SyntaxError) {
+      throw new TypeError("Invalid JSON in authoritative event journal.", { cause: error })
+    }
+    throw error
+  }
+  if (!Array.isArray(parsed)) {
+    throw new TypeError("Authoritative event journal must be a JSON array.")
+  }
+  const events = parsed as unknown[]
+  events.forEach(assertEvent)
+  if (events.length > 0) {
+    assertRuntimeBuild((events[0] as EventRecord).runtimeVersion)
+  }
+  return events as EventRecord[]
+}
+
+export async function readRunState(
+  runDir: string,
+  options: { readonly repair?: boolean } = {}
+): Promise<RunState> {
+  const events = await readEvents(runDir)
+  if (events.length === 0) {
+    throw new Error(`Run "${path.basename(runDir)}" has no authoritative journal.`)
+  }
+  const replayed = replayEvents(events)
+  assertRunState(replayed)
+  assertRuntimeBuild(replayed.runtimeVersion)
+
+  let stored: RunState | null = null
+  try {
+    const candidate = await readJson<unknown>(runStatePath(runDir))
+    assertRunState(candidate)
+    assertRuntimeBuild(candidate.runtimeVersion)
+    stored = candidate
+  } catch {
+    // A missing, torn, invalid, or stale snapshot is recovered below from the journal.
+  }
+  const lastSequence = events.at(-1)?.sequence ?? 0
+  if (stored !== null && stored.sequence > lastSequence) {
+    throw new Error(
+      `Run state is at sequence ${stored.sequence}, but its journal ends at ${lastSequence}. The audit is incomplete.`
+    )
+  }
+  if (stored !== null && isDeepStrictEqual(stored, replayed)) {
+    return stored
+  }
+  if (options.repair !== true) {
+    return replayed
+  }
+  const revision = events.findLast((event) => event.type === "revision.approved")
+  if (revision !== undefined) {
+    const data = revision.data
+    const recoveredWorkflow =
+      data !== null && typeof data === "object" && !Array.isArray(data)
+        ? (data as Record<string, unknown>).workflow
+        : undefined
+    if (recoveredWorkflow === undefined) {
+      throw new Error(
+        `Journal event ${revision.sequence} cannot recover its approved workflow revision.`
+      )
+    }
+    await atomicWriteJson(workflowPath(runDir), recoveredWorkflow)
+  }
+  await atomicWriteJson(runStatePath(runDir), replayed)
+  return replayed
+}
+
+export async function readWorkflow(runDir: string): Promise<WorkflowSpec> {
+  return readJson<WorkflowSpec>(workflowPath(runDir))
+}
+
+export async function readUiSnapshot(runDir: string): Promise<UiPreferences> {
+  return readJson<UiPreferences>(uiPath(runDir))
+}
+
+export async function appendEvents(runDir: string, events: readonly EventRecord[]): Promise<void> {
+  if (events.length === 0) {
+    return
+  }
+  for (const event of events) {
+    assertEvent(event)
+  }
+  const existing = await readEvents(runDir)
+  await atomicWriteJson(eventsPath(runDir), [...existing, ...events])
+}
+
+export async function persistNewRun(
+  workflow: WorkflowSpec,
+  ui: UiPreferences,
+  state: RunState,
+  events: readonly EventRecord[]
+): Promise<string> {
+  assertRunState(state)
+  assertRuntimeBuild(state.runtimeVersion)
+  if (events.length === 0 || events.at(-1)?.sequence !== state.sequence) {
+    throw new Error("A new run requires a complete initial journal.")
+  }
+  if (!isDeepStrictEqual(replayEvents(events), state)) {
+    throw new Error("Initial journal replay does not reproduce state.json.")
+  }
+  await ensureStateDirectories()
+  const runDir = runDirectory(state.id)
+  await mkdir(runDir, { mode: 0o700 })
+  await mkdir(path.join(runDir, "nodes"), { mode: 0o700 })
+  await mkdir(submissionRunDirectory(state.id), { recursive: true, mode: 0o700 })
+  await atomicWriteJson(workflowPath(runDir), workflow)
+  await atomicWriteJson(uiPath(runDir), ui)
+  await appendEvents(runDir, events)
+  await atomicWriteJson(runStatePath(runDir), state)
+  return runDir
+}
+
+export async function commitRun(
+  runDir: string,
+  workflow: WorkflowSpec,
+  state: RunState,
+  events: readonly EventRecord[]
+): Promise<void> {
+  assertRunState(state)
+  assertRuntimeBuild(state.runtimeVersion)
+  if (events.length > 0 && events.at(-1)?.sequence !== state.sequence) {
+    throw new Error("Committed events do not end at the state sequence.")
+  }
+  await appendEvents(runDir, events)
+  await atomicWriteJson(workflowPath(runDir), workflow)
   await atomicWriteJson(runStatePath(runDir), state)
 }
 
-export async function appendEvent(runDir: string, event: EventRecord): Promise<void> {
-  await appendFile(eventsPath(runDir), `${JSON.stringify(event)}\n`, { mode: 0o600 })
-}
-
-export async function createRun(
-  workflow: WorkflowSpec,
-  digest: string,
-  allowWriteConflicts: boolean,
-  emergencyFuseOverride: boolean,
-  mirror: "herdr" | null = null
-): Promise<{ readonly runDir: string; readonly state: RunState }> {
-  await ensureStateDirectories()
-  const runId = `${new Date()
+export function createRunId(now = new Date()): string {
+  return `${now
     .toISOString()
     .replace(/[-:.TZ]/g, "")
     .slice(0, 14)}-${randomUUID().replaceAll("-", "").slice(0, 8)}`
-  const runDir = runDirectory(runId)
-  await mkdir(path.join(runDir, "nodes"), { recursive: true, mode: 0o700 })
-  const now = new Date().toISOString()
-  const state: RunState = {
-    id: runId,
-    contractVersion: CONTRACT_VERSION,
-    workflowName: workflow.name,
-    objective: workflow.objective,
-    digest,
-    status: "starting",
-    createdAt: now,
-    startedAt: null,
-    finishedAt: null,
-    updatedAt: now,
-    pid: null,
-    workerToken: null,
-    error: null,
-    pauseReason: null,
-    pauseCode: null,
-    allowWriteConflicts,
-    emergencyFuseOverride,
-    mirror,
-    stopRequested: false,
-    agentStarts: 0,
-    goalRounds: {},
-    supervisorStartedAt: {},
-    supervisorBarriers: {},
-    overriddenLimits: [],
-    pendingPatch: null,
-    pendingInput: null,
-    pendingRevision: null,
-    pendingGate: null,
-    approvedPendingGate: false,
-    satisfiedGates: [],
-    supervisorResponses: {},
-    approvedPendingPatch: false,
-    nodes: Object.fromEntries(
-      workflow.nodes.map((node) => [
-        node.id,
-        {
-          id: node.id,
-          status: "pending",
-          attempts: 0,
-          startedAt: null,
-          finishedAt: null,
-          exitCode: null,
-          error: null,
-          resultPath: null,
-          sessionId: null,
-          workspacePath: null,
-          processPid: null,
-          processIdentity: null
-        }
-      ])
-    ),
-    sessions: {},
-    dynamicNodes: []
-  }
-  await atomicWriteJson(workflowPath(runDir), workflow)
-  await writeRunState(runDir, state)
-  await appendEvent(runDir, {
-    timestamp: now,
-    runId,
-    type: "run.created",
-    message: `Created workflow run ${runId}.`
-  })
-  return { runDir, state }
-}
-
-const execFileAsync = promisify(execFile)
-
-export async function isExpectedWorker(pid: number | null, runDir: string): Promise<boolean> {
-  if (!isProcessAlive(pid)) {
-    return false
-  }
-  if (process.platform === "win32") {
-    try {
-      const { stdout } = await execFileAsync("powershell", [
-        "-NoProfile",
-        "-Command",
-        `(Get-CimInstance Win32_Process -Filter "ProcessId=${pid}").CommandLine`
-      ])
-      return stdout.includes("__worker") && stdout.includes(runDir)
-    } catch {
-      return false
-    }
-  }
-  try {
-    const { stdout } = await execFileAsync("ps", ["-p", String(pid), "-o", "command="])
-    return stdout.includes("__worker") && stdout.includes(runDir)
-  } catch {
-    return false
-  }
-}
-
-export type LockKind = "worker" | "cli"
-
-interface LockOwner {
-  readonly pid?: number
-  readonly kind?: string
-  readonly token?: string
-  readonly identity?: ProcessIdentity | null
-}
-
-function identityMatches(left: ProcessIdentity, right: ProcessIdentity): boolean {
-  return (
-    left.startedAt === right.startedAt &&
-    left.executable === right.executable &&
-    left.commandDigest === right.commandDigest
-  )
-}
-
-async function lockOwnerStillHolds(owner: LockOwner): Promise<boolean> {
-  if (!isProcessAlive(owner.pid ?? null)) {
-    return false
-  }
-  if (owner.identity === undefined || owner.identity === null) {
-    // No recorded identity (the owner was not a process-group leader, or ps
-    // was unavailable): a live PID must conservatively be treated as the
-    // owner, so takeover requires the PID to exit.
-    return true
-  }
-  const current = await captureProcessIdentity(owner.pid as number)
-  return current !== null && identityMatches(current, owner.identity)
-}
-
-export async function acquireWorkerLock(
-  runDir: string,
-  token: string,
-  kind: LockKind = "worker"
-): Promise<() => Promise<void>> {
-  const lockPath = path.join(runDir, "worker.lock")
-  const identity = await captureProcessIdentity(process.pid)
-  const content = `${JSON.stringify({
-    pid: process.pid,
-    token,
-    kind,
-    identity,
-    createdAt: new Date().toISOString()
-  })}\n`
-  const release = async (): Promise<void> => {
-    try {
-      const current = JSON.parse(await readFile(lockPath, "utf8")) as LockOwner
-      if (current.token === token) {
-        await rm(lockPath, { force: true })
-      }
-    } catch {
-      // A missing lock is already released; never remove an unverifiable replacement lock.
-    }
-  }
-  // The lock is created by hard-linking a fully written temp file into place,
-  // so contenders can never observe a partially written lock. A verified-stale
-  // lock is taken over by atomically renaming it aside — never by deleting it
-  // in place, which would let two contenders remove each other's fresh lock.
-  for (let attempt = 0; attempt < 60; attempt += 1) {
-    const temporary = `${lockPath}.${process.pid}.${randomUUID()}.tmp`
-    await writeFile(temporary, content, { mode: 0o600 })
-    try {
-      await link(temporary, lockPath)
-      await rm(temporary, { force: true })
-      return release
-    } catch (error) {
-      await rm(temporary, { force: true })
-      if ((error as NodeJS.ErrnoException).code !== "EEXIST") {
-        throw error
-      }
-    }
-    const raw = await readFile(lockPath, "utf8").catch(() => null)
-    if (raw === null) {
-      continue
-    }
-    let owner: LockOwner = {}
-    try {
-      owner = JSON.parse(raw) as LockOwner
-    } catch {
-      // An unreadable lock has no verifiable live owner; treat it as stale.
-    }
-    if (await lockOwnerStillHolds(owner)) {
-      if (owner.kind === "cli") {
-        // CLI critical sections last milliseconds; wait for release.
-        await new Promise((resolve) => setTimeout(resolve, 100))
-        continue
-      }
-      throw new Error(`Run already has an active worker with PID ${owner.pid}.`)
-    }
-    const aside = `${lockPath}.stale-${process.pid}-${randomUUID()}`
-    try {
-      await rename(lockPath, aside)
-    } catch {
-      continue
-    }
-    const asideRaw = await readFile(aside, "utf8").catch(() => null)
-    if (asideRaw !== raw) {
-      // The lock changed between verification and takeover. Restore it only
-      // into a vacant path (link is exclusive); if another lock arrived in
-      // the meantime, the newer lock wins and this copy is dropped.
-      try {
-        await link(aside, lockPath)
-      } catch {
-        // The path is occupied again; leave the newer lock in place.
-      }
-      await rm(aside, { force: true })
-      continue
-    }
-    await rm(aside, { force: true })
-  }
-  throw new Error(`Could not acquire the run lock for ${runDir} after repeated contention.`)
 }
 
 export function isProcessAlive(pid: number | null): boolean {
@@ -347,85 +407,160 @@ export function isProcessAlive(pid: number | null): boolean {
   }
 }
 
+const LOCK_EX = 2
+const LOCK_NB = 4
+const LOCK_UN = 8
+
+interface FlockLibrary {
+  readonly symbols: {
+    readonly flock: (fileDescriptor: number, operation: number) => number
+  }
+}
+
+let flockLibrary: Promise<FlockLibrary> | null = null
+
+async function nativeFlock(fileDescriptor: number, operation: number): Promise<number> {
+  if (process.platform !== "darwin" || process.arch !== "arm64") {
+    throw new Error("Orchestrate advisory locks require supported macOS ARM64.")
+  }
+  flockLibrary ??= import("bun:ffi").then(({ dlopen }) =>
+    dlopen("/usr/lib/libSystem.B.dylib", {
+      flock: { args: ["i32", "i32"], returns: "i32" }
+    })
+  )
+  return (await flockLibrary).symbols.flock(fileDescriptor, operation)
+}
+
+async function tryAcquireAdvisoryLock(lockPath: string): Promise<(() => Promise<void>) | null> {
+  await mkdir(path.dirname(lockPath), { recursive: true, mode: 0o700 })
+  const handle = await open(lockPath, "a+", 0o600)
+  if ((await nativeFlock(handle.fd, LOCK_EX | LOCK_NB)) !== 0) {
+    await handle.close()
+    return null
+  }
+  try {
+    await handle.truncate(0)
+    await handle.writeFile(
+      `${JSON.stringify({ pid: process.pid, heldSince: new Date().toISOString() })}\n`
+    )
+    await handle.sync()
+  } catch (error) {
+    await handle.close()
+    throw error
+  }
+  let released = false
+  return async () => {
+    if (released) {
+      return
+    }
+    released = true
+    try {
+      if ((await nativeFlock(handle.fd, LOCK_UN)) !== 0) {
+        throw new Error(`Could not release advisory lock "${lockPath}".`)
+      }
+    } finally {
+      await handle.close()
+    }
+  }
+}
+
+export async function acquireRunLock(runDir: string): Promise<() => Promise<void>> {
+  const lockPath = path.join(runDir, "crank.lock")
+  const deadline = Date.now() + LOCK_WAIT_MS
+  while (Date.now() < deadline) {
+    const release = await tryAcquireAdvisoryLock(lockPath)
+    if (release !== null) {
+      return release
+    }
+    await new Promise((resolve) => setTimeout(resolve, LOCK_POLL_MS))
+  }
+  throw new Error(`Timed out waiting for the crank lock for ${path.basename(runDir)}.`)
+}
+
 export interface RunListing {
   readonly states: readonly RunState[]
   readonly damaged: readonly string[]
 }
 
-// Screens the fields the run listing itself relies on, so one truncated or
-// foreign JSON document cannot break the whole list.
-function isListableRunState(value: unknown): value is RunState {
-  if (value === null || typeof value !== "object") {
-    return false
-  }
-  const record = value as Record<string, unknown>
-  return (
-    typeof record.id === "string" &&
-    typeof record.workflowName === "string" &&
-    typeof record.status === "string" &&
-    typeof record.createdAt === "string" &&
-    typeof record.updatedAt === "string" &&
-    record.nodes !== null &&
-    typeof record.nodes === "object"
-  )
-}
-
 export async function listRunStates(): Promise<RunListing> {
   await ensureStateDirectories()
-  const root = path.join(stateRoot(), "runs")
-  const entries = await readdir(root, { withFileTypes: true })
   const states: RunState[] = []
   const damaged: string[] = []
-  for (const entry of entries) {
+  for (const entry of await readdir(runsRoot(), { withFileTypes: true })) {
     if (!entry.isDirectory()) {
       continue
     }
+    const runDir = runDirectory(entry.name)
     try {
-      const candidate = await readJson<unknown>(runStatePath(path.join(root, entry.name)))
-      if (isListableRunState(candidate)) {
-        states.push(candidate)
-      } else {
-        damaged.push(entry.name)
-      }
+      states.push(await readRunState(runDir))
     } catch {
-      // A run directory with an unreadable state.json stays on disk and is
-      // reported to callers instead of silently disappearing from the list.
       damaged.push(entry.name)
     }
   }
-  return {
-    states: states.toSorted((a, b) => b.createdAt.localeCompare(a.createdAt)),
-    damaged: damaged.toSorted()
-  }
+  states.sort((left, right) => right.createdAt.localeCompare(left.createdAt))
+  damaged.sort()
+  return { states, damaged }
 }
 
-export async function resolveRunDirectory(runIdOrPrefix: string): Promise<string> {
+export function holdBlocksDependencies(state: RunState, hold: HoldState): boolean {
+  return Object.values(state.nodes).some(
+    (node) =>
+      node.status === "completed" &&
+      (hold.scope === "instance" ? node.id === hold.target : node.templateId === hold.target) &&
+      (node.repeatId === null || node.round === state.repeats[node.repeatId]?.round)
+  )
+}
+
+export function runNeedsAttention(state: RunState): boolean {
+  return (
+    state.status === "paused" ||
+    state.status === "failed" ||
+    state.pendingRevision !== null ||
+    Object.values(state.nodes).some((node) => node.status === "awaiting-approval") ||
+    Object.values(state.holds).some((hold) => holdBlocksDependencies(state, hold)) ||
+    Object.values(state.repeats).some((repeat) => repeat.status === "max-rounds")
+  )
+}
+
+export async function resolveRunDirectory(prefix: string): Promise<string> {
+  if (RUN_ID.test(prefix)) {
+    const exact = runDirectory(prefix)
+    if (
+      await stat(exact)
+        .then((value) => value.isDirectory())
+        .catch(() => false)
+    ) {
+      return exact
+    }
+  }
+  if (!RUN_PREFIX.test(prefix)) {
+    throw new Error(`Invalid run id or prefix "${prefix}".`)
+  }
   await ensureStateDirectories()
-  if (!RUN_PREFIX.test(runIdOrPrefix)) {
-    throw new Error(`Invalid run id or prefix "${runIdOrPrefix}".`)
-  }
-  const root = path.join(stateRoot(), "runs")
-  const entries = (await readdir(root, { withFileTypes: true }))
-    .filter(
-      (entry) =>
-        entry.isDirectory() && RUN_ID.test(entry.name) && entry.name.startsWith(runIdOrPrefix)
-    )
+  const matches = (await readdir(runsRoot(), { withFileTypes: true }))
+    .filter((entry) => entry.isDirectory() && entry.name.startsWith(prefix))
     .map((entry) => entry.name)
-  if (entries.length === 0) {
-    throw new Error(`No run matches "${runIdOrPrefix}".`)
+    .toSorted()
+  if (matches.length === 0) {
+    throw new Error(`No run matches "${prefix}".`)
   }
-  if (entries.length > 1) {
-    throw new Error(`Run prefix "${runIdOrPrefix}" is ambiguous: ${entries.join(", ")}`)
+  if (matches.length > 1) {
+    throw new Error(`Run prefix "${prefix}" is ambiguous: ${matches.join(", ")}.`)
   }
-  return path.join(root, entries[0] as string)
+  return runDirectory(matches[0] as string)
 }
 
-export async function removeRun(runIdOrPrefix: string): Promise<string> {
-  const runDir = await resolveRunDirectory(runIdOrPrefix)
-  const state = await readRunState(runDir)
-  if (await isExpectedWorker(state.pid, runDir)) {
-    throw new Error(`Run ${state.id} is still active; stop it before cleaning.`)
+export async function resolveDefaultRunDirectory(): Promise<string> {
+  const { states } = await listRunStates()
+  const selected = states.find(runNeedsAttention) ?? states[0]
+  if (selected === undefined) {
+    throw new Error("No runs exist.")
   }
-  await rm(runDir, { recursive: true })
-  return state.id
+  return runDirectory(selected.id)
+}
+
+export async function removeRun(runDir: string): Promise<void> {
+  await rm(runDir, { recursive: true, force: true })
+  const runId = path.basename(runDir)
+  await rm(submissionRunDirectory(runId), { recursive: true, force: true })
 }

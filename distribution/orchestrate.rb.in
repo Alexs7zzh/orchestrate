@@ -1,0 +1,28 @@
+class Orchestrate < Formula
+  desc "Run validated agent workflow graphs in herdr panes"
+  homepage "https://github.com/@REPOSITORY@"
+  version "@VERSION@"
+  url "https://github.com/@REPOSITORY@/releases/download/orchestrate-@VERSION@/orchestrate-macos-arm64.tar.gz"
+  sha256 "@SHA256@"
+  license "MIT"
+
+  depends_on :macos
+  depends_on arch: :arm64
+  depends_on "herdr"
+
+  def install
+    libexec.install Dir["*"]
+    bin.install_symlink libexec/"bin/orchestrate"
+  end
+
+  def caveats
+    <<~EOS
+      Run `orchestrate setup` to link the bundled skill and herdr plugin.
+    EOS
+  end
+
+  test do
+    assert_match "orchestrate", shell_output("#{bin}/orchestrate --help")
+    assert_match version.to_s, shell_output("#{bin}/orchestrate --version")
+  end
+end

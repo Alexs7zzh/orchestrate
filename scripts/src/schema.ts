@@ -1,30 +1,27 @@
 import { Schema } from "effect"
 
-const NonNegativeNumber = Schema.Finite.pipe(Schema.check(Schema.isGreaterThanOrEqualTo(0)))
 const PositiveNumber = Schema.Finite.pipe(Schema.check(Schema.isGreaterThan(0)))
 const PositiveInteger = Schema.Int.pipe(Schema.check(Schema.isGreaterThan(0)))
-const NullablePositiveNumber = Schema.NullOr(PositiveNumber)
+const NonNegativeInteger = Schema.Int.pipe(Schema.check(Schema.isGreaterThanOrEqualTo(0)))
 const NullablePositiveInteger = Schema.NullOr(PositiveInteger)
 const NullableString = Schema.NullOr(Schema.String)
 const NonEmptyString = Schema.String.check(Schema.isMinLength(1))
 const StringArray = Schema.Array(Schema.String)
-// Prefix-semantics lists match with startsWith at runtime, so an empty entry
-// would silently grant everything; every element must be non-empty.
-const PrefixStringArray = Schema.Array(NonEmptyString)
-const ArgvPrefixSchema = Schema.Array(NonEmptyString).check(Schema.isMinLength(1))
+const NonEmptyStringArray = Schema.Array(NonEmptyString).check(Schema.isMinLength(1))
+const StringRecord = Schema.Record(Schema.String, Schema.String)
+const UnknownRecord = Schema.Record(Schema.String, Schema.Unknown)
 
 const InputSchema = Schema.Struct({
-  from: Schema.String,
+  from: NonEmptyString,
   as: NonEmptyString,
-  include: Schema.Literals(["content", "path"])
+  include: Schema.Literals(["content", "path"]),
+  round: Schema.Literals(["current", "previous"])
 })
 
 const SessionSchema = Schema.Struct({
   mode: Schema.Literals(["fresh", "resume", "fork"]),
-  from: NullableString,
-  saveAs: NullableString,
-  retain: Schema.Boolean,
-  reuseOnRepeat: Schema.Boolean
+  from: Schema.NullOr(NonEmptyString),
+  saveAs: Schema.NullOr(NonEmptyString)
 })
 
 const GitWorkspaceSchema = Schema.Struct({
@@ -34,7 +31,6 @@ const GitWorkspaceSchema = Schema.Struct({
 })
 
 const VcsSchema = Schema.Literals(["git", "plastic", "other", "none"])
-
 const WorkspaceCommonFields = {
   writes: StringArray,
   exclusiveResources: StringArray
@@ -49,7 +45,7 @@ const SharedWorkspaceSchema = Schema.Struct({
 
 const ExistingWorkspaceSchema = Schema.Struct({
   mode: Schema.Literal("existing"),
-  path: Schema.String,
+  path: NonEmptyString,
   vcs: VcsSchema,
   ...WorkspaceCommonFields
 })
@@ -68,89 +64,72 @@ const WorkspaceSchema = Schema.Union([
   GitWorktreeWorkspaceSchema
 ])
 
-const RetrySchema = Schema.Struct({
-  maxAttempts: PositiveInteger,
-  delaySeconds: NonNegativeNumber
-})
+const RetrySchema = Schema.Struct({ maxAttempts: PositiveInteger })
 
 const PermissionsCommonFields = {
+  escalation: Schema.Literals(["deny", "ask-user", "auto-review"]),
   extraArgs: StringArray,
   inheritEnv: StringArray,
-  env: Schema.Record(Schema.String, Schema.String)
+  env: StringRecord
 }
 
 const CodexPermissionsSchema = Schema.Struct({
-  sandbox: Schema.Literals(["read-only", "workspace-write", "danger-full-access"]),
+  execution: Schema.Struct({
+    sandbox: Schema.Literals(["read-only", "workspace-write"])
+  }),
   ...PermissionsCommonFields
 })
+
+const ClaudePermissionModeSchema = Schema.Literals([
+  "acceptEdits",
+  "auto",
+  "bypassPermissions",
+  "dontAsk",
+  "manual",
+  "plan"
+])
 
 const ClaudePermissionsSchema = Schema.Struct({
-  permissionMode: Schema.Literals([
-    "acceptEdits",
-    "auto",
-    "bypassPermissions",
-    "dontAsk",
-    "manual",
-    "plan"
-  ]),
+  execution: Schema.Struct({ permissionMode: ClaudePermissionModeSchema }),
   ...PermissionsCommonFields
 })
-
-const MockPermissionsSchema = Schema.Struct({
-  ...PermissionsCommonFields
-})
-
-const JsonObjectSchema = Schema.Record(Schema.String, Schema.Unknown)
 
 const OutputSchema = Schema.Struct({
   format: Schema.Literals(["text", "json"]),
-  schema: Schema.NullOr(JsonObjectSchema)
+  schema: Schema.NullOr(UnknownRecord)
 })
 
 const CommonFields = {
-  id: Schema.String,
-  title: Schema.String,
+  id: NonEmptyString,
+  title: NonEmptyString,
   needs: StringArray,
   cwd: NullableString,
   workspace: WorkspaceSchema,
   inputs: Schema.Array(InputSchema),
-  timeoutMinutes: NullablePositiveNumber,
   retry: RetrySchema,
-  // "approval" pauses the run when the node becomes runnable and presents the
-  // fully rendered prompt (or command argv + inputs) for digest-bound approval
-  // before any attempt starts.
   gate: Schema.Literals(["none", "approval"])
 }
 
 const AgentFields = {
   ...CommonFields,
   type: Schema.Literal("agent"),
-  model: Schema.String,
+  model: NonEmptyString,
   effort: NullableString,
   prompt: Schema.String,
   session: SessionSchema,
-  output: OutputSchema,
-  // true runs the node as the provider's real interactive TUI in a herdr pane;
-  // completion is signaled by the prompt contract via `orchestrate node-done`.
-  interactive: Schema.Boolean
+  output: OutputSchema
 }
 
-const CodexAgentNodeSchema = Schema.Struct({
+export const CodexAgentNodeSchema = Schema.Struct({
   ...AgentFields,
   provider: Schema.Literal("codex"),
   permissions: CodexPermissionsSchema
 })
 
-const ClaudeAgentNodeSchema = Schema.Struct({
+export const ClaudeAgentNodeSchema = Schema.Struct({
   ...AgentFields,
   provider: Schema.Literal("claude"),
   permissions: ClaudePermissionsSchema
-})
-
-const MockAgentNodeSchema = Schema.Struct({
-  ...AgentFields,
-  provider: Schema.Literal("mock"),
-  permissions: MockPermissionsSchema
 })
 
 export const AgentNodeSchema = Schema.Union([CodexAgentNodeSchema, ClaudeAgentNodeSchema])
@@ -158,277 +137,347 @@ export const AgentNodeSchema = Schema.Union([CodexAgentNodeSchema, ClaudeAgentNo
 export const CommandNodeSchema = Schema.Struct({
   ...CommonFields,
   type: Schema.Literal("command"),
-  argv: StringArray,
+  argv: NonEmptyStringArray,
   mutates: Schema.Boolean,
   inheritEnv: StringArray,
-  env: Schema.Record(Schema.String, Schema.String),
-  allowedExitCodes: Schema.Array(Schema.Int)
+  env: StringRecord,
+  allowedExitCodes: Schema.Array(Schema.Int).check(Schema.isMinLength(1))
 })
-
-const EnvelopeCommonFields = {
-  models: StringArray,
-  nodeTypes: Schema.Array(Schema.Literals(["agent", "command"])),
-  cwdRoots: StringArray,
-  writeRoots: StringArray,
-  workspaceModes: Schema.Array(Schema.Literals(["shared", "existing", "git-worktree"])),
-  vcs: Schema.Array(VcsSchema),
-  gitWorktree: Schema.Struct({
-    allowed: Schema.Boolean,
-    branchPrefixes: PrefixStringArray,
-    startPoints: StringArray,
-    allowRemoveOnClean: Schema.Boolean
-  }),
-  allowCommands: Schema.Boolean,
-  commandArgvPrefixes: Schema.Array(ArgvPrefixSchema),
-  allowedCommandEnv: Schema.Array(Schema.Record(Schema.String, Schema.String)),
-  codexSandboxes: Schema.Array(
-    Schema.Literals(["read-only", "workspace-write", "danger-full-access"])
-  ),
-  claudePermissionModes: Schema.Array(
-    Schema.Literals(["acceptEdits", "auto", "bypassPermissions", "dontAsk", "manual", "plan"])
-  ),
-  allowedExtraArgs: Schema.Array(StringArray),
-  allowedInheritedEnv: Schema.Array(StringArray),
-  allowedProviderEnv: Schema.Array(Schema.Record(Schema.String, Schema.String)),
-  resumableSessionAliases: StringArray,
-  newSessionAliasPrefixes: PrefixStringArray,
-  maxAddedNodesPerRound: NullablePositiveInteger
-}
-
-const EnvelopeSchema = Schema.Struct({
-  providers: Schema.Array(Schema.Literals(["codex", "claude"])),
-  ...EnvelopeCommonFields
-})
-
-const InternalEnvelopeSchema = Schema.Struct({
-  providers: Schema.Array(Schema.Literals(["codex", "claude", "mock"])),
-  ...EnvelopeCommonFields
-})
-
-const TerminationSchema = Schema.Struct({
-  success: Schema.String,
-  convergence: Schema.String,
-  maxRounds: NullablePositiveInteger,
-  maxWallTimeMinutes: NullablePositiveNumber
-})
-
-const SupervisorFields = {
-  ...CommonFields,
-  type: Schema.Literal("supervisor"),
-  model: Schema.String,
-  effort: NullableString,
-  prompt: Schema.String,
-  session: SessionSchema,
-  goal: Schema.String,
-  termination: TerminationSchema
-}
-
-const CodexSupervisorNodeSchema = Schema.Struct({
-  ...SupervisorFields,
-  provider: Schema.Literal("codex"),
-  permissions: CodexPermissionsSchema,
-  envelope: EnvelopeSchema
-})
-
-const ClaudeSupervisorNodeSchema = Schema.Struct({
-  ...SupervisorFields,
-  provider: Schema.Literal("claude"),
-  permissions: ClaudePermissionsSchema,
-  envelope: EnvelopeSchema
-})
-
-const MockSupervisorNodeSchema = Schema.Struct({
-  ...SupervisorFields,
-  provider: Schema.Literal("mock"),
-  permissions: MockPermissionsSchema,
-  envelope: InternalEnvelopeSchema
-})
-
-export const SupervisorNodeSchema = Schema.Union([
-  CodexSupervisorNodeSchema,
-  ClaudeSupervisorNodeSchema
-])
 
 export const WorkflowNodeSchema = Schema.Union([
   CodexAgentNodeSchema,
   ClaudeAgentNodeSchema,
-  CommandNodeSchema,
-  CodexSupervisorNodeSchema,
-  ClaudeSupervisorNodeSchema
+  CommandNodeSchema
 ])
 
-const InternalWorkflowNodeSchema = Schema.Union([
-  CodexAgentNodeSchema,
-  ClaudeAgentNodeSchema,
-  MockAgentNodeSchema,
-  CommandNodeSchema,
-  CodexSupervisorNodeSchema,
-  ClaudeSupervisorNodeSchema,
-  MockSupervisorNodeSchema
+const RepeatConditionSchema = Schema.Union([
+  Schema.Struct({ type: Schema.Literal("command-success"), node: NonEmptyString }),
+  Schema.Struct({
+    type: Schema.Literal("agent-output"),
+    node: NonEmptyString,
+    pointer: Schema.String,
+    equals: Schema.Unknown
+  })
 ])
+
+const RepeatSchema = Schema.Struct({
+  id: NonEmptyString,
+  members: NonEmptyStringArray,
+  until: RepeatConditionSchema,
+  maxRounds: PositiveInteger
+})
 
 const CallbackSchema = Schema.Union([
   Schema.Struct({ type: Schema.Literal("none") }),
   Schema.Struct({
     type: Schema.Literal("command"),
-    argv: Schema.Array(NonEmptyString),
+    argv: NonEmptyStringArray,
     timeoutSeconds: PositiveNumber
   }),
   Schema.Struct({
     type: Schema.Literal("webhook"),
-    url: Schema.String,
-    headers: Schema.Record(Schema.String, Schema.String),
+    url: NonEmptyString,
+    headers: StringRecord,
     timeoutSeconds: PositiveNumber
   }),
   Schema.Struct({ type: Schema.Literal("notification") })
 ])
 
-const WorkflowFields = {
-  version: Schema.Literal(1),
-  name: Schema.String,
-  objective: Schema.String,
-  cwd: Schema.String,
-  concurrency: PositiveInteger,
-  heartbeat: Schema.Struct({
-    intervalMinutes: NullablePositiveNumber,
-    milestones: Schema.Boolean,
-    callback: CallbackSchema
-  }),
-  limits: Schema.Struct({
-    nodeWallTimeMinutes: NullablePositiveNumber,
-    workflowWallTimeMinutes: NullablePositiveNumber,
-    maxAgentStarts: NullablePositiveInteger,
-    maxGoalRounds: NullablePositiveInteger
-  }),
-  writeConflicts: Schema.Literals(["reject", "allow-with-approval"])
-}
-
-// The published contract: what `orchestrate validate` enforces by default and
-// what generate-schema.ts emits. It has no test-only mock provider.
 export const WorkflowSchema = Schema.Struct({
-  ...WorkflowFields,
-  nodes: Schema.Array(WorkflowNodeSchema)
+  name: NonEmptyString,
+  objective: NonEmptyString,
+  cwd: NonEmptyString,
+  concurrency: PositiveInteger,
+  callback: CallbackSchema,
+  milestones: Schema.Boolean,
+  limits: Schema.Struct({ maxStarts: NullablePositiveInteger }),
+  writeConflicts: Schema.Literals(["reject", "allow-with-approval"]),
+  nodes: Schema.Array(WorkflowNodeSchema).check(Schema.isMinLength(1)),
+  repeats: Schema.Array(RepeatSchema)
 })
 
-// The internal contract adds the mock provider for the bundled tests. It is
-// only reachable behind ORCHESTRATE_ENABLE_MOCK_PROVIDER=1.
-export const InternalWorkflowSchema = Schema.Struct({
-  ...WorkflowFields,
-  nodes: Schema.Array(InternalWorkflowNodeSchema)
+const NodeMatcherSchema = Schema.Struct({
+  type: Schema.Literals(["agent", "command", "any"]),
+  provider: Schema.Literals(["codex", "claude", "any"]),
+  level: Schema.Literals(["root", "child", "any"]),
+  origin: Schema.Literals(["initial", "loop-round", "any"]),
+  id: NonEmptyString
 })
 
-const DynamicNodes = Schema.Array(
-  Schema.Union([CodexAgentNodeSchema, ClaudeAgentNodeSchema, CommandNodeSchema])
-)
-const InternalDynamicNodes = Schema.Array(
-  Schema.Union([
-    CodexAgentNodeSchema,
-    ClaudeAgentNodeSchema,
-    MockAgentNodeSchema,
-    CommandNodeSchema
-  ])
-)
-
-function decisionSchema(nodes: typeof DynamicNodes | typeof InternalDynamicNodes) {
-  return Schema.Union([
+const BoardPlacementSchema = Schema.Literals([
+  "split-right",
+  "dedicated-workspace",
+  "current-workspace"
+])
+const PlacementPreferencesSchema = Schema.Struct({
+  workspace: Schema.Literals(["dedicated", "origin"]),
+  rules: Schema.Array(
     Schema.Struct({
-      status: Schema.Literal("complete"),
-      reason: Schema.String,
-      addNodes: nodes.check(Schema.isMaxLength(0))
-    }),
-    Schema.Struct({
-      status: Schema.Literal("pause"),
-      reason: Schema.String,
-      addNodes: nodes.check(Schema.isMaxLength(0))
-    }),
-    Schema.Struct({
-      status: Schema.Literal("continue"),
-      reason: Schema.String,
-      addNodes: nodes.check(Schema.isMinLength(1))
+      match: NodeMatcherSchema,
+      surface: Schema.Literals(["tab", "split"])
     })
-  ])
+  ).check(Schema.isMinLength(1)),
+  grouping: Schema.Union([
+    Schema.Struct({ by: Schema.Literal("root-ancestor") }),
+    Schema.Struct({ by: Schema.Literal("id-prefix"), separator: NonEmptyString })
+  ]),
+  maxSplitsPerTab: PositiveInteger
+})
+const ContinuationPreferencesSchema = Schema.Struct({
+  rules: Schema.Array(
+    Schema.Struct({ match: NodeMatcherSchema, autoContinue: Schema.Boolean })
+  ).check(Schema.isMinLength(1))
+})
+const PaneCompletionSchema = Schema.Literals(["keep-open", "close-success"])
+const FocusSchema = Schema.Literals(["never", "attention", "always"])
+const NotificationChannelSchema = Schema.Literals(["herdr", "board", "silent"])
+
+const UiPreferenceLayerSchema = Schema.Struct({
+  board: Schema.NullOr(BoardPlacementSchema),
+  placement: Schema.NullOr(PlacementPreferencesSchema),
+  completedPanes: Schema.Struct({
+    agent: Schema.NullOr(PaneCompletionSchema),
+    command: Schema.NullOr(PaneCompletionSchema)
+  }),
+  focus: Schema.NullOr(FocusSchema),
+  continuation: Schema.NullOr(ContinuationPreferencesSchema),
+  notifications: Schema.Struct({
+    attention: Schema.NullOr(NotificationChannelSchema),
+    milestone: Schema.NullOr(NotificationChannelSchema),
+    progress: Schema.NullOr(NotificationChannelSchema)
+  })
+})
+
+const PreferenceScopeFields = {
+  updatedAt: NonEmptyString,
+  ui: UiPreferenceLayerSchema
 }
 
-export const SupervisorDecisionSchema = decisionSchema(DynamicNodes)
-export const InternalSupervisorDecisionSchema = decisionSchema(InternalDynamicNodes)
-
-const ModelPreferenceSchema = Schema.Struct({
-  model: Schema.String,
-  effort: NullableString
-})
-
-const CodexPreferenceSchema = Schema.Struct({
-  mutating: Schema.NullOr(ModelPreferenceSchema),
-  readOnly: Schema.NullOr(ModelPreferenceSchema),
-  permissionCeiling: Schema.Literals(["read-only", "workspace-write", "danger-full-access"]),
-  inheritEnv: StringArray
-})
-
-const ClaudePreferenceSchema = Schema.Struct({
-  mutating: Schema.NullOr(ModelPreferenceSchema),
-  readOnly: Schema.NullOr(ModelPreferenceSchema),
-  approvedPermissionModes: Schema.Array(
-    Schema.Literals(["plan", "manual", "dontAsk", "acceptEdits", "auto", "bypassPermissions"])
-  ).check(Schema.isMaxLength(6)),
-  inheritEnv: StringArray
-})
-
-const PreferenceScopeSchema = Schema.Struct({
-  updatedAt: Schema.String,
-  providers: Schema.Struct({
-    codex: Schema.NullOr(CodexPreferenceSchema),
-    claude: Schema.NullOr(ClaudePreferenceSchema)
-  }),
-  callback: Schema.NullOr(
-    Schema.Struct({
-      type: Schema.Literals(["none", "notification", "command", "webhook"]),
-      intervalMinutes: NullablePositiveNumber
-    })
-  ),
-  writeConflicts: Schema.NullOr(Schema.Literals(["reject", "allow-with-approval"])),
-  concurrency: Schema.NullOr(PositiveInteger),
-  limits: Schema.NullOr(
-    Schema.Struct({
-      nodeWallTimeMinutes: NullablePositiveNumber,
-      workflowWallTimeMinutes: NullablePositiveNumber,
-      maxAgentStarts: NullablePositiveInteger,
-      maxGoalRounds: NullablePositiveInteger
-    })
-  ),
-  worktrees: Schema.NullOr(Schema.Boolean),
-  verifyCommands: Schema.NullOr(
-    Schema.Array(
-      Schema.Struct({
-        argv: StringArray,
-        cwd: Schema.String
-      })
-    ).check(Schema.isMaxLength(3))
-  )
-})
-
-const ProjectPreferenceSchema = Schema.Struct({
-  cwd: Schema.String,
-  ...PreferenceScopeSchema.fields
-})
+const PreferenceScopeSchema = Schema.Struct(PreferenceScopeFields)
+const ProjectPreferenceSchema = Schema.Struct({ cwd: NonEmptyString, ...PreferenceScopeFields })
 
 export const PreferencesSchema = Schema.Struct({
-  version: Schema.Literal(1),
-  updatedAt: Schema.String,
-  providersAvailable: Schema.Struct({
-    checkedAt: Schema.String,
-    codex: Schema.Boolean,
-    claude: Schema.Boolean
-  }),
+  updatedAt: NonEmptyString,
   global: PreferenceScopeSchema,
   projects: Schema.Record(Schema.String, ProjectPreferenceSchema)
+})
+
+export const PaneReferenceSchema = Schema.Struct({
+  workspaceId: NonEmptyString,
+  tabId: NonEmptyString,
+  paneId: NonEmptyString,
+  group: NonEmptyString,
+  surface: Schema.Literals(["tab", "split"])
+})
+
+const AttemptStateSchema = Schema.Struct({
+  attempt: PositiveInteger,
+  status: Schema.Literals(["planned", "running", "completed", "failed", "cancelled"]),
+  token: NonEmptyString,
+  pane: Schema.NullOr(PaneReferenceSchema),
+  providerSessionId: NullableString,
+  startedAt: NullableString,
+  finishedAt: NullableString,
+  exitCode: Schema.NullOr(Schema.Int),
+  error: NullableString,
+  resultPath: NonEmptyString,
+  outputPath: NonEmptyString
+})
+
+const NodeRunStateSchema = Schema.Struct({
+  id: NonEmptyString,
+  templateId: NonEmptyString,
+  title: NonEmptyString,
+  type: Schema.Literals(["agent", "command"]),
+  provider: Schema.NullOr(Schema.Literals(["codex", "claude"])),
+  needs: Schema.Array(NonEmptyString),
+  origin: Schema.Literals(["initial", "loop-round"]),
+  repeatId: NullableString,
+  round: Schema.NullOr(PositiveInteger),
+  status: Schema.Literals([
+    "pending",
+    "ready",
+    "running",
+    "awaiting-approval",
+    "completed",
+    "failed",
+    "cancelled",
+    "paused"
+  ]),
+  attempts: Schema.Array(AttemptStateSchema),
+  resultPath: NullableString,
+  result: Schema.NullOr(Schema.Unknown),
+  error: NullableString
+})
+
+const SessionStateSchema = Schema.Struct({
+  alias: NonEmptyString,
+  provider: Schema.Literals(["codex", "claude"]),
+  sessionId: NonEmptyString,
+  sourceNodeId: NonEmptyString
+})
+
+const GateStateSchema = Schema.Struct({
+  nodeId: NonEmptyString,
+  title: NonEmptyString,
+  content: Schema.String,
+  digest: NonEmptyString,
+  openedAt: NonEmptyString,
+  approvedAt: NullableString
+})
+
+const HoldStateSchema = Schema.Struct({
+  target: NonEmptyString,
+  scope: Schema.Literals(["template", "instance"]),
+  setAt: NonEmptyString
+})
+
+const RepeatRunStateSchema = Schema.Struct({
+  id: NonEmptyString,
+  round: PositiveInteger,
+  status: Schema.Literals(["pending", "running", "completed", "max-rounds"]),
+  instanceIds: StringArray,
+  completedAt: NullableString
+})
+
+const SpawnIntentSchema = Schema.Struct({
+  id: NonEmptyString,
+  nodeId: NonEmptyString,
+  attempt: PositiveInteger,
+  token: NonEmptyString,
+  status: Schema.Literals(["planned", "spawned"]),
+  createdAt: NonEmptyString
+})
+
+const PendingRevisionSchema = Schema.Struct({
+  workflow: WorkflowSchema,
+  digest: NonEmptyString,
+  summary: StringArray,
+  createdAt: NonEmptyString
+})
+
+const PauseStateSchema = Schema.Struct({
+  kind: Schema.Literals(["human", "fuse", "max-rounds"]),
+  message: NonEmptyString,
+  repeatId: NullableString,
+  createdAt: NonEmptyString
+})
+
+export const RunOriginSchema = Schema.Struct({
+  workspaceId: NonEmptyString,
+  tabId: NonEmptyString,
+  paneId: NonEmptyString,
+  provider: Schema.Literals(["codex", "claude"]),
+  sessionId: NonEmptyString
+})
+
+export const NodeDoneSubmissionSchema = Schema.Struct({
+  runId: NonEmptyString,
+  nodeId: NonEmptyString,
+  token: NonEmptyString,
+  outcome: Schema.Literals(["completed", "failed"]),
+  hold: Schema.Boolean
+})
+
+export const HerdrAgentStatusEventSchema = Schema.Struct({
+  event: Schema.Literal("pane_agent_status_changed"),
+  data: Schema.Struct({
+    pane_id: NonEmptyString,
+    workspace_id: NonEmptyString,
+    agent_status: Schema.Literals(["idle", "working", "blocked", "done", "unknown"])
+  })
+})
+
+export const SpawnReceiptSchema = Schema.Struct({
+  status: Schema.Literals(["created", "ready", "ambiguous"]),
+  pane: PaneReferenceSchema,
+  providerSessionId: NullableString,
+  detail: NullableString
+})
+
+export const RunStateSchema = Schema.Struct({
+  runtimeVersion: NonEmptyString,
+  sequence: NonNegativeInteger,
+  id: NonEmptyString,
+  workflowName: NonEmptyString,
+  objective: NonEmptyString,
+  digest: NonEmptyString,
+  status: Schema.Literals(["running", "paused", "completed", "failed", "stopped"]),
+  createdAt: NonEmptyString,
+  startedAt: NonEmptyString,
+  finishedAt: NullableString,
+  updatedAt: NonEmptyString,
+  error: NullableString,
+  pause: Schema.NullOr(PauseStateSchema),
+  origin: Schema.NullOr(RunOriginSchema),
+  allowWriteConflicts: Schema.Boolean,
+  starts: NonNegativeInteger,
+  fuseOverride: Schema.Boolean,
+  repeatRoundExtensions: Schema.Record(Schema.String, PositiveInteger),
+  pendingRevision: Schema.NullOr(PendingRevisionSchema),
+  nodes: Schema.Record(Schema.String, NodeRunStateSchema),
+  sessions: Schema.Record(Schema.String, SessionStateSchema),
+  gates: Schema.Record(Schema.String, GateStateSchema),
+  holds: Schema.Record(Schema.String, HoldStateSchema),
+  repeats: Schema.Record(Schema.String, RepeatRunStateSchema),
+  spawnIntents: Schema.Record(Schema.String, SpawnIntentSchema)
+})
+
+const EventTypeSchema = Schema.Literals([
+  "run.started",
+  "run.paused",
+  "run.resumed",
+  "run.completed",
+  "run.failed",
+  "run.stopped",
+  "node.ready",
+  "node.spawn-planned",
+  "node.started",
+  "node.completed",
+  "node.failed",
+  "node.retrying",
+  "node.cancelled",
+  "gate.opened",
+  "gate.approved",
+  "hold.set",
+  "hold.released",
+  "revision.proposed",
+  "revision.approved",
+  "revision.discarded",
+  "repeat.round-started",
+  "repeat.completed",
+  "repeat.max-rounds",
+  "ui.degraded"
+])
+
+export const EventRecordSchema = Schema.Struct({
+  runtimeVersion: NonEmptyString,
+  sequence: PositiveInteger,
+  timestamp: NonEmptyString,
+  runId: NonEmptyString,
+  type: EventTypeSchema,
+  message: Schema.String,
+  nodeId: Schema.optionalKey(NonEmptyString),
+  data: Schema.optionalKey(Schema.Unknown),
+  patch: Schema.Array(
+    Schema.Union([
+      Schema.Struct({
+        op: Schema.Literals(["add", "replace"]),
+        path: Schema.String.check(Schema.isPattern(/^(?:\/(?:[^~/]|~[01])*)*$/)),
+        value: Schema.Unknown
+      }),
+      Schema.Struct({
+        op: Schema.Literal("remove"),
+        path: Schema.String.check(Schema.isPattern(/^(?:\/(?:[^~/]|~[01])*)*$/))
+      })
+    ])
+  )
 })
 
 export function jsonSchemaDocumentFor(
   schema: Parameters<typeof Schema.toJsonSchemaDocument>[0]
 ): Record<string, unknown> {
-  const document = Schema.toJsonSchemaDocument(schema, {
-    additionalProperties: false
-  })
+  const document = Schema.toJsonSchemaDocument(schema, { additionalProperties: false })
   return {
     $schema: "https://json-schema.org/draft/2020-12/schema",
     ...document.schema,

@@ -1,40 +1,34 @@
 # Orchestrate herdr plugin
 
-A minimal [herdr](https://herdr.dev) plugin for [Orchestrate](../README.md). Everything it does is
-read-only rendering or node-boundary control through the `orchestrate` CLI; it never sends input
-to provider processes.
+A [herdr](https://herdr.dev) plugin for the [Orchestrate](../README.md) board and reversible run
+controls.
 
 It declares (see [herdr-plugin.toml](herdr-plugin.toml), validated against herdr 0.7.x):
 
-- **Pane `orchestrate:runs`** — opens a tab running [`bin/orchestrate-panel`](bin/orchestrate-panel),
-  which picks the run that most needs attention (most recent paused run, else the most recent
-  active run, else the newest run), prints `orchestrate report <run-id>`, and follows an active run
-  with `orchestrate watch` until it settles or pauses.
-- **Action `orchestrate:pause-latest`** — `orchestrate pause` on the most recent active run
-  (node-boundary pause; running nodes finish normally).
-- **Action `orchestrate:resume-latest`** — `orchestrate resume` on the most recent paused run.
-  This only resumes a plain pause: pending adaptive patches, approval gates, supervisor input, and
-  limit overrides intentionally still require their explicit digest-bound flags from a session
-  where a human reviewed them.
+- **Pane `orchestrate.board`** — opens the OpenTUI board for the run needing attention, otherwise
+  the latest run.
+- **Action `orchestrate.pause-latest`** — `orchestrate pause` on the most recent active run
+  (live panes keep running; no new pane starts).
+- **Action `orchestrate.resume-latest`** — `orchestrate resume` on the most recent paused run.
+  Max-round and fuse decisions remain explicit CLI operations.
+- **Event `pane.agent_status_changed`** — routes blocked and done workflow-agent events through the
+  trusted plugin bridge. The bridge prompts the captured master to reconcile a valid submission or
+  debug a missing one without granting provider nodes Herdr control authority.
 
 ## Install
 
-Requires the `orchestrate` command on `PATH` (`node <skill-dir>/scripts/orchestrate.mjs setup`
-creates `~/.local/bin/orchestrate`).
+The supported plugin package targets macOS. It requires the `orchestrate` command on `PATH` and
+herdr 0.7 or newer. `orchestrate setup` installs
+the bundled skill and links this plugin. Plugin registration is required: a link or unlink failure
+makes setup/removal fail without silently reporting success, and `orchestrate doctor` reports the
+registration unhealthy.
 
 ```bash
 herdr plugin link /path/to/skill/herdr-plugin   # local checkout
 herdr plugin list
-herdr plugin pane open --plugin orchestrate --entrypoint runs
+herdr plugin pane open --plugin orchestrate --entrypoint board
 herdr plugin action list --plugin orchestrate
 herdr plugin action invoke orchestrate.pause-latest
 ```
 
-Uninstall with `herdr plugin unlink orchestrate`.
-
-## Related: mirror mode
-
-Independently of this plugin, `orchestrate run/resume --mirror` mirrors a run into read-only herdr
-panes (workspace per run, status watcher, live node output). See
-[references/runtime-operations.md](../references/runtime-operations.md), section "Mirror a run
-into herdr".
+Uninstall with `orchestrate setup --remove` or `herdr plugin unlink orchestrate`.

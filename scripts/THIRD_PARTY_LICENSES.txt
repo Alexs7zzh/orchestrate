@@ -1,16 +1,25 @@
 The bundled runtime contains portions of the following packages:
 
 - ajv 8.17.1 (MIT)
+- @opentui/core 0.4.5 (MIT)
+- @opentui/core-darwin-arm64 0.4.5 native asset (MIT)
+- effect 4.0.0-beta.102 (MIT)
+- fast-check 4.9.0 (MIT)
 - fast-deep-equal 3.1.3 (MIT)
 - fast-uri 3.1.4 (BSD-3-Clause)
 - json-schema-traverse 1.0.0 (MIT)
+- pure-rand 8.4.2 (MIT)
 
 MIT license notices
 ===================
 
 Copyright (c) 2015-2021 Evgeny Poberezkin (ajv)
+Copyright (c) 2025 opentui (@opentui/core and @opentui/core-darwin-arm64)
+Copyright (c) 2023 Effectful Technologies Inc (effect)
+Copyright (c) 2017 Nicolas DUBIEN (fast-check)
 Copyright (c) 2017 Evgeny Poberezkin (fast-deep-equal)
 Copyright (c) 2017 Evgeny Poberezkin (json-schema-traverse)
+Copyright (c) 2018 Nicolas DUBIEN (pure-rand)
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal

@@ -1,0 +1,186 @@
+import { spawnSync } from "node:child_process"
+import { createHash } from "node:crypto"
+import { chmod, cp, lstat, mkdir, readFile, readdir, symlink, writeFile } from "node:fs/promises"
+import path from "node:path"
+
+import { assertReleaseVersion } from "./semver.js"
+
+export const RELEASE_PAYLOAD_FILES = Object.freeze([
+  "LICENSE",
+  "SKILL.md",
+  "THIRD_PARTY_LICENSES.txt",
+  "agents/openai.yaml",
+  "bin/orchestrate",
+  "herdr-plugin/README.md",
+  "herdr-plugin/bin/orchestrate-panel",
+  "herdr-plugin/herdr-plugin.toml",
+  "references/cli-spec.md",
+  "references/event.schema.json",
+  "references/examples.md",
+  "references/guarantees.md",
+  "references/preferences.schema.json",
+  "references/runtime-operations.md",
+  "references/state.schema.json",
+  "references/workflow-format.md",
+  "references/workflow.schema.json"
+] as const)
+
+async function payloadFiles(directory: string, prefix = ""): Promise<readonly string[]> {
+  const files: string[] = []
+  for (const entry of await readdir(directory, { withFileTypes: true })) {
+    const relative = prefix.length === 0 ? entry.name : `${prefix}/${entry.name}`
+    if (entry.isDirectory()) {
+      files.push(...(await payloadFiles(path.join(directory, entry.name), relative)))
+    } else if (entry.isFile() || entry.isSymbolicLink()) {
+      files.push(relative)
+    }
+  }
+  return files.toSorted()
+}
+
+function requiredEnvironment(name: string): string {
+  const value = process.env[name]?.trim()
+  if (value === undefined || value.length === 0) {
+    throw new Error(`${name} is required.`)
+  }
+  return value
+}
+
+function run(command: string, args: readonly string[], cwd?: string): string {
+  const result = spawnSync(command, args, { cwd, encoding: "utf8" })
+  if (result.status !== 0) {
+    throw new Error(`${command} ${args.join(" ")} failed: ${result.stderr.trim()}`)
+  }
+  return result.stdout
+}
+
+export interface ReleaseArtifacts {
+  readonly version: string
+  readonly archive: string
+  readonly sha256: string
+  readonly formula: string
+  readonly unpacked: string
+}
+
+export async function assembleRelease(options: {
+  readonly version: string
+  readonly repository: string
+  readonly output: string
+  readonly scriptsRoot?: string
+}): Promise<ReleaseArtifacts> {
+  const version = assertReleaseVersion(options.version)
+  const scriptsRoot = path.resolve(options.scriptsRoot ?? path.join(import.meta.dir, ".."))
+  const repositoryRoot = path.resolve(scriptsRoot, "..")
+  const output = path.resolve(options.output)
+  if (
+    output === path.parse(output).root ||
+    output === repositoryRoot ||
+    output === scriptsRoot ||
+    repositoryRoot.startsWith(`${output}${path.sep}`)
+  ) {
+    throw new Error(`Refusing unsafe release output directory "${output}".`)
+  }
+  const stageRoot = path.join(output, "stage")
+  const payload = path.join(stageRoot, "orchestrate")
+  const archive = path.join(output, "orchestrate-macos-arm64.tar.gz")
+  const formula = path.join(output, "orchestrate.rb")
+  const unpacked = path.join(output, "unpacked")
+  const existingOutput = await lstat(output).catch((error: unknown) => {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return null
+    }
+    throw error
+  })
+  if (existingOutput !== null) {
+    if (!existingOutput.isDirectory() || (await readdir(output)).length > 0) {
+      throw new Error(`Release output directory "${output}" already exists and is not empty.`)
+    }
+  }
+  await mkdir(output, { recursive: true })
+  await mkdir(path.join(payload, "bin"), { recursive: true })
+  const binary = path.join(scriptsRoot, "dist", "orchestrate")
+  await cp(binary, path.join(payload, "bin", "orchestrate"))
+  await chmod(path.join(payload, "bin", "orchestrate"), 0o755)
+  for (const entry of ["SKILL.md", "agents", "references", "herdr-plugin"] as const) {
+    await cp(path.join(repositoryRoot, entry), path.join(payload, entry), { recursive: true })
+  }
+  await cp(path.join(repositoryRoot, "LICENSE"), path.join(payload, "LICENSE"))
+  await cp(
+    path.join(scriptsRoot, "THIRD_PARTY_LICENSES.txt"),
+    path.join(payload, "THIRD_PARTY_LICENSES.txt")
+  )
+  const pluginPath = path.join(payload, "herdr-plugin", "herdr-plugin.toml")
+  const plugin = (await readFile(pluginPath, "utf8")).replace(
+    /^version = ".*"$/m,
+    `version = "${version}"`
+  )
+  await writeFile(pluginPath, plugin)
+  const inventory = await payloadFiles(payload)
+  if (JSON.stringify(inventory) !== JSON.stringify(RELEASE_PAYLOAD_FILES)) {
+    throw new Error(`Release payload inventory mismatch: ${JSON.stringify(inventory)}.`)
+  }
+  for (const [source, staged] of [
+    [path.join(repositoryRoot, "LICENSE"), path.join(payload, "LICENSE")],
+    [
+      path.join(scriptsRoot, "THIRD_PARTY_LICENSES.txt"),
+      path.join(payload, "THIRD_PARTY_LICENSES.txt")
+    ]
+  ] as const) {
+    if ((await readFile(source, "utf8")) !== (await readFile(staged, "utf8"))) {
+      throw new Error(`Release notice ${path.basename(staged)} does not match its source.`)
+    }
+  }
+  const binaryVersion = run(path.join(payload, "bin", "orchestrate"), ["--version"]).trim()
+  if (!binaryVersion.startsWith(`@local/orchestrate-runtime@${version}+`)) {
+    throw new Error(`Binary version ${binaryVersion} does not match ${version}.`)
+  }
+  if (!plugin.includes(`version = "${version}"`)) {
+    throw new Error("Staged plugin version does not match the release version.")
+  }
+  run("tar", ["-C", stageRoot, "-czf", archive, "orchestrate"])
+  const sha256 = createHash("sha256")
+    .update(await readFile(archive))
+    .digest("hex")
+  await writeFile(`${archive}.sha256`, `${sha256}  ${path.basename(archive)}\n`)
+  const template = await readFile(
+    path.join(repositoryRoot, "distribution", "orchestrate.rb.in"),
+    "utf8"
+  )
+  await writeFile(
+    formula,
+    template
+      .replaceAll("@VERSION@", version)
+      .replaceAll("@SHA256@", sha256)
+      .replaceAll("@REPOSITORY@", options.repository)
+  )
+  await mkdir(unpacked, { recursive: true })
+  run("tar", ["-C", unpacked, "-xzf", archive])
+  // Exercise the formula's libexec + bin symlink install shape without
+  // mutating Homebrew or the host installation.
+  const formulaRoot = path.join(output, "formula-root")
+  await mkdir(path.join(formulaRoot, "bin"), { recursive: true })
+  await cp(path.join(unpacked, "orchestrate"), path.join(formulaRoot, "libexec"), {
+    recursive: true
+  })
+  await symlink(
+    path.join(formulaRoot, "libexec", "bin", "orchestrate"),
+    path.join(formulaRoot, "bin", "orchestrate")
+  )
+  const formulaBinary = path.join(formulaRoot, "bin", "orchestrate")
+  run(formulaBinary, ["--help"])
+  const formulaVersion = run(formulaBinary, ["--version"]).trim()
+  if (formulaVersion !== binaryVersion) {
+    throw new Error(`Formula binary version ${formulaVersion} does not match ${binaryVersion}.`)
+  }
+  run("ruby", ["-c", formula])
+  return { version, archive, sha256, formula, unpacked }
+}
+
+if (import.meta.main) {
+  const result = await assembleRelease({
+    version: requiredEnvironment("ORCHESTRATE_RELEASE_VERSION"),
+    repository: requiredEnvironment("ORCHESTRATE_RELEASE_REPOSITORY"),
+    output: requiredEnvironment("ORCHESTRATE_RELEASE_OUTPUT")
+  })
+  console.log(JSON.stringify(result))
+}

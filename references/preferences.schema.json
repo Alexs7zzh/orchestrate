@@ -1,0 +1,412 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "updatedAt": {
+      "type": "string",
+      "allOf": [
+        {
+          "minLength": 1
+        }
+      ]
+    },
+    "global": {
+      "type": "object",
+      "properties": {
+        "updatedAt": {
+          "type": "string",
+          "allOf": [
+            {
+              "minLength": 1
+            }
+          ]
+        },
+        "ui": {
+          "$ref": "#/$defs/Objects_"
+        }
+      },
+      "required": [
+        "updatedAt",
+        "ui"
+      ],
+      "additionalProperties": false
+    },
+    "projects": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "cwd": {
+            "type": "string",
+            "allOf": [
+              {
+                "minLength": 1
+              }
+            ]
+          },
+          "updatedAt": {
+            "type": "string",
+            "allOf": [
+              {
+                "minLength": 1
+              }
+            ]
+          },
+          "ui": {
+            "$ref": "#/$defs/Objects_"
+          }
+        },
+        "required": [
+          "cwd",
+          "updatedAt",
+          "ui"
+        ],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": [
+    "updatedAt",
+    "global",
+    "projects"
+  ],
+  "additionalProperties": false,
+  "$defs": {
+    "Objects_1": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": [
+            "agent",
+            "command",
+            "any"
+          ]
+        },
+        "provider": {
+          "type": "string",
+          "enum": [
+            "codex",
+            "claude",
+            "any"
+          ]
+        },
+        "level": {
+          "type": "string",
+          "enum": [
+            "root",
+            "child",
+            "any"
+          ]
+        },
+        "origin": {
+          "type": "string",
+          "enum": [
+            "initial",
+            "loop-round",
+            "any"
+          ]
+        },
+        "id": {
+          "type": "string",
+          "allOf": [
+            {
+              "minLength": 1
+            }
+          ]
+        }
+      },
+      "required": [
+        "type",
+        "provider",
+        "level",
+        "origin",
+        "id"
+      ],
+      "additionalProperties": false
+    },
+    "Objects_": {
+      "type": "object",
+      "properties": {
+        "board": {
+          "anyOf": [
+            {
+              "type": "string",
+              "enum": [
+                "split-right",
+                "dedicated-workspace",
+                "current-workspace"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "placement": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "workspace": {
+                  "type": "string",
+                  "enum": [
+                    "dedicated",
+                    "origin"
+                  ]
+                },
+                "rules": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "match": {
+                        "$ref": "#/$defs/Objects_1"
+                      },
+                      "surface": {
+                        "type": "string",
+                        "enum": [
+                          "tab",
+                          "split"
+                        ]
+                      }
+                    },
+                    "required": [
+                      "match",
+                      "surface"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "allOf": [
+                    {
+                      "minItems": 1
+                    }
+                  ]
+                },
+                "grouping": {
+                  "anyOf": [
+                    {
+                      "type": "object",
+                      "properties": {
+                        "by": {
+                          "type": "string",
+                          "enum": [
+                            "root-ancestor"
+                          ]
+                        }
+                      },
+                      "required": [
+                        "by"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "by": {
+                          "type": "string",
+                          "enum": [
+                            "id-prefix"
+                          ]
+                        },
+                        "separator": {
+                          "type": "string",
+                          "allOf": [
+                            {
+                              "minLength": 1
+                            }
+                          ]
+                        }
+                      },
+                      "required": [
+                        "by",
+                        "separator"
+                      ],
+                      "additionalProperties": false
+                    }
+                  ]
+                },
+                "maxSplitsPerTab": {
+                  "type": "integer",
+                  "allOf": [
+                    {
+                      "exclusiveMinimum": 0
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "workspace",
+                "rules",
+                "grouping",
+                "maxSplitsPerTab"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "completedPanes": {
+          "type": "object",
+          "properties": {
+            "agent": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "enum": [
+                    "keep-open",
+                    "close-success"
+                  ]
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "command": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "enum": [
+                    "keep-open",
+                    "close-success"
+                  ]
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "agent",
+            "command"
+          ],
+          "additionalProperties": false
+        },
+        "focus": {
+          "anyOf": [
+            {
+              "type": "string",
+              "enum": [
+                "never",
+                "attention",
+                "always"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "continuation": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "rules": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "match": {
+                        "$ref": "#/$defs/Objects_1"
+                      },
+                      "autoContinue": {
+                        "type": "boolean"
+                      }
+                    },
+                    "required": [
+                      "match",
+                      "autoContinue"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "allOf": [
+                    {
+                      "minItems": 1
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "rules"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "notifications": {
+          "type": "object",
+          "properties": {
+            "attention": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "enum": [
+                    "herdr",
+                    "board",
+                    "silent"
+                  ]
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "milestone": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "enum": [
+                    "herdr",
+                    "board",
+                    "silent"
+                  ]
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "progress": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "enum": [
+                    "herdr",
+                    "board",
+                    "silent"
+                  ]
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "attention",
+            "milestone",
+            "progress"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "board",
+        "placement",
+        "completedPanes",
+        "focus",
+        "continuation",
+        "notifications"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

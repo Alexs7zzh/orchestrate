@@ -1,0 +1,1916 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "runtimeVersion": {
+      "type": "string",
+      "allOf": [
+        {
+          "minLength": 1
+        }
+      ]
+    },
+    "sequence": {
+      "type": "integer",
+      "allOf": [
+        {
+          "minimum": 0
+        }
+      ]
+    },
+    "id": {
+      "type": "string",
+      "allOf": [
+        {
+          "minLength": 1
+        }
+      ]
+    },
+    "workflowName": {
+      "type": "string",
+      "allOf": [
+        {
+          "minLength": 1
+        }
+      ]
+    },
+    "objective": {
+      "type": "string",
+      "allOf": [
+        {
+          "minLength": 1
+        }
+      ]
+    },
+    "digest": {
+      "type": "string",
+      "allOf": [
+        {
+          "minLength": 1
+        }
+      ]
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "running",
+        "paused",
+        "completed",
+        "failed",
+        "stopped"
+      ]
+    },
+    "createdAt": {
+      "type": "string",
+      "allOf": [
+        {
+          "minLength": 1
+        }
+      ]
+    },
+    "startedAt": {
+      "type": "string",
+      "allOf": [
+        {
+          "minLength": 1
+        }
+      ]
+    },
+    "finishedAt": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "updatedAt": {
+      "type": "string",
+      "allOf": [
+        {
+          "minLength": 1
+        }
+      ]
+    },
+    "error": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "pause": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "human",
+                "fuse",
+                "max-rounds"
+              ]
+            },
+            "message": {
+              "type": "string",
+              "allOf": [
+                {
+                  "minLength": 1
+                }
+              ]
+            },
+            "repeatId": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "createdAt": {
+              "type": "string",
+              "allOf": [
+                {
+                  "minLength": 1
+                }
+              ]
+            }
+          },
+          "required": [
+            "kind",
+            "message",
+            "repeatId",
+            "createdAt"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "origin": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "workspaceId": {
+              "type": "string",
+              "allOf": [
+                {
+                  "minLength": 1
+                }
+              ]
+            },
+            "tabId": {
+              "type": "string",
+              "allOf": [
+                {
+                  "minLength": 1
+                }
+              ]
+            },
+            "paneId": {
+              "type": "string",
+              "allOf": [
+                {
+                  "minLength": 1
+                }
+              ]
+            },
+            "provider": {
+              "type": "string",
+              "enum": [
+                "codex",
+                "claude"
+              ]
+            },
+            "sessionId": {
+              "type": "string",
+              "allOf": [
+                {
+                  "minLength": 1
+                }
+              ]
+            }
+          },
+          "required": [
+            "workspaceId",
+            "tabId",
+            "paneId",
+            "provider",
+            "sessionId"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "allowWriteConflicts": {
+      "type": "boolean"
+    },
+    "starts": {
+      "type": "integer",
+      "allOf": [
+        {
+          "minimum": 0
+        }
+      ]
+    },
+    "fuseOverride": {
+      "type": "boolean"
+    },
+    "repeatRoundExtensions": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "integer",
+        "allOf": [
+          {
+            "exclusiveMinimum": 0
+          }
+        ]
+      }
+    },
+    "pendingRevision": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "workflow": {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "allOf": [
+                    {
+                      "minLength": 1
+                    }
+                  ]
+                },
+                "objective": {
+                  "type": "string",
+                  "allOf": [
+                    {
+                      "minLength": 1
+                    }
+                  ]
+                },
+                "cwd": {
+                  "type": "string",
+                  "allOf": [
+                    {
+                      "minLength": 1
+                    }
+                  ]
+                },
+                "concurrency": {
+                  "type": "integer",
+                  "allOf": [
+                    {
+                      "exclusiveMinimum": 0
+                    }
+                  ]
+                },
+                "callback": {
+                  "anyOf": [
+                    {
+                      "type": "object",
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "enum": [
+                            "none"
+                          ]
+                        }
+                      },
+                      "required": [
+                        "type"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "enum": [
+                            "command"
+                          ]
+                        },
+                        "argv": {
+                          "$ref": "#/$defs/Arrays_"
+                        },
+                        "timeoutSeconds": {
+                          "type": "number",
+                          "allOf": [
+                            {
+                              "exclusiveMinimum": 0
+                            }
+                          ]
+                        }
+                      },
+                      "required": [
+                        "type",
+                        "argv",
+                        "timeoutSeconds"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "enum": [
+                            "webhook"
+                          ]
+                        },
+                        "url": {
+                          "type": "string",
+                          "allOf": [
+                            {
+                              "minLength": 1
+                            }
+                          ]
+                        },
+                        "headers": {
+                          "$ref": "#/$defs/Objects_"
+                        },
+                        "timeoutSeconds": {
+                          "type": "number",
+                          "allOf": [
+                            {
+                              "exclusiveMinimum": 0
+                            }
+                          ]
+                        }
+                      },
+                      "required": [
+                        "type",
+                        "url",
+                        "headers",
+                        "timeoutSeconds"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "enum": [
+                            "notification"
+                          ]
+                        }
+                      },
+                      "required": [
+                        "type"
+                      ],
+                      "additionalProperties": false
+                    }
+                  ]
+                },
+                "milestones": {
+                  "type": "boolean"
+                },
+                "limits": {
+                  "type": "object",
+                  "properties": {
+                    "maxStarts": {
+                      "anyOf": [
+                        {
+                          "type": "integer",
+                          "allOf": [
+                            {
+                              "exclusiveMinimum": 0
+                            }
+                          ]
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    }
+                  },
+                  "required": [
+                    "maxStarts"
+                  ],
+                  "additionalProperties": false
+                },
+                "writeConflicts": {
+                  "type": "string",
+                  "enum": [
+                    "reject",
+                    "allow-with-approval"
+                  ]
+                },
+                "nodes": {
+                  "type": "array",
+                  "items": {
+                    "anyOf": [
+                      {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "string",
+                            "allOf": [
+                              {
+                                "minLength": 1
+                              }
+                            ]
+                          },
+                          "title": {
+                            "type": "string",
+                            "allOf": [
+                              {
+                                "minLength": 1
+                              }
+                            ]
+                          },
+                          "needs": {
+                            "$ref": "#/$defs/Arrays_1"
+                          },
+                          "cwd": {
+                            "anyOf": [
+                              {
+                                "type": "string"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "workspace": {
+                            "$ref": "#/$defs/Union_"
+                          },
+                          "inputs": {
+                            "$ref": "#/$defs/Arrays_2"
+                          },
+                          "retry": {
+                            "$ref": "#/$defs/Objects_1"
+                          },
+                          "gate": {
+                            "type": "string",
+                            "enum": [
+                              "none",
+                              "approval"
+                            ]
+                          },
+                          "type": {
+                            "type": "string",
+                            "enum": [
+                              "agent"
+                            ]
+                          },
+                          "model": {
+                            "type": "string",
+                            "allOf": [
+                              {
+                                "minLength": 1
+                              }
+                            ]
+                          },
+                          "effort": {
+                            "anyOf": [
+                              {
+                                "type": "string"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "prompt": {
+                            "type": "string"
+                          },
+                          "session": {
+                            "$ref": "#/$defs/Objects_2"
+                          },
+                          "output": {
+                            "$ref": "#/$defs/Objects_3"
+                          },
+                          "provider": {
+                            "type": "string",
+                            "enum": [
+                              "codex"
+                            ]
+                          },
+                          "permissions": {
+                            "type": "object",
+                            "properties": {
+                              "execution": {
+                                "type": "object",
+                                "properties": {
+                                  "sandbox": {
+                                    "type": "string",
+                                    "enum": [
+                                      "read-only",
+                                      "workspace-write"
+                                    ]
+                                  }
+                                },
+                                "required": [
+                                  "sandbox"
+                                ],
+                                "additionalProperties": false
+                              },
+                              "escalation": {
+                                "type": "string",
+                                "enum": [
+                                  "deny",
+                                  "ask-user",
+                                  "auto-review"
+                                ]
+                              },
+                              "extraArgs": {
+                                "$ref": "#/$defs/Arrays_1"
+                              },
+                              "inheritEnv": {
+                                "$ref": "#/$defs/Arrays_1"
+                              },
+                              "env": {
+                                "$ref": "#/$defs/Objects_"
+                              }
+                            },
+                            "required": [
+                              "execution",
+                              "escalation",
+                              "extraArgs",
+                              "inheritEnv",
+                              "env"
+                            ],
+                            "additionalProperties": false
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "title",
+                          "needs",
+                          "cwd",
+                          "workspace",
+                          "inputs",
+                          "retry",
+                          "gate",
+                          "type",
+                          "model",
+                          "effort",
+                          "prompt",
+                          "session",
+                          "output",
+                          "provider",
+                          "permissions"
+                        ],
+                        "additionalProperties": false
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "string",
+                            "allOf": [
+                              {
+                                "minLength": 1
+                              }
+                            ]
+                          },
+                          "title": {
+                            "type": "string",
+                            "allOf": [
+                              {
+                                "minLength": 1
+                              }
+                            ]
+                          },
+                          "needs": {
+                            "$ref": "#/$defs/Arrays_1"
+                          },
+                          "cwd": {
+                            "anyOf": [
+                              {
+                                "type": "string"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "workspace": {
+                            "$ref": "#/$defs/Union_"
+                          },
+                          "inputs": {
+                            "$ref": "#/$defs/Arrays_2"
+                          },
+                          "retry": {
+                            "$ref": "#/$defs/Objects_1"
+                          },
+                          "gate": {
+                            "type": "string",
+                            "enum": [
+                              "none",
+                              "approval"
+                            ]
+                          },
+                          "type": {
+                            "type": "string",
+                            "enum": [
+                              "agent"
+                            ]
+                          },
+                          "model": {
+                            "type": "string",
+                            "allOf": [
+                              {
+                                "minLength": 1
+                              }
+                            ]
+                          },
+                          "effort": {
+                            "anyOf": [
+                              {
+                                "type": "string"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "prompt": {
+                            "type": "string"
+                          },
+                          "session": {
+                            "$ref": "#/$defs/Objects_2"
+                          },
+                          "output": {
+                            "$ref": "#/$defs/Objects_3"
+                          },
+                          "provider": {
+                            "type": "string",
+                            "enum": [
+                              "claude"
+                            ]
+                          },
+                          "permissions": {
+                            "type": "object",
+                            "properties": {
+                              "execution": {
+                                "type": "object",
+                                "properties": {
+                                  "permissionMode": {
+                                    "type": "string",
+                                    "enum": [
+                                      "acceptEdits",
+                                      "auto",
+                                      "bypassPermissions",
+                                      "dontAsk",
+                                      "manual",
+                                      "plan"
+                                    ]
+                                  }
+                                },
+                                "required": [
+                                  "permissionMode"
+                                ],
+                                "additionalProperties": false
+                              },
+                              "escalation": {
+                                "type": "string",
+                                "enum": [
+                                  "deny",
+                                  "ask-user",
+                                  "auto-review"
+                                ]
+                              },
+                              "extraArgs": {
+                                "$ref": "#/$defs/Arrays_1"
+                              },
+                              "inheritEnv": {
+                                "$ref": "#/$defs/Arrays_1"
+                              },
+                              "env": {
+                                "$ref": "#/$defs/Objects_"
+                              }
+                            },
+                            "required": [
+                              "execution",
+                              "escalation",
+                              "extraArgs",
+                              "inheritEnv",
+                              "env"
+                            ],
+                            "additionalProperties": false
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "title",
+                          "needs",
+                          "cwd",
+                          "workspace",
+                          "inputs",
+                          "retry",
+                          "gate",
+                          "type",
+                          "model",
+                          "effort",
+                          "prompt",
+                          "session",
+                          "output",
+                          "provider",
+                          "permissions"
+                        ],
+                        "additionalProperties": false
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "string",
+                            "allOf": [
+                              {
+                                "minLength": 1
+                              }
+                            ]
+                          },
+                          "title": {
+                            "type": "string",
+                            "allOf": [
+                              {
+                                "minLength": 1
+                              }
+                            ]
+                          },
+                          "needs": {
+                            "$ref": "#/$defs/Arrays_1"
+                          },
+                          "cwd": {
+                            "anyOf": [
+                              {
+                                "type": "string"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "workspace": {
+                            "$ref": "#/$defs/Union_"
+                          },
+                          "inputs": {
+                            "$ref": "#/$defs/Arrays_2"
+                          },
+                          "retry": {
+                            "$ref": "#/$defs/Objects_1"
+                          },
+                          "gate": {
+                            "type": "string",
+                            "enum": [
+                              "none",
+                              "approval"
+                            ]
+                          },
+                          "type": {
+                            "type": "string",
+                            "enum": [
+                              "command"
+                            ]
+                          },
+                          "argv": {
+                            "$ref": "#/$defs/Arrays_"
+                          },
+                          "mutates": {
+                            "type": "boolean"
+                          },
+                          "inheritEnv": {
+                            "$ref": "#/$defs/Arrays_1"
+                          },
+                          "env": {
+                            "$ref": "#/$defs/Objects_"
+                          },
+                          "allowedExitCodes": {
+                            "type": "array",
+                            "items": {
+                              "type": "integer"
+                            },
+                            "allOf": [
+                              {
+                                "minItems": 1
+                              }
+                            ]
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "title",
+                          "needs",
+                          "cwd",
+                          "workspace",
+                          "inputs",
+                          "retry",
+                          "gate",
+                          "type",
+                          "argv",
+                          "mutates",
+                          "inheritEnv",
+                          "env",
+                          "allowedExitCodes"
+                        ],
+                        "additionalProperties": false
+                      }
+                    ]
+                  },
+                  "allOf": [
+                    {
+                      "minItems": 1
+                    }
+                  ]
+                },
+                "repeats": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "id": {
+                        "type": "string",
+                        "allOf": [
+                          {
+                            "minLength": 1
+                          }
+                        ]
+                      },
+                      "members": {
+                        "$ref": "#/$defs/Arrays_"
+                      },
+                      "until": {
+                        "anyOf": [
+                          {
+                            "type": "object",
+                            "properties": {
+                              "type": {
+                                "type": "string",
+                                "enum": [
+                                  "command-success"
+                                ]
+                              },
+                              "node": {
+                                "type": "string",
+                                "allOf": [
+                                  {
+                                    "minLength": 1
+                                  }
+                                ]
+                              }
+                            },
+                            "required": [
+                              "type",
+                              "node"
+                            ],
+                            "additionalProperties": false
+                          },
+                          {
+                            "type": "object",
+                            "properties": {
+                              "type": {
+                                "type": "string",
+                                "enum": [
+                                  "agent-output"
+                                ]
+                              },
+                              "node": {
+                                "type": "string",
+                                "allOf": [
+                                  {
+                                    "minLength": 1
+                                  }
+                                ]
+                              },
+                              "pointer": {
+                                "type": "string"
+                              },
+                              "equals": {}
+                            },
+                            "required": [
+                              "type",
+                              "node",
+                              "pointer",
+                              "equals"
+                            ],
+                            "additionalProperties": false
+                          }
+                        ]
+                      },
+                      "maxRounds": {
+                        "type": "integer",
+                        "allOf": [
+                          {
+                            "exclusiveMinimum": 0
+                          }
+                        ]
+                      }
+                    },
+                    "required": [
+                      "id",
+                      "members",
+                      "until",
+                      "maxRounds"
+                    ],
+                    "additionalProperties": false
+                  }
+                }
+              },
+              "required": [
+                "name",
+                "objective",
+                "cwd",
+                "concurrency",
+                "callback",
+                "milestones",
+                "limits",
+                "writeConflicts",
+                "nodes",
+                "repeats"
+              ],
+              "additionalProperties": false
+            },
+            "digest": {
+              "type": "string",
+              "allOf": [
+                {
+                  "minLength": 1
+                }
+              ]
+            },
+            "summary": {
+              "$ref": "#/$defs/Arrays_1"
+            },
+            "createdAt": {
+              "type": "string",
+              "allOf": [
+                {
+                  "minLength": 1
+                }
+              ]
+            }
+          },
+          "required": [
+            "workflow",
+            "digest",
+            "summary",
+            "createdAt"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "nodes": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "allOf": [
+              {
+                "minLength": 1
+              }
+            ]
+          },
+          "templateId": {
+            "type": "string",
+            "allOf": [
+              {
+                "minLength": 1
+              }
+            ]
+          },
+          "title": {
+            "type": "string",
+            "allOf": [
+              {
+                "minLength": 1
+              }
+            ]
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "agent",
+              "command"
+            ]
+          },
+          "provider": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "codex",
+                  "claude"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "needs": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "allOf": [
+                {
+                  "minLength": 1
+                }
+              ]
+            }
+          },
+          "origin": {
+            "type": "string",
+            "enum": [
+              "initial",
+              "loop-round"
+            ]
+          },
+          "repeatId": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "round": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "allOf": [
+                  {
+                    "exclusiveMinimum": 0
+                  }
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "pending",
+              "ready",
+              "running",
+              "awaiting-approval",
+              "completed",
+              "failed",
+              "cancelled",
+              "paused"
+            ]
+          },
+          "attempts": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "attempt": {
+                  "type": "integer",
+                  "allOf": [
+                    {
+                      "exclusiveMinimum": 0
+                    }
+                  ]
+                },
+                "status": {
+                  "type": "string",
+                  "enum": [
+                    "planned",
+                    "running",
+                    "completed",
+                    "failed",
+                    "cancelled"
+                  ]
+                },
+                "token": {
+                  "type": "string",
+                  "allOf": [
+                    {
+                      "minLength": 1
+                    }
+                  ]
+                },
+                "pane": {
+                  "anyOf": [
+                    {
+                      "type": "object",
+                      "properties": {
+                        "workspaceId": {
+                          "type": "string",
+                          "allOf": [
+                            {
+                              "minLength": 1
+                            }
+                          ]
+                        },
+                        "tabId": {
+                          "type": "string",
+                          "allOf": [
+                            {
+                              "minLength": 1
+                            }
+                          ]
+                        },
+                        "paneId": {
+                          "type": "string",
+                          "allOf": [
+                            {
+                              "minLength": 1
+                            }
+                          ]
+                        },
+                        "group": {
+                          "type": "string",
+                          "allOf": [
+                            {
+                              "minLength": 1
+                            }
+                          ]
+                        },
+                        "surface": {
+                          "type": "string",
+                          "enum": [
+                            "tab",
+                            "split"
+                          ]
+                        }
+                      },
+                      "required": [
+                        "workspaceId",
+                        "tabId",
+                        "paneId",
+                        "group",
+                        "surface"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "providerSessionId": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "startedAt": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "finishedAt": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "exitCode": {
+                  "anyOf": [
+                    {
+                      "type": "integer"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "error": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "resultPath": {
+                  "type": "string",
+                  "allOf": [
+                    {
+                      "minLength": 1
+                    }
+                  ]
+                },
+                "outputPath": {
+                  "type": "string",
+                  "allOf": [
+                    {
+                      "minLength": 1
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "attempt",
+                "status",
+                "token",
+                "pane",
+                "providerSessionId",
+                "startedAt",
+                "finishedAt",
+                "exitCode",
+                "error",
+                "resultPath",
+                "outputPath"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "resultPath": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "result": {
+            "anyOf": [
+              {},
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "templateId",
+          "title",
+          "type",
+          "provider",
+          "needs",
+          "origin",
+          "repeatId",
+          "round",
+          "status",
+          "attempts",
+          "resultPath",
+          "result",
+          "error"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "sessions": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "alias": {
+            "type": "string",
+            "allOf": [
+              {
+                "minLength": 1
+              }
+            ]
+          },
+          "provider": {
+            "type": "string",
+            "enum": [
+              "codex",
+              "claude"
+            ]
+          },
+          "sessionId": {
+            "type": "string",
+            "allOf": [
+              {
+                "minLength": 1
+              }
+            ]
+          },
+          "sourceNodeId": {
+            "type": "string",
+            "allOf": [
+              {
+                "minLength": 1
+              }
+            ]
+          }
+        },
+        "required": [
+          "alias",
+          "provider",
+          "sessionId",
+          "sourceNodeId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "gates": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "nodeId": {
+            "type": "string",
+            "allOf": [
+              {
+                "minLength": 1
+              }
+            ]
+          },
+          "title": {
+            "type": "string",
+            "allOf": [
+              {
+                "minLength": 1
+              }
+            ]
+          },
+          "content": {
+            "type": "string"
+          },
+          "digest": {
+            "type": "string",
+            "allOf": [
+              {
+                "minLength": 1
+              }
+            ]
+          },
+          "openedAt": {
+            "type": "string",
+            "allOf": [
+              {
+                "minLength": 1
+              }
+            ]
+          },
+          "approvedAt": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "nodeId",
+          "title",
+          "content",
+          "digest",
+          "openedAt",
+          "approvedAt"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "holds": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "target": {
+            "type": "string",
+            "allOf": [
+              {
+                "minLength": 1
+              }
+            ]
+          },
+          "scope": {
+            "type": "string",
+            "enum": [
+              "template",
+              "instance"
+            ]
+          },
+          "setAt": {
+            "type": "string",
+            "allOf": [
+              {
+                "minLength": 1
+              }
+            ]
+          }
+        },
+        "required": [
+          "target",
+          "scope",
+          "setAt"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "repeats": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "allOf": [
+              {
+                "minLength": 1
+              }
+            ]
+          },
+          "round": {
+            "type": "integer",
+            "allOf": [
+              {
+                "exclusiveMinimum": 0
+              }
+            ]
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "pending",
+              "running",
+              "completed",
+              "max-rounds"
+            ]
+          },
+          "instanceIds": {
+            "$ref": "#/$defs/Arrays_1"
+          },
+          "completedAt": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "round",
+          "status",
+          "instanceIds",
+          "completedAt"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "spawnIntents": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "allOf": [
+              {
+                "minLength": 1
+              }
+            ]
+          },
+          "nodeId": {
+            "type": "string",
+            "allOf": [
+              {
+                "minLength": 1
+              }
+            ]
+          },
+          "attempt": {
+            "type": "integer",
+            "allOf": [
+              {
+                "exclusiveMinimum": 0
+              }
+            ]
+          },
+          "token": {
+            "type": "string",
+            "allOf": [
+              {
+                "minLength": 1
+              }
+            ]
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "planned",
+              "spawned"
+            ]
+          },
+          "createdAt": {
+            "type": "string",
+            "allOf": [
+              {
+                "minLength": 1
+              }
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "nodeId",
+          "attempt",
+          "token",
+          "status",
+          "createdAt"
+        ],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": [
+    "runtimeVersion",
+    "sequence",
+    "id",
+    "workflowName",
+    "objective",
+    "digest",
+    "status",
+    "createdAt",
+    "startedAt",
+    "finishedAt",
+    "updatedAt",
+    "error",
+    "pause",
+    "origin",
+    "allowWriteConflicts",
+    "starts",
+    "fuseOverride",
+    "repeatRoundExtensions",
+    "pendingRevision",
+    "nodes",
+    "sessions",
+    "gates",
+    "holds",
+    "repeats",
+    "spawnIntents"
+  ],
+  "additionalProperties": false,
+  "$defs": {
+    "Arrays_": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "allOf": [
+          {
+            "minLength": 1
+          }
+        ]
+      },
+      "allOf": [
+        {
+          "minItems": 1
+        }
+      ]
+    },
+    "Objects_": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string"
+      }
+    },
+    "Arrays_1": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "Union_": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "mode": {
+              "type": "string",
+              "enum": [
+                "shared"
+              ]
+            },
+            "path": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "vcs": {
+              "type": "string",
+              "enum": [
+                "git",
+                "plastic",
+                "other",
+                "none"
+              ]
+            },
+            "writes": {
+              "$ref": "#/$defs/Arrays_1"
+            },
+            "exclusiveResources": {
+              "$ref": "#/$defs/Arrays_1"
+            }
+          },
+          "required": [
+            "mode",
+            "path",
+            "vcs",
+            "writes",
+            "exclusiveResources"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "mode": {
+              "type": "string",
+              "enum": [
+                "existing"
+              ]
+            },
+            "path": {
+              "type": "string",
+              "allOf": [
+                {
+                  "minLength": 1
+                }
+              ]
+            },
+            "vcs": {
+              "type": "string",
+              "enum": [
+                "git",
+                "plastic",
+                "other",
+                "none"
+              ]
+            },
+            "writes": {
+              "$ref": "#/$defs/Arrays_1"
+            },
+            "exclusiveResources": {
+              "$ref": "#/$defs/Arrays_1"
+            }
+          },
+          "required": [
+            "mode",
+            "path",
+            "vcs",
+            "writes",
+            "exclusiveResources"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "mode": {
+              "type": "string",
+              "enum": [
+                "git-worktree"
+              ]
+            },
+            "path": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "vcs": {
+              "type": "string",
+              "enum": [
+                "git"
+              ]
+            },
+            "git": {
+              "type": "object",
+              "properties": {
+                "branch": {
+                  "type": "string"
+                },
+                "startPoint": {
+                  "type": "string"
+                },
+                "removeOnClean": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "branch",
+                "startPoint",
+                "removeOnClean"
+              ],
+              "additionalProperties": false
+            },
+            "writes": {
+              "$ref": "#/$defs/Arrays_1"
+            },
+            "exclusiveResources": {
+              "$ref": "#/$defs/Arrays_1"
+            }
+          },
+          "required": [
+            "mode",
+            "path",
+            "vcs",
+            "git",
+            "writes",
+            "exclusiveResources"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "Arrays_2": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "from": {
+            "type": "string",
+            "allOf": [
+              {
+                "minLength": 1
+              }
+            ]
+          },
+          "as": {
+            "type": "string",
+            "allOf": [
+              {
+                "minLength": 1
+              }
+            ]
+          },
+          "include": {
+            "type": "string",
+            "enum": [
+              "content",
+              "path"
+            ]
+          },
+          "round": {
+            "type": "string",
+            "enum": [
+              "current",
+              "previous"
+            ]
+          }
+        },
+        "required": [
+          "from",
+          "as",
+          "include",
+          "round"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "Objects_1": {
+      "type": "object",
+      "properties": {
+        "maxAttempts": {
+          "type": "integer",
+          "allOf": [
+            {
+              "exclusiveMinimum": 0
+            }
+          ]
+        }
+      },
+      "required": [
+        "maxAttempts"
+      ],
+      "additionalProperties": false
+    },
+    "Objects_2": {
+      "type": "object",
+      "properties": {
+        "mode": {
+          "type": "string",
+          "enum": [
+            "fresh",
+            "resume",
+            "fork"
+          ]
+        },
+        "from": {
+          "anyOf": [
+            {
+              "type": "string",
+              "allOf": [
+                {
+                  "minLength": 1
+                }
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "saveAs": {
+          "anyOf": [
+            {
+              "type": "string",
+              "allOf": [
+                {
+                  "minLength": 1
+                }
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "mode",
+        "from",
+        "saveAs"
+      ],
+      "additionalProperties": false
+    },
+    "Objects_3": {
+      "type": "object",
+      "properties": {
+        "format": {
+          "type": "string",
+          "enum": [
+            "text",
+            "json"
+          ]
+        },
+        "schema": {
+          "anyOf": [
+            {
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "format",
+        "schema"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

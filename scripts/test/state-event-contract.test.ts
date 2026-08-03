@@ -1,0 +1,162 @@
+import { Ajv2020 } from "ajv/dist/2020.js"
+import { describe, expect, test } from "bun:test"
+import path from "node:path"
+
+import type { EventRecord, RunState } from "../src/types.js"
+
+import eventSchema from "../../references/event.schema.json" with { type: "json" }
+import stateSchema from "../../references/state.schema.json" with { type: "json" }
+import { applyStatePatch, diffState, replayEvents } from "../src/state-patch.js"
+
+function state(overrides: Partial<RunState> = {}): RunState {
+  return {
+    runtimeVersion: "test-build",
+    sequence: 1,
+    id: "20260802120000-1234abcd",
+    workflowName: "state-test",
+    objective: "Prove state and journal replay.",
+    digest: "a".repeat(64),
+    status: "running",
+    createdAt: "2026-08-02T12:00:00.000Z",
+    startedAt: "2026-08-02T12:00:00.000Z",
+    finishedAt: null,
+    updatedAt: "2026-08-02T12:00:00.000Z",
+    error: null,
+    pause: null,
+    origin: null,
+    allowWriteConflicts: false,
+    starts: 0,
+    fuseOverride: false,
+    repeatRoundExtensions: {},
+    pendingRevision: null,
+    nodes: {},
+    sessions: {},
+    gates: {},
+    holds: {},
+    repeats: {},
+    spawnIntents: {},
+    ...overrides
+  }
+}
+
+function event(after: RunState, before: RunState | null, type: EventRecord["type"]): EventRecord {
+  return {
+    runtimeVersion: after.runtimeVersion,
+    sequence: after.sequence,
+    timestamp: after.updatedAt,
+    runId: after.id,
+    type,
+    message: type,
+    patch: diffState(before, after)
+  }
+}
+
+describe("state and event contract", () => {
+  test("validates canonical records and replays the exact state", () => {
+    const first = state()
+    const paused = state({
+      sequence: 2,
+      status: "paused",
+      updatedAt: "2026-08-02T12:01:00.000Z",
+      pause: {
+        kind: "human",
+        message: "Paused by the human.",
+        repeatId: null,
+        createdAt: "2026-08-02T12:01:00.000Z"
+      }
+    })
+    const events = [event(first, null, "run.started"), event(paused, first, "run.paused")]
+    const validateState = new Ajv2020({ allErrors: true, strict: false }).compile(stateSchema)
+    const validateEvent = new Ajv2020({ allErrors: true, strict: false }).compile(eventSchema)
+
+    expect(validateState(first)).toBe(true)
+    expect(events.every((record) => validateEvent(record))).toBe(true)
+    expect(events[0]!.patch).toEqual([{ op: "add", path: "", value: first }])
+    expect(replayEvents(events)).toEqual(paused)
+  })
+
+  test("rejects invalid patch pointers before replay", () => {
+    const first = state()
+    const invalid: EventRecord = {
+      ...event(first, null, "run.started"),
+      patch: [{ op: "replace", path: "/bad~2escape", value: "broken" }]
+    }
+    const validateEvent = new Ajv2020({ allErrors: true, strict: false }).compile(eventSchema)
+    expect(validateEvent(invalid)).toBe(false)
+    expect(() => applyStatePatch(first, invalid.patch)).toThrow("Invalid state patch path")
+  })
+
+  test("rejects non-canonical array indices during replay", () => {
+    const first = state({
+      pendingRevision: {
+        workflow: {} as never,
+        digest: "b".repeat(64),
+        summary: ["first"],
+        createdAt: "2026-08-02T12:00:00.000Z"
+      }
+    })
+    for (const index of ["0junk", "00", "+0", "-0"]) {
+      expect(() =>
+        applyStatePatch(first, [
+          { op: "replace", path: `/pendingRevision/summary/${index}`, value: "tampered" }
+        ])
+      ).toThrow(`invalid array index "${index}"`)
+    }
+    expect(
+      applyStatePatch(first, [
+        { op: "replace", path: "/pendingRevision/summary/0", value: "canonical" }
+      ]).pendingRevision?.summary
+    ).toEqual(["canonical"])
+  })
+
+  test("replays completed outcome and downstream hold as separate exact records", () => {
+    const base = state()
+    const completed = state({
+      sequence: 2,
+      updatedAt: "2026-08-02T12:01:00.000Z"
+    })
+    const held = state({
+      sequence: 3,
+      updatedAt: "2026-08-02T12:01:00.000Z",
+      holds: {
+        work: {
+          target: "work",
+          scope: "instance",
+          setAt: "2026-08-02T12:01:00.000Z"
+        }
+      }
+    })
+    const events = [
+      event(base, null, "run.started"),
+      event(completed, base, "node.completed"),
+      event(held, completed, "hold.set")
+    ]
+    const validateEvent = new Ajv2020({ allErrors: true, strict: false }).compile(eventSchema)
+
+    expect(events.every((record) => validateEvent(record))).toBe(true)
+    expect(replayEvents(events)).toEqual(held)
+    expect(events[1]?.patch.some((operation) => operation.path === "/holds")).toBe(false)
+    expect(events[2]?.patch).toEqual([
+      { op: "add", path: "/holds/work", value: held.holds.work },
+      { op: "replace", path: "/sequence", value: 3 }
+    ])
+  })
+
+  test("omits the removed compound vocabulary from source, tests, schemas, and documents", async () => {
+    const compound = ["completed", "held"].join("-")
+    const roots = ["scripts/src", "scripts/test", "references", "agents", "herdr-plugin"] as const
+    const files = ["README.md", "SKILL.md", "scripts/orchestrate.mjs"]
+    const repositoryRoot = path.resolve(import.meta.dir, "../..")
+    for (const root of roots) {
+      const glob = new Bun.Glob("**/*.{ts,json,md,yaml,toml}")
+      for await (const relative of glob.scan({ cwd: path.join(repositoryRoot, root) })) {
+        files.push(`${root}/${relative}`)
+      }
+    }
+    for (const file of files) {
+      expect(await Bun.file(path.join(repositoryRoot, file)).text()).not.toContain(compound)
+    }
+    expect(JSON.stringify(stateSchema)).not.toContain(compound)
+    expect(JSON.stringify(eventSchema)).not.toContain(compound)
+  })
+})

@@ -1,0 +1,147 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "runtimeVersion": {
+      "type": "string",
+      "allOf": [
+        {
+          "minLength": 1
+        }
+      ]
+    },
+    "sequence": {
+      "type": "integer",
+      "allOf": [
+        {
+          "exclusiveMinimum": 0
+        }
+      ]
+    },
+    "timestamp": {
+      "type": "string",
+      "allOf": [
+        {
+          "minLength": 1
+        }
+      ]
+    },
+    "runId": {
+      "type": "string",
+      "allOf": [
+        {
+          "minLength": 1
+        }
+      ]
+    },
+    "type": {
+      "type": "string",
+      "enum": [
+        "run.started",
+        "run.paused",
+        "run.resumed",
+        "run.completed",
+        "run.failed",
+        "run.stopped",
+        "node.ready",
+        "node.spawn-planned",
+        "node.started",
+        "node.completed",
+        "node.failed",
+        "node.retrying",
+        "node.cancelled",
+        "gate.opened",
+        "gate.approved",
+        "hold.set",
+        "hold.released",
+        "revision.proposed",
+        "revision.approved",
+        "revision.discarded",
+        "repeat.round-started",
+        "repeat.completed",
+        "repeat.max-rounds",
+        "ui.degraded"
+      ]
+    },
+    "message": {
+      "type": "string"
+    },
+    "nodeId": {
+      "type": "string",
+      "allOf": [
+        {
+          "minLength": 1
+        }
+      ]
+    },
+    "data": {},
+    "patch": {
+      "type": "array",
+      "items": {
+        "anyOf": [
+          {
+            "type": "object",
+            "properties": {
+              "op": {
+                "type": "string",
+                "enum": [
+                  "add",
+                  "replace"
+                ]
+              },
+              "path": {
+                "type": "string",
+                "allOf": [
+                  {
+                    "pattern": "^(?:\\/(?:[^~/]|~[01])*)*$"
+                  }
+                ]
+              },
+              "value": {}
+            },
+            "required": [
+              "op",
+              "path",
+              "value"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "op": {
+                "type": "string",
+                "enum": [
+                  "remove"
+                ]
+              },
+              "path": {
+                "type": "string",
+                "allOf": [
+                  {
+                    "pattern": "^(?:\\/(?:[^~/]|~[01])*)*$"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "op",
+              "path"
+            ],
+            "additionalProperties": false
+          }
+        ]
+      }
+    }
+  },
+  "required": [
+    "runtimeVersion",
+    "sequence",
+    "timestamp",
+    "runId",
+    "type",
+    "message",
+    "patch"
+  ],
+  "additionalProperties": false
+}

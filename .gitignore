@@ -22,6 +22,7 @@
 **/coverage/
 **/*.tsbuildinfo
 
-# Orchestrate build intermediates and local review state
+# Orchestrate build intermediates
 /scripts/orchestrate.mjs.map
-/.orchestrate-review.json
+/scripts/dist/
+/scripts/.*.bun-build

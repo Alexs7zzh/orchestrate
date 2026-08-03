@@ -1,28 +1,31 @@
-export type Provider = "codex" | "claude" | "mock"
-export type NodeType = "agent" | "command" | "supervisor"
-export type RunStatus =
-  | "starting"
+export type Provider = "codex" | "claude"
+export type NodeType = "agent" | "command"
+export type NodeOrigin = "initial" | "loop-round"
+export type NodeLevel = "root" | "child"
+export type RunStatus = "running" | "paused" | "completed" | "failed" | "stopped"
+export type NodeStatus =
+  | "pending"
+  | "ready"
   | "running"
-  | "pausing"
-  | "paused"
+  | "awaiting-approval"
   | "completed"
   | "failed"
-  // Retained for stored-run compatibility; current workers settle stop directly.
-  | "stopping"
-  | "stopped"
+  | "cancelled"
+  | "paused"
 
 export interface InputSpec {
   readonly from: string
   readonly as: string
   readonly include: "content" | "path"
+  // A previous-round input is omitted in round one. It is valid only when
+  // both nodes belong to the same repeat group.
+  readonly round: "current" | "previous"
 }
 
 export interface SessionSpec {
   readonly mode: "fresh" | "resume" | "fork"
   readonly from: string | null
   readonly saveAs: string | null
-  readonly retain: boolean
-  readonly reuseOnRepeat: boolean
 }
 
 export interface GitWorktreeSpec {
@@ -61,10 +64,11 @@ export type WorkspaceSpec = SharedWorkspace | ExistingWorkspace | GitWorktreeWor
 
 export interface RetrySpec {
   readonly maxAttempts: number
-  readonly delaySeconds: number
 }
 
-export type CodexSandbox = "read-only" | "workspace-write" | "danger-full-access"
+export type CodexSandbox = "read-only" | "workspace-write"
+export type CodexPermissionCeiling = CodexSandbox | "danger-full-access"
+export type AgentEscalation = "deny" | "ask-user" | "auto-review"
 export type ClaudePermissionMode =
   | "acceptEdits"
   | "auto"
@@ -74,22 +78,23 @@ export type ClaudePermissionMode =
   | "plan"
 
 interface PermissionsCommon {
+  readonly escalation: AgentEscalation
   readonly extraArgs: readonly string[]
   readonly inheritEnv: readonly string[]
   readonly env: Readonly<Record<string, string>>
 }
 
 export interface CodexPermissions extends PermissionsCommon {
-  readonly sandbox: CodexSandbox
+  readonly execution: {
+    readonly sandbox: CodexSandbox
+  }
 }
 
 export interface ClaudePermissions extends PermissionsCommon {
-  readonly permissionMode: ClaudePermissionMode
+  readonly execution: {
+    readonly permissionMode: ClaudePermissionMode
+  }
 }
-
-export type MockPermissions = PermissionsCommon
-
-export type AgentPermissions = CodexPermissions | ClaudePermissions | MockPermissions
 
 export interface OutputSpec {
   readonly format: "text" | "json"
@@ -104,7 +109,6 @@ export interface CommonNode {
   readonly cwd: string | null
   readonly workspace: WorkspaceSpec
   readonly inputs: readonly InputSpec[]
-  readonly timeoutMinutes: number | null
   readonly retry: RetrySpec
   readonly gate: "none" | "approval"
 }
@@ -116,9 +120,6 @@ interface AgentFields extends CommonNode {
   readonly prompt: string
   readonly session: SessionSpec
   readonly output: OutputSpec
-  // true runs the node as the provider's real interactive TUI in a herdr pane;
-  // completion is signaled by the prompt contract via `orchestrate node-done`.
-  readonly interactive: boolean
 }
 
 export interface CodexAgentNode extends AgentFields {
@@ -131,12 +132,7 @@ export interface ClaudeAgentNode extends AgentFields {
   readonly permissions: ClaudePermissions
 }
 
-export interface MockAgentNode extends AgentFields {
-  readonly provider: "mock"
-  readonly permissions: MockPermissions
-}
-
-export type AgentNode = CodexAgentNode | ClaudeAgentNode | MockAgentNode
+export type AgentNode = CodexAgentNode | ClaudeAgentNode
 
 export interface CommandNode extends CommonNode {
   readonly type: "command"
@@ -147,77 +143,36 @@ export interface CommandNode extends CommonNode {
   readonly allowedExitCodes: readonly number[]
 }
 
-export interface AdaptiveEnvelope {
-  readonly providers: readonly Provider[]
-  readonly models: readonly string[]
-  readonly nodeTypes: readonly ("agent" | "command")[]
-  readonly cwdRoots: readonly string[]
-  readonly writeRoots: readonly string[]
-  readonly workspaceModes: readonly WorkspaceSpec["mode"][]
-  readonly vcs: readonly WorkspaceSpec["vcs"][]
-  readonly gitWorktree: {
-    readonly allowed: boolean
-    readonly branchPrefixes: readonly string[]
-    readonly startPoints: readonly string[]
-    readonly allowRemoveOnClean: boolean
-  }
-  readonly allowCommands: boolean
-  readonly commandArgvPrefixes: readonly (readonly string[])[]
-  readonly allowedCommandEnv: readonly Readonly<Record<string, string>>[]
-  readonly codexSandboxes: readonly ("read-only" | "workspace-write" | "danger-full-access")[]
-  readonly claudePermissionModes: readonly (
-    | "acceptEdits"
-    | "auto"
-    | "bypassPermissions"
-    | "dontAsk"
-    | "manual"
-    | "plan"
-  )[]
-  readonly allowedExtraArgs: readonly (readonly string[])[]
-  readonly allowedInheritedEnv: readonly (readonly string[])[]
-  readonly allowedProviderEnv: readonly Readonly<Record<string, string>>[]
-  readonly resumableSessionAliases: readonly string[]
-  readonly newSessionAliasPrefixes: readonly string[]
-  readonly maxAddedNodesPerRound: number | null
+export type WorkflowNode = AgentNode | CommandNode
+
+export interface CommandSuccessCondition {
+  readonly type: "command-success"
+  // A listed allowed exit code settles the repeat. Any other numeric exit
+  // completes the round as not clean and starts the next round; retry applies
+  // only when the command pane cannot produce an exit result.
+  readonly node: string
 }
 
-export interface GoalTermination {
-  readonly success: string
-  readonly convergence: string
-  readonly maxRounds: number | null
-  readonly maxWallTimeMinutes: number | null
+export interface AgentOutputCondition {
+  readonly type: "agent-output"
+  readonly node: string
+  // RFC 6901 JSON pointer into the schema-validated result document.
+  readonly pointer: string
+  readonly equals: unknown
 }
 
-interface SupervisorFields extends CommonNode {
-  readonly type: "supervisor"
-  readonly model: string
-  readonly effort: string | null
-  readonly prompt: string
-  readonly session: SessionSpec
-  readonly goal: string
-  readonly envelope: AdaptiveEnvelope
-  readonly termination: GoalTermination
+export type RepeatCondition = CommandSuccessCondition | AgentOutputCondition
+
+export interface RepeatSpec {
+  readonly id: string
+  readonly members: readonly string[]
+  readonly until: RepeatCondition
+  readonly maxRounds: number
 }
 
-export interface CodexSupervisorNode extends SupervisorFields {
-  readonly provider: "codex"
-  readonly permissions: CodexPermissions
-}
-
-export interface ClaudeSupervisorNode extends SupervisorFields {
-  readonly provider: "claude"
-  readonly permissions: ClaudePermissions
-}
-
-export interface MockSupervisorNode extends SupervisorFields {
-  readonly provider: "mock"
-  readonly permissions: MockPermissions
-}
-
-export type SupervisorNode = CodexSupervisorNode | ClaudeSupervisorNode | MockSupervisorNode
-
-export type WorkflowNode = AgentNode | CommandNode | SupervisorNode
-export type DynamicNode = AgentNode | CommandNode
+// A dependency from outside a repeat to one of its members is a dependency on
+// the whole repeat. It releases only when the repeat settles, and an input from
+// that member resolves to its final-round instance.
 
 export interface CallbackNone {
   readonly type: "none"
@@ -243,24 +198,19 @@ export interface CallbackNotification {
 export type CallbackSpec = CallbackNone | CallbackCommand | CallbackWebhook | CallbackNotification
 
 export interface WorkflowSpec {
-  readonly version: 1
   readonly name: string
   readonly objective: string
   readonly cwd: string
+  // Maximum simultaneously open node panes. This is a human-attention budget.
   readonly concurrency: number
-  readonly heartbeat: {
-    readonly intervalMinutes: number | null
-    readonly milestones: boolean
-    readonly callback: CallbackSpec
-  }
+  readonly callback: CallbackSpec
+  readonly milestones: boolean
   readonly limits: {
-    readonly nodeWallTimeMinutes: number | null
-    readonly workflowWallTimeMinutes: number | null
-    readonly maxAgentStarts: number | null
-    readonly maxGoalRounds: number | null
+    readonly maxStarts: number | null
   }
   readonly writeConflicts: "reject" | "allow-with-approval"
   readonly nodes: readonly WorkflowNode[]
+  readonly repeats: readonly RepeatSpec[]
 }
 
 export interface ValidationIssue {
@@ -276,51 +226,84 @@ export interface ValidationResult {
   readonly digest: string | null
 }
 
-export type NodeStatus = "pending" | "running" | "completed" | "failed" | "cancelled"
-
-// The pending-interactive record for one attempt of an interactive agent node:
-// the one-time node-done token, the hosting herdr pane, and idle-nudge state.
-// Present only while the attempt awaits its node-done call.
-export interface InteractiveAttemptState {
-  readonly token: string
-  readonly paneId: string | null
-  readonly attempt: number
-  readonly startedAt: string
-  readonly idleSince: string | null
+export interface PaneReference {
+  readonly workspaceId: string
+  readonly tabId: string
+  readonly paneId: string
+  readonly group: string
+  readonly surface: "tab" | "split"
 }
 
-export interface NodeRunState {
-  readonly id: string
-  readonly status: NodeStatus
-  readonly attempts: number
+export interface AttemptState {
+  readonly attempt: number
+  readonly status: "planned" | "running" | "completed" | "failed" | "cancelled"
+  readonly token: string
+  readonly pane: PaneReference | null
+  readonly providerSessionId: string | null
   readonly startedAt: string | null
   readonly finishedAt: string | null
   readonly exitCode: number | null
   readonly error: string | null
-  readonly resultPath: string | null
-  readonly sessionId: string | null
-  readonly workspacePath: string | null
-  readonly processPid: number | null
-  readonly processIdentity: ProcessIdentity | null
-  // Optional so runs recorded before interactive nodes existed parse cleanly.
-  readonly interactive?: InteractiveAttemptState | null
+  readonly resultPath: string
+  readonly outputPath: string
 }
 
-export interface ProcessIdentity {
-  readonly startedAt: string
-  readonly commandDigest: string
-  readonly executable: string
+export interface NodeRunState {
+  readonly id: string
+  readonly templateId: string
+  readonly title: string
+  readonly type: NodeType
+  readonly provider: Provider | null
+  readonly needs: readonly string[]
+  readonly origin: NodeOrigin
+  readonly repeatId: string | null
+  readonly round: number | null
+  readonly status: NodeStatus
+  readonly attempts: readonly AttemptState[]
+  readonly resultPath: string | null
+  readonly result: unknown
+  readonly error: string | null
 }
 
 export interface SessionState {
   readonly alias: string
   readonly provider: Provider
   readonly sessionId: string
+  readonly sourceNodeId: string
 }
 
-// A human-authored replacement for the remaining plan of a paused run: the
-// complete revised workflow document (canonical form) awaiting digest-bound
-// approval via `orchestrate resume --approve-revision`.
+export interface GateState {
+  readonly nodeId: string
+  readonly title: string
+  readonly content: string
+  readonly digest: string
+  readonly openedAt: string
+  readonly approvedAt: string | null
+}
+
+export interface HoldState {
+  readonly target: string
+  readonly scope: "template" | "instance"
+  readonly setAt: string
+}
+
+export interface RepeatRunState {
+  readonly id: string
+  readonly round: number
+  readonly status: "pending" | "running" | "completed" | "max-rounds"
+  readonly instanceIds: readonly string[]
+  readonly completedAt: string | null
+}
+
+export interface SpawnIntent {
+  readonly id: string
+  readonly nodeId: string
+  readonly attempt: number
+  readonly token: string
+  readonly status: "planned" | "spawned"
+  readonly createdAt: string
+}
+
 export interface PendingRevision {
   readonly workflow: WorkflowSpec
   readonly digest: string
@@ -328,87 +311,230 @@ export interface PendingRevision {
   readonly createdAt: string
 }
 
+export interface PauseState {
+  readonly kind: "human" | "fuse" | "max-rounds"
+  readonly message: string
+  readonly repeatId: string | null
+  readonly createdAt: string
+}
+
+export interface RunOrigin {
+  readonly workspaceId: string
+  readonly tabId: string
+  readonly paneId: string
+  readonly provider: Provider
+  readonly sessionId: string
+}
+
 export interface RunState {
+  readonly runtimeVersion: string
+  readonly sequence: number
   readonly id: string
-  readonly contractVersion: number
   readonly workflowName: string
   readonly objective: string
   readonly digest: string
   readonly status: RunStatus
   readonly createdAt: string
-  readonly startedAt: string | null
+  readonly startedAt: string
   readonly finishedAt: string | null
   readonly updatedAt: string
-  readonly pid: number | null
-  readonly workerToken: string | null
   readonly error: string | null
-  readonly pauseReason: string | null
-  readonly pauseCode: string | null
+  readonly pause: PauseState | null
+  readonly origin: RunOrigin | null
   readonly allowWriteConflicts: boolean
-  readonly emergencyFuseOverride: boolean
-  // Presentation-only mirroring choice (never part of the approved workflow
-  // or its digest); optional so runs recorded before this field parse cleanly.
-  readonly mirror?: "herdr" | null
-  readonly stopRequested: boolean
-  readonly agentStarts: number
-  readonly goalRounds: Readonly<Record<string, number>>
-  readonly supervisorStartedAt: Readonly<Record<string, string>>
-  readonly supervisorBarriers: Readonly<Record<string, readonly string[]>>
-  readonly overriddenLimits: readonly string[]
-  readonly pendingPatch: {
-    readonly supervisorId: string
-    readonly decision: SupervisorDecision
-    readonly reasons: readonly string[]
-    readonly digest: string
-  } | null
-  readonly pendingInput: {
-    readonly supervisorId: string
-    readonly reason: string
-    readonly digest: string
-  } | null
-  // A pending human mid-run revision proposed with `orchestrate revise`;
-  // optional so runs recorded before revisions existed parse cleanly.
-  readonly pendingRevision?: PendingRevision | null
-  // A gated node that became runnable: the run pauses before its first attempt
-  // and the fully rendered content awaits digest-bound approval.
-  readonly pendingGate: {
-    readonly nodeId: string
-    readonly title: string
-    readonly content: string
-    readonly digest: string
-  } | null
-  readonly approvedPendingGate: boolean
-  // Node ids whose approval gate was satisfied; the scheduler launches them
-  // like ungated nodes from then on (retries and later supervisor rounds do
-  // not re-gate).
-  readonly satisfiedGates: readonly string[]
-  readonly supervisorResponses: Readonly<
-    Record<
-      string,
-      {
-        readonly message: string
-        readonly inputDigest: string
-        readonly respondedAt: string
-      }
-    >
-  >
-  readonly approvedPendingPatch: boolean
+  readonly starts: number
+  readonly fuseOverride: boolean
+  readonly repeatRoundExtensions: Readonly<Record<string, number>>
+  readonly pendingRevision: PendingRevision | null
   readonly nodes: Readonly<Record<string, NodeRunState>>
   readonly sessions: Readonly<Record<string, SessionState>>
-  readonly dynamicNodes: readonly DynamicNode[]
+  readonly gates: Readonly<Record<string, GateState>>
+  readonly holds: Readonly<Record<string, HoldState>>
+  readonly repeats: Readonly<Record<string, RepeatRunState>>
+  readonly spawnIntents: Readonly<Record<string, SpawnIntent>>
 }
 
-export interface SupervisorDecision {
-  readonly status: "complete" | "continue" | "pause"
-  readonly reason: string
-  readonly addNodes: readonly DynamicNode[]
-}
+export type EventType =
+  | "run.started"
+  | "run.paused"
+  | "run.resumed"
+  | "run.completed"
+  | "run.failed"
+  | "run.stopped"
+  | "node.ready"
+  | "node.spawn-planned"
+  | "node.started"
+  | "node.completed"
+  | "node.failed"
+  | "node.retrying"
+  | "node.cancelled"
+  | "gate.opened"
+  | "gate.approved"
+  | "hold.set"
+  | "hold.released"
+  | "revision.proposed"
+  | "revision.approved"
+  | "revision.discarded"
+  | "repeat.round-started"
+  | "repeat.completed"
+  | "repeat.max-rounds"
+  | "ui.degraded"
 
+export type StatePatchOperation =
+  | { readonly op: "add" | "replace"; readonly path: string; readonly value: unknown }
+  | { readonly op: "remove"; readonly path: string }
+
+// Journal patches use RFC 6902 paths. The first run.started record adds the
+// complete initial state at the document root; later records contain only the
+// mutations caused by that event, so replay is exact without duplicating the
+// growing state document in every line.
 export interface EventRecord {
+  readonly runtimeVersion: string
+  readonly sequence: number
   readonly timestamp: string
   readonly runId: string
-  readonly type: string
+  readonly type: EventType
   readonly message: string
   readonly nodeId?: string
   readonly data?: unknown
+  readonly patch: readonly StatePatchOperation[]
+}
+
+export type EventSeverity = "attention" | "milestone" | "progress"
+export type NotificationChannel = "herdr" | "board" | "silent"
+
+export interface NodeMatcher {
+  readonly type: NodeType | "any"
+  readonly provider: Provider | "any"
+  readonly level: NodeLevel | "any"
+  readonly origin: NodeOrigin | "any"
+  readonly id: string
+}
+
+export interface PlacementRule {
+  readonly match: NodeMatcher
+  readonly surface: "tab" | "split"
+}
+
+export interface ContinueRule {
+  readonly match: NodeMatcher
+  readonly autoContinue: boolean
+}
+
+export interface UiPreferences {
+  readonly board: "split-right" | "dedicated-workspace" | "current-workspace"
+  readonly placement: {
+    readonly workspace: "dedicated" | "origin"
+    readonly rules: readonly PlacementRule[]
+    readonly grouping:
+      | { readonly by: "root-ancestor" }
+      | { readonly by: "id-prefix"; readonly separator: string }
+    readonly maxSplitsPerTab: number
+  }
+  readonly completedPanes: {
+    readonly agent: "keep-open" | "close-success"
+    readonly command: "keep-open" | "close-success"
+  }
+  readonly focus: "never" | "attention" | "always"
+  readonly continuation: {
+    readonly rules: readonly ContinueRule[]
+  }
+  readonly notifications: Readonly<Record<EventSeverity, NotificationChannel>>
+}
+
+export interface UiPreferenceLayer {
+  readonly board: UiPreferences["board"] | null
+  readonly placement: UiPreferences["placement"] | null
+  readonly completedPanes: {
+    readonly agent: UiPreferences["completedPanes"]["agent"] | null
+    readonly command: UiPreferences["completedPanes"]["command"] | null
+  }
+  readonly focus: UiPreferences["focus"] | null
+  readonly continuation: UiPreferences["continuation"] | null
+  readonly notifications: {
+    readonly attention: NotificationChannel | null
+    readonly milestone: NotificationChannel | null
+    readonly progress: NotificationChannel | null
+  }
+}
+
+export interface PreferenceScope {
+  readonly updatedAt: string
+  readonly ui: UiPreferenceLayer
+}
+
+export interface ProjectPreference extends PreferenceScope {
+  readonly cwd: string
+}
+
+export interface PreferencesFile {
+  readonly updatedAt: string
+  readonly global: PreferenceScope
+  readonly projects: Readonly<Record<string, ProjectPreference>>
+}
+
+export type CrankEvent =
+  | { readonly type: "run" }
+  | { readonly type: "reconcile" }
+  | {
+      readonly type: "node-done"
+      readonly nodeId: string
+      readonly token: string
+      readonly outcome: "completed" | "failed"
+      readonly hold: boolean
+      readonly result: unknown
+      readonly error: string | null
+      readonly providerSessionId: string | null
+    }
+  | {
+      readonly type: "node-exit"
+      readonly nodeId: string
+      readonly token: string
+      readonly code: number
+      readonly error: string | null
+      readonly result?: string | null
+    }
+  | {
+      readonly type: "spawn-observed"
+      readonly nodeId: string
+      readonly intentId: string
+      readonly pane: PaneReference
+      readonly providerSessionId: string | null
+    }
+  | {
+      readonly type: "spawn-failed"
+      readonly nodeId: string
+      readonly intentId: string
+      readonly error: string
+    }
+  | { readonly type: "approve-gate"; readonly nodeId: string; readonly digest: string }
+  | {
+      readonly type: "propose-revision"
+      readonly workflow: WorkflowSpec
+      readonly digest: string
+      readonly summary: readonly string[]
+    }
+  | { readonly type: "approve-revision"; readonly digest: string }
+  | { readonly type: "discard-revision" }
+  | { readonly type: "pause" }
+  | {
+      readonly type: "resume"
+      readonly overrideFuse: boolean
+      readonly continueRounds: number | null
+      readonly acceptRepeat: string | null
+    }
+  | { readonly type: "stop" }
+  | { readonly type: "hold"; readonly nodeId: string }
+  | { readonly type: "release"; readonly nodeId: string }
+  | { readonly type: "restore"; readonly deadPaneIds: readonly string[] }
+
+export type CrankAction =
+  | { readonly type: "close-pane"; readonly paneId: string }
+  | { readonly type: "open-board" }
+
+export interface TransitionResult {
+  readonly workflow: WorkflowSpec
+  readonly state: RunState
+  readonly actions: readonly CrankAction[]
+  readonly events: readonly EventRecord[]
 }

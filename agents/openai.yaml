@@ -1,6 +1,6 @@
 interface:
   display_name: "Orchestrate"
-  short_description: "Design and run adaptive multi-agent workflows"
-  default_prompt: "Use $orchestrate to design a validated workflow, present a concise approval brief, wait for approval, and continue through its harness wake path."
+  short_description: "Design and run durable agent workflow graphs"
+  default_prompt: "Use $orchestrate to design a validated workflow, present its approval digest, wait for approval, start the run, and report the run ID. node-done writes only the authenticated submission; Herdr's trusted plugin event hook wakes this agent when a workflow node becomes blocked or done. Then run orchestrate reconcile to advance the workflow."
 policy:
   allow_implicit_invocation: true

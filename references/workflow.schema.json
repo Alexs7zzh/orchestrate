@@ -2,20 +2,29 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "type": "object",
   "properties": {
-    "version": {
-      "type": "number",
-      "enum": [
-        1
+    "name": {
+      "type": "string",
+      "allOf": [
+        {
+          "minLength": 1
+        }
       ]
     },
-    "name": {
-      "type": "string"
-    },
     "objective": {
-      "type": "string"
+      "type": "string",
+      "allOf": [
+        {
+          "minLength": 1
+        }
+      ]
     },
     "cwd": {
-      "type": "string"
+      "type": "string",
+      "allOf": [
+        {
+          "minLength": 1
+        }
+      ]
     },
     "concurrency": {
       "type": "integer",
@@ -25,189 +34,112 @@
         }
       ]
     },
-    "heartbeat": {
-      "type": "object",
-      "properties": {
-        "intervalMinutes": {
-          "anyOf": [
-            {
+    "callback": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "enum": [
+                "none"
+              ]
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "enum": [
+                "command"
+              ]
+            },
+            "argv": {
+              "$ref": "#/$defs/Arrays_"
+            },
+            "timeoutSeconds": {
               "type": "number",
               "allOf": [
                 {
                   "exclusiveMinimum": 0
                 }
               ]
-            },
-            {
-              "type": "null"
             }
-          ]
+          },
+          "required": [
+            "type",
+            "argv",
+            "timeoutSeconds"
+          ],
+          "additionalProperties": false
         },
-        "milestones": {
-          "type": "boolean"
-        },
-        "callback": {
-          "anyOf": [
-            {
-              "type": "object",
-              "properties": {
-                "type": {
-                  "type": "string",
-                  "enum": [
-                    "none"
-                  ]
-                }
-              },
-              "required": [
-                "type"
-              ],
-              "additionalProperties": false
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "enum": [
+                "webhook"
+              ]
             },
-            {
-              "type": "object",
-              "properties": {
-                "type": {
-                  "type": "string",
-                  "enum": [
-                    "command"
-                  ]
-                },
-                "argv": {
-                  "type": "array",
-                  "items": {
-                    "type": "string",
-                    "allOf": [
-                      {
-                        "minLength": 1
-                      }
-                    ]
-                  }
-                },
-                "timeoutSeconds": {
-                  "type": "number",
-                  "allOf": [
-                    {
-                      "exclusiveMinimum": 0
-                    }
-                  ]
+            "url": {
+              "type": "string",
+              "allOf": [
+                {
+                  "minLength": 1
                 }
-              },
-              "required": [
-                "type",
-                "argv",
-                "timeoutSeconds"
-              ],
-              "additionalProperties": false
+              ]
             },
-            {
-              "type": "object",
-              "properties": {
-                "type": {
-                  "type": "string",
-                  "enum": [
-                    "webhook"
-                  ]
-                },
-                "url": {
-                  "type": "string"
-                },
-                "headers": {
-                  "type": "object",
-                  "additionalProperties": {
-                    "type": "string"
-                  }
-                },
-                "timeoutSeconds": {
-                  "type": "number",
-                  "allOf": [
-                    {
-                      "exclusiveMinimum": 0
-                    }
-                  ]
-                }
-              },
-              "required": [
-                "type",
-                "url",
-                "headers",
-                "timeoutSeconds"
-              ],
-              "additionalProperties": false
+            "headers": {
+              "$ref": "#/$defs/Objects_"
             },
-            {
-              "type": "object",
-              "properties": {
-                "type": {
-                  "type": "string",
-                  "enum": [
-                    "notification"
-                  ]
+            "timeoutSeconds": {
+              "type": "number",
+              "allOf": [
+                {
+                  "exclusiveMinimum": 0
                 }
-              },
-              "required": [
-                "type"
-              ],
-              "additionalProperties": false
+              ]
             }
-          ]
+          },
+          "required": [
+            "type",
+            "url",
+            "headers",
+            "timeoutSeconds"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "enum": [
+                "notification"
+              ]
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "additionalProperties": false
         }
-      },
-      "required": [
-        "intervalMinutes",
-        "milestones",
-        "callback"
-      ],
-      "additionalProperties": false
+      ]
+    },
+    "milestones": {
+      "type": "boolean"
     },
     "limits": {
       "type": "object",
       "properties": {
-        "nodeWallTimeMinutes": {
-          "anyOf": [
-            {
-              "type": "number",
-              "allOf": [
-                {
-                  "exclusiveMinimum": 0
-                }
-              ]
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "workflowWallTimeMinutes": {
-          "anyOf": [
-            {
-              "type": "number",
-              "allOf": [
-                {
-                  "exclusiveMinimum": 0
-                }
-              ]
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "maxAgentStarts": {
-          "anyOf": [
-            {
-              "type": "integer",
-              "allOf": [
-                {
-                  "exclusiveMinimum": 0
-                }
-              ]
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "maxGoalRounds": {
+        "maxStarts": {
           "anyOf": [
             {
               "type": "integer",
@@ -224,10 +156,7 @@
         }
       },
       "required": [
-        "nodeWallTimeMinutes",
-        "workflowWallTimeMinutes",
-        "maxAgentStarts",
-        "maxGoalRounds"
+        "maxStarts"
       ],
       "additionalProperties": false
     },
@@ -246,13 +175,23 @@
             "type": "object",
             "properties": {
               "id": {
-                "type": "string"
+                "type": "string",
+                "allOf": [
+                  {
+                    "minLength": 1
+                  }
+                ]
               },
               "title": {
-                "type": "string"
+                "type": "string",
+                "allOf": [
+                  {
+                    "minLength": 1
+                  }
+                ]
               },
               "needs": {
-                "$ref": "#/$defs/Arrays_"
+                "$ref": "#/$defs/Arrays_1"
               },
               "cwd": {
                 "anyOf": [
@@ -268,25 +207,10 @@
                 "$ref": "#/$defs/Union_"
               },
               "inputs": {
-                "$ref": "#/$defs/Arrays_1"
-              },
-              "timeoutMinutes": {
-                "anyOf": [
-                  {
-                    "type": "number",
-                    "allOf": [
-                      {
-                        "exclusiveMinimum": 0
-                      }
-                    ]
-                  },
-                  {
-                    "type": "null"
-                  }
-                ]
+                "$ref": "#/$defs/Arrays_2"
               },
               "retry": {
-                "$ref": "#/$defs/Objects_"
+                "$ref": "#/$defs/Objects_1"
               },
               "gate": {
                 "type": "string",
@@ -302,7 +226,12 @@
                 ]
               },
               "model": {
-                "type": "string"
+                "type": "string",
+                "allOf": [
+                  {
+                    "minLength": 1
+                  }
+                ]
               },
               "effort": {
                 "anyOf": [
@@ -318,13 +247,10 @@
                 "type": "string"
               },
               "session": {
-                "$ref": "#/$defs/Objects_1"
-              },
-              "output": {
                 "$ref": "#/$defs/Objects_2"
               },
-              "interactive": {
-                "type": "boolean"
+              "output": {
+                "$ref": "#/$defs/Objects_3"
               },
               "provider": {
                 "type": "string",
@@ -333,7 +259,50 @@
                 ]
               },
               "permissions": {
-                "$ref": "#/$defs/Objects_3"
+                "type": "object",
+                "properties": {
+                  "execution": {
+                    "type": "object",
+                    "properties": {
+                      "sandbox": {
+                        "type": "string",
+                        "enum": [
+                          "read-only",
+                          "workspace-write"
+                        ]
+                      }
+                    },
+                    "required": [
+                      "sandbox"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "escalation": {
+                    "type": "string",
+                    "enum": [
+                      "deny",
+                      "ask-user",
+                      "auto-review"
+                    ]
+                  },
+                  "extraArgs": {
+                    "$ref": "#/$defs/Arrays_1"
+                  },
+                  "inheritEnv": {
+                    "$ref": "#/$defs/Arrays_1"
+                  },
+                  "env": {
+                    "$ref": "#/$defs/Objects_"
+                  }
+                },
+                "required": [
+                  "execution",
+                  "escalation",
+                  "extraArgs",
+                  "inheritEnv",
+                  "env"
+                ],
+                "additionalProperties": false
               }
             },
             "required": [
@@ -343,7 +312,6 @@
               "cwd",
               "workspace",
               "inputs",
-              "timeoutMinutes",
               "retry",
               "gate",
               "type",
@@ -352,7 +320,6 @@
               "prompt",
               "session",
               "output",
-              "interactive",
               "provider",
               "permissions"
             ],
@@ -362,13 +329,23 @@
             "type": "object",
             "properties": {
               "id": {
-                "type": "string"
+                "type": "string",
+                "allOf": [
+                  {
+                    "minLength": 1
+                  }
+                ]
               },
               "title": {
-                "type": "string"
+                "type": "string",
+                "allOf": [
+                  {
+                    "minLength": 1
+                  }
+                ]
               },
               "needs": {
-                "$ref": "#/$defs/Arrays_"
+                "$ref": "#/$defs/Arrays_1"
               },
               "cwd": {
                 "anyOf": [
@@ -384,25 +361,10 @@
                 "$ref": "#/$defs/Union_"
               },
               "inputs": {
-                "$ref": "#/$defs/Arrays_1"
-              },
-              "timeoutMinutes": {
-                "anyOf": [
-                  {
-                    "type": "number",
-                    "allOf": [
-                      {
-                        "exclusiveMinimum": 0
-                      }
-                    ]
-                  },
-                  {
-                    "type": "null"
-                  }
-                ]
+                "$ref": "#/$defs/Arrays_2"
               },
               "retry": {
-                "$ref": "#/$defs/Objects_"
+                "$ref": "#/$defs/Objects_1"
               },
               "gate": {
                 "type": "string",
@@ -418,7 +380,12 @@
                 ]
               },
               "model": {
-                "type": "string"
+                "type": "string",
+                "allOf": [
+                  {
+                    "minLength": 1
+                  }
+                ]
               },
               "effort": {
                 "anyOf": [
@@ -434,13 +401,10 @@
                 "type": "string"
               },
               "session": {
-                "$ref": "#/$defs/Objects_1"
-              },
-              "output": {
                 "$ref": "#/$defs/Objects_2"
               },
-              "interactive": {
-                "type": "boolean"
+              "output": {
+                "$ref": "#/$defs/Objects_3"
               },
               "provider": {
                 "type": "string",
@@ -449,7 +413,54 @@
                 ]
               },
               "permissions": {
-                "$ref": "#/$defs/Objects_5"
+                "type": "object",
+                "properties": {
+                  "execution": {
+                    "type": "object",
+                    "properties": {
+                      "permissionMode": {
+                        "type": "string",
+                        "enum": [
+                          "acceptEdits",
+                          "auto",
+                          "bypassPermissions",
+                          "dontAsk",
+                          "manual",
+                          "plan"
+                        ]
+                      }
+                    },
+                    "required": [
+                      "permissionMode"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "escalation": {
+                    "type": "string",
+                    "enum": [
+                      "deny",
+                      "ask-user",
+                      "auto-review"
+                    ]
+                  },
+                  "extraArgs": {
+                    "$ref": "#/$defs/Arrays_1"
+                  },
+                  "inheritEnv": {
+                    "$ref": "#/$defs/Arrays_1"
+                  },
+                  "env": {
+                    "$ref": "#/$defs/Objects_"
+                  }
+                },
+                "required": [
+                  "execution",
+                  "escalation",
+                  "extraArgs",
+                  "inheritEnv",
+                  "env"
+                ],
+                "additionalProperties": false
               }
             },
             "required": [
@@ -459,7 +470,6 @@
               "cwd",
               "workspace",
               "inputs",
-              "timeoutMinutes",
               "retry",
               "gate",
               "type",
@@ -468,7 +478,6 @@
               "prompt",
               "session",
               "output",
-              "interactive",
               "provider",
               "permissions"
             ],
@@ -478,13 +487,23 @@
             "type": "object",
             "properties": {
               "id": {
-                "type": "string"
+                "type": "string",
+                "allOf": [
+                  {
+                    "minLength": 1
+                  }
+                ]
               },
               "title": {
-                "type": "string"
+                "type": "string",
+                "allOf": [
+                  {
+                    "minLength": 1
+                  }
+                ]
               },
               "needs": {
-                "$ref": "#/$defs/Arrays_"
+                "$ref": "#/$defs/Arrays_1"
               },
               "cwd": {
                 "anyOf": [
@@ -500,25 +519,10 @@
                 "$ref": "#/$defs/Union_"
               },
               "inputs": {
-                "$ref": "#/$defs/Arrays_1"
-              },
-              "timeoutMinutes": {
-                "anyOf": [
-                  {
-                    "type": "number",
-                    "allOf": [
-                      {
-                        "exclusiveMinimum": 0
-                      }
-                    ]
-                  },
-                  {
-                    "type": "null"
-                  }
-                ]
+                "$ref": "#/$defs/Arrays_2"
               },
               "retry": {
-                "$ref": "#/$defs/Objects_"
+                "$ref": "#/$defs/Objects_1"
               },
               "gate": {
                 "type": "string",
@@ -540,19 +544,21 @@
                 "type": "boolean"
               },
               "inheritEnv": {
-                "$ref": "#/$defs/Arrays_"
+                "$ref": "#/$defs/Arrays_1"
               },
               "env": {
-                "type": "object",
-                "additionalProperties": {
-                  "type": "string"
-                }
+                "$ref": "#/$defs/Objects_"
               },
               "allowedExitCodes": {
                 "type": "array",
                 "items": {
                   "type": "integer"
-                }
+                },
+                "allOf": [
+                  {
+                    "minItems": 1
+                  }
+                ]
               }
             },
             "required": [
@@ -562,7 +568,6 @@
               "cwd",
               "workspace",
               "inputs",
-              "timeoutMinutes",
               "retry",
               "gate",
               "type",
@@ -573,265 +578,145 @@
               "allowedExitCodes"
             ],
             "additionalProperties": false
-          },
-          {
-            "type": "object",
-            "properties": {
-              "id": {
-                "type": "string"
-              },
-              "title": {
-                "type": "string"
-              },
-              "needs": {
-                "$ref": "#/$defs/Arrays_"
-              },
-              "cwd": {
-                "anyOf": [
-                  {
-                    "type": "string"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ]
-              },
-              "workspace": {
-                "$ref": "#/$defs/Union_"
-              },
-              "inputs": {
-                "$ref": "#/$defs/Arrays_1"
-              },
-              "timeoutMinutes": {
-                "anyOf": [
-                  {
-                    "type": "number",
-                    "allOf": [
-                      {
-                        "exclusiveMinimum": 0
-                      }
-                    ]
-                  },
-                  {
-                    "type": "null"
-                  }
-                ]
-              },
-              "retry": {
-                "$ref": "#/$defs/Objects_"
-              },
-              "gate": {
-                "type": "string",
-                "enum": [
-                  "none",
-                  "approval"
-                ]
-              },
-              "type": {
-                "type": "string",
-                "enum": [
-                  "supervisor"
-                ]
-              },
-              "model": {
-                "type": "string"
-              },
-              "effort": {
-                "anyOf": [
-                  {
-                    "type": "string"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ]
-              },
-              "prompt": {
-                "type": "string"
-              },
-              "session": {
-                "$ref": "#/$defs/Objects_1"
-              },
-              "goal": {
-                "type": "string"
-              },
-              "termination": {
-                "$ref": "#/$defs/Objects_6"
-              },
-              "provider": {
-                "type": "string",
-                "enum": [
-                  "codex"
-                ]
-              },
-              "permissions": {
-                "$ref": "#/$defs/Objects_3"
-              },
-              "envelope": {
-                "$ref": "#/$defs/Objects_7"
-              }
-            },
-            "required": [
-              "id",
-              "title",
-              "needs",
-              "cwd",
-              "workspace",
-              "inputs",
-              "timeoutMinutes",
-              "retry",
-              "gate",
-              "type",
-              "model",
-              "effort",
-              "prompt",
-              "session",
-              "goal",
-              "termination",
-              "provider",
-              "permissions",
-              "envelope"
-            ],
-            "additionalProperties": false
-          },
-          {
-            "type": "object",
-            "properties": {
-              "id": {
-                "type": "string"
-              },
-              "title": {
-                "type": "string"
-              },
-              "needs": {
-                "$ref": "#/$defs/Arrays_"
-              },
-              "cwd": {
-                "anyOf": [
-                  {
-                    "type": "string"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ]
-              },
-              "workspace": {
-                "$ref": "#/$defs/Union_"
-              },
-              "inputs": {
-                "$ref": "#/$defs/Arrays_1"
-              },
-              "timeoutMinutes": {
-                "anyOf": [
-                  {
-                    "type": "number",
-                    "allOf": [
-                      {
-                        "exclusiveMinimum": 0
-                      }
-                    ]
-                  },
-                  {
-                    "type": "null"
-                  }
-                ]
-              },
-              "retry": {
-                "$ref": "#/$defs/Objects_"
-              },
-              "gate": {
-                "type": "string",
-                "enum": [
-                  "none",
-                  "approval"
-                ]
-              },
-              "type": {
-                "type": "string",
-                "enum": [
-                  "supervisor"
-                ]
-              },
-              "model": {
-                "type": "string"
-              },
-              "effort": {
-                "anyOf": [
-                  {
-                    "type": "string"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ]
-              },
-              "prompt": {
-                "type": "string"
-              },
-              "session": {
-                "$ref": "#/$defs/Objects_1"
-              },
-              "goal": {
-                "type": "string"
-              },
-              "termination": {
-                "$ref": "#/$defs/Objects_6"
-              },
-              "provider": {
-                "type": "string",
-                "enum": [
-                  "claude"
-                ]
-              },
-              "permissions": {
-                "$ref": "#/$defs/Objects_5"
-              },
-              "envelope": {
-                "$ref": "#/$defs/Objects_7"
-              }
-            },
-            "required": [
-              "id",
-              "title",
-              "needs",
-              "cwd",
-              "workspace",
-              "inputs",
-              "timeoutMinutes",
-              "retry",
-              "gate",
-              "type",
-              "model",
-              "effort",
-              "prompt",
-              "session",
-              "goal",
-              "termination",
-              "provider",
-              "permissions",
-              "envelope"
-            ],
-            "additionalProperties": false
           }
         ]
+      },
+      "allOf": [
+        {
+          "minItems": 1
+        }
+      ]
+    },
+    "repeats": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "allOf": [
+              {
+                "minLength": 1
+              }
+            ]
+          },
+          "members": {
+            "$ref": "#/$defs/Arrays_"
+          },
+          "until": {
+            "anyOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "enum": [
+                      "command-success"
+                    ]
+                  },
+                  "node": {
+                    "type": "string",
+                    "allOf": [
+                      {
+                        "minLength": 1
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "type",
+                  "node"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "enum": [
+                      "agent-output"
+                    ]
+                  },
+                  "node": {
+                    "type": "string",
+                    "allOf": [
+                      {
+                        "minLength": 1
+                      }
+                    ]
+                  },
+                  "pointer": {
+                    "type": "string"
+                  },
+                  "equals": {}
+                },
+                "required": [
+                  "type",
+                  "node",
+                  "pointer",
+                  "equals"
+                ],
+                "additionalProperties": false
+              }
+            ]
+          },
+          "maxRounds": {
+            "type": "integer",
+            "allOf": [
+              {
+                "exclusiveMinimum": 0
+              }
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "members",
+          "until",
+          "maxRounds"
+        ],
+        "additionalProperties": false
       }
     }
   },
   "required": [
-    "version",
     "name",
     "objective",
     "cwd",
     "concurrency",
-    "heartbeat",
+    "callback",
+    "milestones",
     "limits",
     "writeConflicts",
-    "nodes"
+    "nodes",
+    "repeats"
   ],
   "additionalProperties": false,
   "$defs": {
     "Arrays_": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "allOf": [
+          {
+            "minLength": 1
+          }
+        ]
+      },
+      "allOf": [
+        {
+          "minItems": 1
+        }
+      ]
+    },
+    "Objects_": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string"
+      }
+    },
+    "Arrays_1": {
       "type": "array",
       "items": {
         "type": "string"
@@ -868,10 +753,10 @@
               ]
             },
             "writes": {
-              "$ref": "#/$defs/Arrays_"
+              "$ref": "#/$defs/Arrays_1"
             },
             "exclusiveResources": {
-              "$ref": "#/$defs/Arrays_"
+              "$ref": "#/$defs/Arrays_1"
             }
           },
           "required": [
@@ -893,7 +778,12 @@
               ]
             },
             "path": {
-              "type": "string"
+              "type": "string",
+              "allOf": [
+                {
+                  "minLength": 1
+                }
+              ]
             },
             "vcs": {
               "type": "string",
@@ -905,10 +795,10 @@
               ]
             },
             "writes": {
-              "$ref": "#/$defs/Arrays_"
+              "$ref": "#/$defs/Arrays_1"
             },
             "exclusiveResources": {
-              "$ref": "#/$defs/Arrays_"
+              "$ref": "#/$defs/Arrays_1"
             }
           },
           "required": [
@@ -966,10 +856,10 @@
               "additionalProperties": false
             },
             "writes": {
-              "$ref": "#/$defs/Arrays_"
+              "$ref": "#/$defs/Arrays_1"
             },
             "exclusiveResources": {
-              "$ref": "#/$defs/Arrays_"
+              "$ref": "#/$defs/Arrays_1"
             }
           },
           "required": [
@@ -984,13 +874,18 @@
         }
       ]
     },
-    "Arrays_1": {
+    "Arrays_2": {
       "type": "array",
       "items": {
         "type": "object",
         "properties": {
           "from": {
-            "type": "string"
+            "type": "string",
+            "allOf": [
+              {
+                "minLength": 1
+              }
+            ]
           },
           "as": {
             "type": "string",
@@ -1006,17 +901,25 @@
               "content",
               "path"
             ]
+          },
+          "round": {
+            "type": "string",
+            "enum": [
+              "current",
+              "previous"
+            ]
           }
         },
         "required": [
           "from",
           "as",
-          "include"
+          "include",
+          "round"
         ],
         "additionalProperties": false
       }
     },
-    "Objects_": {
+    "Objects_1": {
       "type": "object",
       "properties": {
         "maxAttempts": {
@@ -1026,23 +929,14 @@
               "exclusiveMinimum": 0
             }
           ]
-        },
-        "delaySeconds": {
-          "type": "number",
-          "allOf": [
-            {
-              "minimum": 0
-            }
-          ]
         }
       },
       "required": [
-        "maxAttempts",
-        "delaySeconds"
+        "maxAttempts"
       ],
       "additionalProperties": false
     },
-    "Objects_1": {
+    "Objects_2": {
       "type": "object",
       "properties": {
         "mode": {
@@ -1056,7 +950,12 @@
         "from": {
           "anyOf": [
             {
-              "type": "string"
+              "type": "string",
+              "allOf": [
+                {
+                  "minLength": 1
+                }
+              ]
             },
             {
               "type": "null"
@@ -1066,30 +965,27 @@
         "saveAs": {
           "anyOf": [
             {
-              "type": "string"
+              "type": "string",
+              "allOf": [
+                {
+                  "minLength": 1
+                }
+              ]
             },
             {
               "type": "null"
             }
           ]
-        },
-        "retain": {
-          "type": "boolean"
-        },
-        "reuseOnRepeat": {
-          "type": "boolean"
         }
       },
       "required": [
         "mode",
         "from",
-        "saveAs",
-        "retain",
-        "reuseOnRepeat"
+        "saveAs"
       ],
       "additionalProperties": false
     },
-    "Objects_2": {
+    "Objects_3": {
       "type": "object",
       "properties": {
         "format": {
@@ -1113,333 +1009,6 @@
       "required": [
         "format",
         "schema"
-      ],
-      "additionalProperties": false
-    },
-    "Objects_4": {
-      "type": "object",
-      "additionalProperties": {
-        "type": "string"
-      }
-    },
-    "Objects_3": {
-      "type": "object",
-      "properties": {
-        "sandbox": {
-          "type": "string",
-          "enum": [
-            "read-only",
-            "workspace-write",
-            "danger-full-access"
-          ]
-        },
-        "extraArgs": {
-          "$ref": "#/$defs/Arrays_"
-        },
-        "inheritEnv": {
-          "$ref": "#/$defs/Arrays_"
-        },
-        "env": {
-          "$ref": "#/$defs/Objects_4"
-        }
-      },
-      "required": [
-        "sandbox",
-        "extraArgs",
-        "inheritEnv",
-        "env"
-      ],
-      "additionalProperties": false
-    },
-    "Objects_5": {
-      "type": "object",
-      "properties": {
-        "permissionMode": {
-          "type": "string",
-          "enum": [
-            "acceptEdits",
-            "auto",
-            "bypassPermissions",
-            "dontAsk",
-            "manual",
-            "plan"
-          ]
-        },
-        "extraArgs": {
-          "$ref": "#/$defs/Arrays_"
-        },
-        "inheritEnv": {
-          "$ref": "#/$defs/Arrays_"
-        },
-        "env": {
-          "$ref": "#/$defs/Objects_4"
-        }
-      },
-      "required": [
-        "permissionMode",
-        "extraArgs",
-        "inheritEnv",
-        "env"
-      ],
-      "additionalProperties": false
-    },
-    "Objects_6": {
-      "type": "object",
-      "properties": {
-        "success": {
-          "type": "string"
-        },
-        "convergence": {
-          "type": "string"
-        },
-        "maxRounds": {
-          "anyOf": [
-            {
-              "type": "integer",
-              "allOf": [
-                {
-                  "exclusiveMinimum": 0
-                }
-              ]
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "maxWallTimeMinutes": {
-          "anyOf": [
-            {
-              "type": "number",
-              "allOf": [
-                {
-                  "exclusiveMinimum": 0
-                }
-              ]
-            },
-            {
-              "type": "null"
-            }
-          ]
-        }
-      },
-      "required": [
-        "success",
-        "convergence",
-        "maxRounds",
-        "maxWallTimeMinutes"
-      ],
-      "additionalProperties": false
-    },
-    "Arrays_2": {
-      "type": "array",
-      "items": {
-        "type": "string",
-        "allOf": [
-          {
-            "minLength": 1
-          }
-        ]
-      }
-    },
-    "Objects_7": {
-      "type": "object",
-      "properties": {
-        "providers": {
-          "type": "array",
-          "items": {
-            "type": "string",
-            "enum": [
-              "codex",
-              "claude"
-            ]
-          }
-        },
-        "models": {
-          "$ref": "#/$defs/Arrays_"
-        },
-        "nodeTypes": {
-          "type": "array",
-          "items": {
-            "type": "string",
-            "enum": [
-              "agent",
-              "command"
-            ]
-          }
-        },
-        "cwdRoots": {
-          "$ref": "#/$defs/Arrays_"
-        },
-        "writeRoots": {
-          "$ref": "#/$defs/Arrays_"
-        },
-        "workspaceModes": {
-          "type": "array",
-          "items": {
-            "type": "string",
-            "enum": [
-              "shared",
-              "existing",
-              "git-worktree"
-            ]
-          }
-        },
-        "vcs": {
-          "type": "array",
-          "items": {
-            "type": "string",
-            "enum": [
-              "git",
-              "plastic",
-              "other",
-              "none"
-            ]
-          }
-        },
-        "gitWorktree": {
-          "type": "object",
-          "properties": {
-            "allowed": {
-              "type": "boolean"
-            },
-            "branchPrefixes": {
-              "$ref": "#/$defs/Arrays_2"
-            },
-            "startPoints": {
-              "$ref": "#/$defs/Arrays_"
-            },
-            "allowRemoveOnClean": {
-              "type": "boolean"
-            }
-          },
-          "required": [
-            "allowed",
-            "branchPrefixes",
-            "startPoints",
-            "allowRemoveOnClean"
-          ],
-          "additionalProperties": false
-        },
-        "allowCommands": {
-          "type": "boolean"
-        },
-        "commandArgvPrefixes": {
-          "type": "array",
-          "items": {
-            "type": "array",
-            "items": {
-              "type": "string",
-              "allOf": [
-                {
-                  "minLength": 1
-                }
-              ]
-            },
-            "allOf": [
-              {
-                "minItems": 1
-              }
-            ]
-          }
-        },
-        "allowedCommandEnv": {
-          "type": "array",
-          "items": {
-            "type": "object",
-            "additionalProperties": {
-              "type": "string"
-            }
-          }
-        },
-        "codexSandboxes": {
-          "type": "array",
-          "items": {
-            "type": "string",
-            "enum": [
-              "read-only",
-              "workspace-write",
-              "danger-full-access"
-            ]
-          }
-        },
-        "claudePermissionModes": {
-          "type": "array",
-          "items": {
-            "type": "string",
-            "enum": [
-              "acceptEdits",
-              "auto",
-              "bypassPermissions",
-              "dontAsk",
-              "manual",
-              "plan"
-            ]
-          }
-        },
-        "allowedExtraArgs": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/Arrays_"
-          }
-        },
-        "allowedInheritedEnv": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/Arrays_"
-          }
-        },
-        "allowedProviderEnv": {
-          "type": "array",
-          "items": {
-            "type": "object",
-            "additionalProperties": {
-              "type": "string"
-            }
-          }
-        },
-        "resumableSessionAliases": {
-          "$ref": "#/$defs/Arrays_"
-        },
-        "newSessionAliasPrefixes": {
-          "$ref": "#/$defs/Arrays_2"
-        },
-        "maxAddedNodesPerRound": {
-          "anyOf": [
-            {
-              "type": "integer",
-              "allOf": [
-                {
-                  "exclusiveMinimum": 0
-                }
-              ]
-            },
-            {
-              "type": "null"
-            }
-          ]
-        }
-      },
-      "required": [
-        "providers",
-        "models",
-        "nodeTypes",
-        "cwdRoots",
-        "writeRoots",
-        "workspaceModes",
-        "vcs",
-        "gitWorktree",
-        "allowCommands",
-        "commandArgvPrefixes",
-        "allowedCommandEnv",
-        "codexSandboxes",
-        "claudePermissionModes",
-        "allowedExtraArgs",
-        "allowedInheritedEnv",
-        "allowedProviderEnv",
-        "resumableSessionAliases",
-        "newSessionAliasPrefixes",
-        "maxAddedNodesPerRound"
       ],
       "additionalProperties": false
     }

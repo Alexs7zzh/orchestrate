@@ -1,154 +1,191 @@
 # Orchestrate
 
-An [Agent Skill](https://agentskills.io) that lets a coding agent design, preview, and run
-**validated, declaratively-specified DAG workflows** across Codex CLI, Claude Code, and plain
-commands — with every run gated behind digest-bound user approval.
+The normative reliability and ownership contract is
+[`references/guarantees.md`](references/guarantees.md).
 
-Instead of one agent improvising a long task, the agent authors a workflow JSON: implementation
-nodes, independent cold-review nodes with fresh contexts, command nodes for deterministic
-verification, session handoffs back to the original implementer, and optionally an adaptive
-**supervisor** that keeps scheduling bounded rounds of work ("review and fix until no new issues")
-inside an explicitly approved envelope.
+Orchestrate runs validated agent-and-command DAGs in real Herdr panes. It is interactive and
+master-driven: `run` starts the initial ready work, node agents submit authenticated results, and
+the launching master uses `orchestrate reconcile` to commit those results and start newly ready
+nodes. Herdr's trusted plugin event hook prompts that master when a workflow agent becomes blocked
+or done; the sandboxed `node-done` path only writes its authenticated submission. Wake-ups reduce
+latency, but reconciliation is safe at any time and does not depend on a wake being delivered. There
+is no per-run background controller.
 
-## Install
+## Requirements
 
-Requires Node.js >= 22 on macOS (developed and tested there; Linux is untested, Windows is
-unsupported), plus [Codex CLI](https://github.com/openai/codex) and/or
-[Claude Code](https://claude.com/claude-code) for the corresponding agent nodes.
-[Bun](https://bun.sh) is only needed for development.
+- macOS on Apple silicon
+- herdr 0.7 or newer
+- Codex and/or Claude for the providers used by a workflow
+- Git only when a node requests an isolated Git worktree
 
-Install with [`npx skills`](https://github.com/vercel-labs/skills), which works for Claude Code,
-Codex, Cursor, and 60+ other agents:
-
-```bash
-npx skills add https://github.com/Alexs7zzh/skills -g
-```
-
-From a local checkout, use `npx skills add . -g` at the repository root instead.
-
-Then put the bundled CLI on your `PATH` and check the toolchain:
+## Install from this checkout
 
 ```bash
-node ~/.agents/skills/orchestrate/scripts/orchestrate.mjs setup   # symlinks ~/.local/bin/orchestrate
-orchestrate doctor
+cd scripts
+bun install --frozen-lockfile
+bun run build:compile
+./dist/orchestrate setup
 ```
 
-`setup` also merges the session wake Stop hook into Codex's global `hooks.json`; restart Codex and
-approve it when prompted. Claude Code loads the corresponding hook from this folder's validated
-single-skill plugin manifest. Pass `setup --no-hooks` for a Claude-only or headless install.
+`setup` atomically stages the CLI, skill, and herdr plugin under
+`~/.local/share/orchestrate/current`, links the CLI into `~/.local/bin`, and offers a UI preference
+wizard. Use `setup --dry-run`, `setup --defaults`, `setup --no-wizard`, or `setup --remove` as
+needed. Herdr plugin link/unlink is required: setup or removal fails without switching/removing the
+stable staged installation if that operation fails, and `doctor` reports a missing registration as
+unhealthy. If Herdr cannot confirm either link or rollback, the versioned stage is retained as the
+plugin's recoverable target while the stable CLI/skill selection stays unchanged. Run
+`orchestrate doctor` after changing herdr or provider installations.
 
-`skills` links each agent's skill directory to a canonical copy under `~/.agents/skills/`
-(project-scoped installs use `./.agents/skills/`); if yours lives elsewhere, run `setup` from that
-path instead. Update later with `npx skills update`.
-
-To install manually, copy this folder into your agent's skills directory (for example
-`~/.claude/skills/orchestrate`) and run the same `setup` from there.
-
-## The safety model
-
-- **Nothing runs without informed consent.** `orchestrate preview` renders the full plan — every
-  node's provider, model, permissions, environment, session lineage, and declared write set — and
-  prints a SHA-256 digest of the canonicalized file. `orchestrate run` requires that exact digest;
-  any change to field values or structure invalidates it. The worker re-verifies the digest before
-  scheduling.
-- **No defaults.** Every field of the workflow is an explicit decision: timeouts, retry budgets,
-  sandbox levels, inherited environment variables, write declarations. `null` always means
-  "deliberately unbounded", never "unspecified".
-- **Human checkpoints inside a run.** A node with `gate: "approval"` pauses the run before it
-  starts and presents its fully rendered prompt (fixed frame plus generated inputs); it only runs
-  after a digest-bound `resume --approve-gate`, and the worker re-verifies that exact content.
-- **Live co-driven nodes.** An agent node with `interactive: true` runs as the provider's real
-  interactive TUI in a [herdr](https://herdr.dev) pane: the human can watch and participate at any
-  time, and the node completes only when the session follows its prompt contract — writing a
-  handoff report and calling `orchestrate node-done` with a one-time token. Structured output is
-  rejected for these nodes, and supervisors can never add them.
-- **Bounded autonomy.** Supervisors can only add nodes inside a pre-approved envelope (providers,
-  models, sandboxes, session aliases, write roots, command argv prefixes). Anything outside it
-  pauses the run for explicit approval. Wall-time, agent-start, and goal-round limits pause
-  scheduling; a 10,000-start emergency fuse backstops runaway loops.
-- **Isolation-aware scheduling.** Declared write sets, exclusive resources, session-lineage
-  fan-out detection, and Git worktree support keep parallel nodes from trampling each other.
-- **Pause is resumable; stop is terminal.** `pause` closes scheduling at a node boundary and lets
-  active nodes finish before settling into the existing resumable state. `stop` interrupts active
-  work immediately, wins over a draining pause, and permanently settles the run as stopped. A
-  paused run's remaining plan can also be revised by hand (`orchestrate revise`): executed nodes
-  are immutable, and the revision applies only through its own digest-bound
-  `resume --approve-revision`.
-
-## Quickstart
-
-The intended user is an agent following [SKILL.md](SKILL.md), but the CLI is usable directly:
+Supported release builds are macOS ARM64 and are distributed through Homebrew. Source and release
+contracts currently run on macOS; Linux is not a supported or distributed platform. Once a tap is
+configured:
 
 ```bash
-orchestrate validate workflow.json     # validates and prints a digest only on success
-orchestrate preview  workflow.json     # human-readable plan + approval digest
-orchestrate run      workflow.json --approve <sha256>
-orchestrate prefs    --project /absolute/project/path  # merged design defaults
-
-orchestrate watch  <run-id>            # follow events; exits when finished or paused
-orchestrate wait   <run-id> --json     # quiet blocking settled-state boundary
-orchestrate status <run-id>            # exit code 2 = paused (needs attention)
-orchestrate report <run-id> [--json]   # rendered digest: progress, results, what needs a decision
-orchestrate result <run-id> <node-id>  # print a node's result text
-orchestrate events <run-id> --json     # full event log
-orchestrate pause  <run-id>            # finish active nodes, pause before scheduling more
-orchestrate resume <run-id> [--approve-patch <sha256>] [--approve-revision <sha256>] [--respond <text> --input-digest <sha256>] [--approve-gate <node-id> --gate-digest <sha256>]
-orchestrate revise <run-id> <file>     # propose a hand-edited remaining plan for a paused run
-orchestrate stop   <run-id>            # cancel active nodes and settle terminal stopped
-orchestrate clean  <run-id>
+brew tap <owner>/tap
+brew install orchestrate
+orchestrate setup
 ```
 
-Interactive Codex and Claude sessions automatically own runs they launch. Their Stop hook waits
-for a pause or terminal state and creates one continuation, including when the run completed
-before the hook began. Background shell completion is not used as a wake guarantee. Headless
-callers should run `orchestrate wait` and explicitly resume their provider session.
+Update with `brew upgrade orchestrate` followed by the unqualified `orchestrate setup`. The staged
+wrapper delegates setup to the distinct formula executable later on `PATH`, preventing the prior
+staged build from replacing a newer formula build. Before uninstalling the formula, run
+`orchestrate setup --remove` to unlink the skill and plugin. No npm package is used.
 
-The workflow format is documented in [references/workflow-format.md](references/workflow-format.md)
-with a complete example in [references/examples.md](references/examples.md);
-[references/workflow.schema.json](references/workflow.schema.json) is the machine-readable
-contract. Run state lives under `~/.local/state/orchestrate/` (or
-`${XDG_STATE_HOME}/orchestrate`; override either with `ORCHESTRATE_STATE_DIR`), never in the skill
-folder. Approved workflows also maintain a bounded,
-schema-validated `preferences.json` there so future designs can reuse project/global defaults;
-set `ORCHESTRATE_DISABLE_PREFS=1` to opt out.
+## Run a workflow
 
-## herdr integration
+```bash
+orchestrate validate workflow.json
+orchestrate preview workflow.json
+orchestrate run workflow.json --approve <digest>
+orchestrate board <run-id>
+```
 
-If you use [herdr](https://herdr.dev), pass `--mirror` to `run` or `resume` to mirror a run into
-read-only herdr panes: one workspace per run, a `status` tab following `orchestrate watch`, and a
-tab per node attempt tailing its live output. Mirroring is presentation only — it is opt-in, never
-part of the approved workflow or its digest, every herdr call is best-effort with a short timeout,
-and a dead or absent herdr can never change a run's outcome. `ORCHESTRATE_MIRROR=herdr` turns it
-on for every run; `ORCHESTRATE_DISABLE_MIRROR=1` hard-disables it and wins.
+Preview prints the exact digest required by `run`. Preflight verifies the workflow, provider
+commands, herdr, paths, output schemas, worktree prerequisites, and declared write conflicts before
+state or panes are created. `--dry-run` performs the read-only `herdr --version` check and requires
+0.7 or newer, but creates no state, worktrees, workspaces, tabs, or panes.
 
-A minimal herdr plugin lives in [herdr-plugin/](herdr-plugin/): a read-only "Orchestrate runs"
-pane plus pause/resume-latest actions. Install it with
-`herdr plugin link <skill-dir>/herdr-plugin` (see [herdr-plugin/README.md](herdr-plugin/README.md)).
+Every agent prompt has a stable frame: objective, node contract, declared inputs, result path, and
+the exact `node-done` command. Dynamic inputs are resolved only when dependencies finish. A task
+whose later work cannot be known up front should use a planning node that emits structured output,
+then a digest-bound approval gate before execution—not runtime-generated nodes.
+
+Agent permissions separate the execution boundary from escalation behavior. For example, a cold
+Codex review should use `execution.sandbox: "read-only"` with `escalation: "deny"`: allowed reads
+and commands run without approval dialogs, while anything outside the sandbox fails closed.
+`ask-user` is reserved for intentionally attended nodes; `auto-review` routes eligible Codex
+escalations through its reviewer instead of the human.
+
+Every agent also receives an implicit completion channel to its exact token-addressed attempt
+directory outside authoritative state; that is the only runtime path it can write. `node-done`
+writes an authenticated envelope there, and the next explicit `reconcile` validates the active
+token and result, commits transitions, and starts newly ready work. `node-done --hold` submits a
+successful outcome with a separate downstream hold that release removes without rewriting the
+outcome. The full sandbox rules — Claude workflow nodes require `dontAsk` plus `deny`, and
+validation rejects any mutating node whose sandbox root or write prefix overlaps Orchestrate state
+or installed control assets — are specified in
+[workflow-format.md](references/workflow-format.md) and
+[runtime-operations.md](references/runtime-operations.md).
+
+## Operate a run
+
+```bash
+orchestrate status <run-id> --wait
+orchestrate events <run-id> --follow
+orchestrate result <run-id> <node-id>
+orchestrate reconcile <run-id>
+orchestrate pause <run-id>
+orchestrate resume <run-id>
+orchestrate hold <run-id> <node-id>
+orchestrate release <run-id> <node-id>
+orchestrate stop <run-id>
+orchestrate clean <run-id> --dry-run
+```
+
+The interactive board, `board --json`, `runs --needs-attention`, and the Herdr panel sample live pane
+state for durably running nodes. `blocked`, `done`, and gone panes need attention; `done` is shown as
+`result missing`, while `idle`, `unknown`, and `working` remain transient. Observed attention affects
+default selection, so an older result-missing run wins over a newer healthy run and exits with code
+2. JSON mode writes one stable value to stdout on success or error; `events --follow --json` is the
+documented newline-delimited streaming exception.
+
+Crash semantics, pane receipts, run locking, and the at-least-once boundary for external Herdr
+actions are specified in [runtime-operations.md](references/runtime-operations.md); the normative
+limits are in [guarantees.md](references/guarantees.md). In short: the `events.json` journal is
+authoritative and replayable, a kernel-held per-run lock serializes every mutation, `node-done`
+only writes its token-addressed envelope, dormant submissions wait for the next explicit
+`orchestrate reconcile`, and master wake-ups, callbacks, and notifications are best effort.
+
+Repeats are declared, bounded subgraphs. Their completion condition is either an allowed command
+exit or a schema-validated JSON value. Reaching the round limit pauses for an explicit extension or
+acceptance. `limits.maxStarts` is a separate execution fuse; starts already planned within its
+budget are reconciled before a later candidate pauses the run. Repeat Git worktrees must include
+`{{nodeId}}` in the branch template and in every explicit path; both are expanded with the runtime
+round ID. Default targets live in a run-unique temporary worktree root outside authoritative state.
+Any pre-existing target must be the canonical worktree root for the expected repository and exact
+expanded branch or launch fails before pane creation.
+
+Compilation embeds the build identity used by run state. Ambient environment variables cannot
+change `--version`, and a different binary refuses that state.
+
+Concurrency limits simultaneous active node attempts, not retained completed panes. Treat it as a
+human-attention budget; the default recommendation is 3. Write sets and exclusive resources prevent
+unsafe parallel starts.
+
+## UI and notifications
+
+The OpenTUI board shows dependencies, pane state, elapsed time, repeat rounds, stalled work, and
+items needing attention. Its bounded clock refresh advances elapsed time and resamples herdr even
+when no workflow file changes. For a durably running agent, herdr `done` means the provider finished
+without submitting `node-done`; the board reports it once in `NEEDS YOU` with the authenticated
+recovery command. `idle` and `unknown` startup samples remain transient. Blocked agents and
+explicitly vanished panes are also actionable. Mouse and keyboard controls focus panes, open
+results, pause/resume, hold/release nodes, and stop the run. Gate approvals and vanished-pane
+recovery remain explicit commands shown by the board.
+
+Preferences contain UI state only and layer built-in defaults, global choices, then project choices.
+Schema-invalid or unknown fields fail. Inspect origins or edit them with:
+
+```bash
+orchestrate ui show --origin
+orchestrate ui set focus '"attention"'
+orchestrate ui set placement.workspace '"origin"' --project "$PWD"
+orchestrate ui wizard --project "$PWD"
+```
+
+`placement.workspace` is `"dedicated"` by default or `"origin"` to create node tabs in the
+launching workspace. It is independent of ordered `placement.rules[].surface` tab/split choices.
+If the recorded origin pane is no longer live, origin placement safely falls back to the dedicated
+run workspace. A recorded split anchor is verified immediately before use: explicit absence creates
+a fresh tab in the selected workspace. If the pane closes between that check and split, one
+`pane_not_found` falls back exactly once to a fresh tab without consuming the attempt; transport
+errors preserve the planned intent as observation failures.
+
+Agent and command nodes always execute through herdr. `ORCHESTRATE_DISABLE_UI=1` suppresses board
+auto-open and presentation notifications, but never changes execution. A named herdr remote must
+have access to the same checkout and state paths; otherwise use the local herdr session.
 
 ## Development
 
 ```bash
 cd scripts
-bun install
-bun run verify   # rebuild + typecheck + source tests + packaged public-contract tests
-bun run test:contract  # rebuild + packaged public-contract tests only
-bun run build    # regenerate published schemas + rebuild the bundled CLI
+bun run verify
+bun run build:compile
 ```
 
-The committed `scripts/orchestrate.mjs` is a self-contained, minified bundle, so installed users
-do not need Bun or `node_modules`. The TypeScript source and generated schemas remain in the skill
-for inspection and reproducible development. CI rebuilds every committed artifact and fails if the
-bundle or schemas drift from the source. Builds also produce an ignored external source map for
-local debugging; it is not shipped because the readable source is already included. Tests run
-against an internal schema variant that adds a `mock` provider behind
-`ORCHESTRATE_ENABLE_MOCK_PROVIDER=1`; a separate raw-JSON contract suite runs the rebuilt bundle
-under Node without that flag so the published contract and installed CLI are exercised directly.
+The public contracts are [workflow.schema.json](references/workflow.schema.json),
+[preferences.schema.json](references/preferences.schema.json),
+[state.schema.json](references/state.schema.json), and [event.schema.json](references/event.schema.json).
+See [workflow-format.md](references/workflow-format.md),
+[runtime-operations.md](references/runtime-operations.md), and [cli-spec.md](references/cli-spec.md).
 
-Workflow `version: 1` is the public contract. After publication, adding or changing required
-fields requires a new workflow version plus an explicit stored-run migration/compatibility path —
-a runtime upgrade must not silently strand paused or recoverable runs (stored runs are stamped
-with a contract version and pause, rather than fail, on mismatch).
-
-## License
-
-[MIT](LICENSE)
+This repository does not publish from local development commands. Release automation builds a
+tagged binary and formula artifact for review. It derives one version from the
+`orchestrate-<semver>` tag before compilation and uses one strict SemVer 2.0 validator for tag
+derivation, compilation, and assembly. Leading-zero core/numeric prerelease identifiers and empty
+prerelease identifiers are rejected. Release build metadata is deliberately unsupported because the
+compiled identity appends its own build hash. CI runs on native ARM64 `macos-15` and asserts
+`uname -m=arm64`. The release contract rejects binary, plugin, or formula version disagreement,
+pins the exact payload (binary, root license, complete third-party notices, skill, agent metadata,
+plugin, and all nine reference files), rejects unexpected extras, independently recomputes the archive checksum sidecar, and exercises the unpacked
+formula-shaped install tree without changing Homebrew or the host installation.
