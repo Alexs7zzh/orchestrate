@@ -3,7 +3,7 @@
 A [herdr](https://herdr.dev) plugin for the [Orchestrate](../README.md) board and reversible run
 controls.
 
-It declares (see [herdr-plugin.toml](herdr-plugin.toml), validated against herdr 0.7.x):
+It declares (see [herdr-plugin.toml](herdr-plugin.toml), requires herdr 0.7.5 or newer):
 
 - **Pane `orchestrate.board`** — opens the OpenTUI board for the run needing attention, otherwise
   the latest run.
@@ -14,11 +14,16 @@ It declares (see [herdr-plugin.toml](herdr-plugin.toml), validated against herdr
 - **Event `pane.agent_status_changed`** — routes blocked and done workflow-agent events through the
   trusted plugin bridge. The bridge prompts the captured master to reconcile a valid submission or
   debug a missing one without granting provider nodes Herdr control authority.
+- **Events `pane.closed` and `pane.exited`** — when a pane hosting a durably running node
+  disappears without a valid submission, the bridge prompts the captured master with the
+  `orchestrate ui restore` command instead of leaving the run stalled until a human notices.
+- **Startup hook** — after a herdr server restart or live handoff, `startup-attention` checks for
+  runs needing attention and raises one desktop notification naming the run to inspect.
 
 ## Install
 
 The supported plugin package targets macOS. It requires the `orchestrate` command on `PATH` and
-herdr 0.7 or newer. `orchestrate setup` installs
+herdr 0.7.5 or newer. `orchestrate setup` installs
 the bundled skill and links this plugin. Plugin registration is required: a link or unlink failure
 makes setup/removal fail without silently reporting success, and `orchestrate doctor` reports the
 registration unhealthy.

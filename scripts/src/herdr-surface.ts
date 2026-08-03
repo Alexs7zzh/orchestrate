@@ -39,12 +39,13 @@ import {
 
 declare const ORCHESTRATE_BUILD_EMBEDDED: string
 
-const MINIMUM_HERDR = [0, 7, 0] as const
+const MINIMUM_HERDR = [0, 7, 5] as const
 const STDERR_LIMIT = 8_192
 const AGENT_PANE_READY_TIMEOUT_MS = 5_000
 const AGENT_PANE_READY_POLL_MS = 50
 const AGENT_SESSION_TIMEOUT_MS = 30_000
 const AGENT_SESSION_POLL_MS = 50
+const AGENT_PROMPT_ACCEPT_TIMEOUT_MS = 15_000
 const UnknownRecordSchema = Schema.Record(Schema.String, Schema.Unknown)
 const HerdrPaneIdentitySchema = Schema.Struct({
   workspace_id: Schema.String,
@@ -193,7 +194,7 @@ export async function requireHerdr(): Promise<string> {
   const output = (await runHerdr(["--version"])).trim()
   const parsed = semverParts(output)
   if (parsed === null || !versionAtLeast(parsed, MINIMUM_HERDR)) {
-    throw new Error(`orchestrate requires herdr 0.7 or newer; found "${output}".`)
+    throw new Error(`orchestrate requires herdr 0.7.5 or newer; found "${output}".`)
   }
   return output
 }
@@ -1114,7 +1115,19 @@ export class HerdrSurface {
         node.provider === "claude"
           ? `Source workspace: ${sourceRoot}\n\n${request.prompt}`
           : request.prompt
-      await runHerdr(["agent", "prompt", pane.paneId, prompt])
+      // --wait --until working confirms the agent actually took the prompt instead of
+      // reporting acceptance for a prompt the provider then dropped.
+      await runHerdr([
+        "agent",
+        "prompt",
+        pane.paneId,
+        prompt,
+        "--wait",
+        "--until",
+        "working",
+        "--timeout",
+        String(AGENT_PROMPT_ACCEPT_TIMEOUT_MS)
+      ])
       const sessionId =
         node.session.saveAs === null
           ? null
@@ -1313,6 +1326,50 @@ export class HerdrSurface {
           : null
       })
       .catch(() => null)
+  }
+
+  async waitForAgentStatus(paneId: string, status: string, timeoutMs: number): Promise<boolean> {
+    try {
+      await runHerdr(["agent", "wait", paneId, "--until", status, "--timeout", String(timeoutMs)])
+      return true
+    } catch {
+      return false
+    }
+  }
+
+  async paneSnapshot(): Promise<
+    ReadonlyMap<string, { readonly agentStatus: HerdrAgentStatus | null }>
+  > {
+    const parsed = parseJson(await runHerdr(["pane", "list"]), "pane list")
+    const panes =
+      typeof parsed === "object" &&
+      parsed !== null &&
+      "result" in parsed &&
+      typeof parsed.result === "object" &&
+      parsed.result !== null &&
+      "panes" in parsed.result &&
+      Array.isArray(parsed.result.panes)
+        ? parsed.result.panes
+        : []
+    const snapshot = new Map<string, { readonly agentStatus: HerdrAgentStatus | null }>()
+    for (const pane of panes) {
+      if (typeof pane !== "object" || pane === null) {
+        continue
+      }
+      const record = pane as Record<string, unknown>
+      const paneId = typeof record["pane_id"] === "string" ? record["pane_id"] : null
+      if (paneId === null) {
+        continue
+      }
+      const status = record["agent_status"]
+      snapshot.set(paneId, {
+        agentStatus:
+          typeof status === "string" && HERDR_AGENT_STATUSES.has(status as HerdrAgentStatus)
+            ? (status as HerdrAgentStatus)
+            : null
+      })
+    }
+    return snapshot
   }
 
   async focusRuntime(type: WorkflowNode["type"], pane: PaneReference): Promise<void> {

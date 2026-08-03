@@ -58,6 +58,7 @@ import {
   stateRoot
 } from "./state.js"
 import { overlappingMutableNodes, validateWorkflow } from "./validation.js"
+import { runUiWizard } from "./wizard.js"
 
 declare const ORCHESTRATE_BUILD_EMBEDDED: string
 
@@ -600,7 +601,10 @@ function statusValue(state: RunState, observedAttention = runNeedsAttention(stat
   }
 }
 
-function statusText(state: RunState, approvalGateTemplates: ReadonlySet<string> = new Set()): string {
+function statusText(
+  state: RunState,
+  approvalGateTemplates: ReadonlySet<string> = new Set()
+): string {
   const value = statusValue(state)
   const needs = [
     ...value.gates.map(
@@ -935,81 +939,6 @@ async function editUiLayer(project: string | null): Promise<void> {
   }
 }
 
-async function choose(
-  prompt: ReturnType<typeof createInterface>,
-  label: string,
-  options: readonly string[],
-  fallback = 0
-): Promise<string> {
-  const choices = options.map((value, index) => `${index + 1}) ${value}`).join("  ")
-  const answer = await prompt.question(`${label}\n${choices}\n[${fallback + 1}] `)
-  if (answer.trim() === "") {
-    return options[fallback] as string
-  }
-  const index = Number(answer) - 1
-  if (!Number.isInteger(index) || options[index] === undefined) {
-    throw new Error(`Invalid choice for ${label}.`)
-  }
-  return options[index]
-}
-
-async function runUiWizard(project: string | null): Promise<void> {
-  if (!process.stdin.isTTY || !process.stdout.isTTY) {
-    throw new Error("ui wizard requires an interactive terminal; use ui set or setup --defaults.")
-  }
-  const prompt = createInterface({
-    input: process.stdin,
-    output: process.stdout
-  })
-  try {
-    const board = await choose(prompt, "Board placement", [
-      "split-right",
-      "dedicated-workspace",
-      "current-workspace"
-    ])
-    const surface = await choose(prompt, "Default node surface", ["tab", "split"])
-    const nodeWorkspace = await choose(prompt, "Node workspace", ["dedicated", "origin"])
-    const focus = await choose(prompt, "Focus policy", ["attention", "never", "always"])
-    const continuation = await choose(prompt, "After node completion", ["auto", "hold"])
-    const notifications = await choose(prompt, "Milestone notifications", [
-      "herdr",
-      "board",
-      "silent"
-    ])
-    const matcher = {
-      type: "any" as const,
-      provider: "any" as const,
-      level: "any" as const,
-      origin: "any" as const,
-      id: "*"
-    }
-    await replaceUiPreferenceLayer(
-      {
-        board: board as "split-right" | "dedicated-workspace" | "current-workspace",
-        placement: {
-          workspace: nodeWorkspace as "dedicated" | "origin",
-          rules: [{ match: matcher, surface: surface as "tab" | "split" }],
-          grouping: { by: "root-ancestor" },
-          maxSplitsPerTab: 4
-        },
-        completedPanes: { agent: "keep-open", command: "close-success" },
-        focus: focus as "attention" | "never" | "always",
-        continuation: {
-          rules: [{ match: matcher, autoContinue: continuation === "auto" }]
-        },
-        notifications: {
-          attention: "herdr",
-          milestone: notifications as "herdr" | "board" | "silent",
-          progress: "board"
-        }
-      },
-      project
-    )
-  } finally {
-    prompt.close()
-  }
-}
-
 function shellVariable(name: string): string {
   return ["$", `{${name}}`].join("")
 }
@@ -1188,6 +1117,7 @@ async function handleUi(parsed: ParsedArgs, json: boolean): Promise<number> {
     const state = await readRunState(runDir)
     const surface = new HerdrSurface()
     await surface.connect()
+    const snapshot = await surface.paneSnapshot()
     const dead: string[] = []
     for (const node of Object.values(state.nodes)) {
       const pane = node.attempts.at(-1)?.pane
@@ -1195,7 +1125,7 @@ async function handleUi(parsed: ParsedArgs, json: boolean): Promise<number> {
         node.status === "running" &&
         pane !== null &&
         pane !== undefined &&
-        !(await surface.paneExists(pane.paneId))
+        !snapshot.has(pane.paneId)
       ) {
         dead.push(pane.paneId)
       }
@@ -1340,7 +1270,11 @@ export async function runCli(
       ? await waitUntilAttentionOrSettled(runDir)
       : await readRunState(runDir)
     const workflow = await readWorkflow(runDir).catch(() => null)
-    output(json, statusValue(state), statusText(state, workflow === null ? undefined : gatedTemplateIds(workflow)))
+    output(
+      json,
+      statusValue(state),
+      statusText(state, workflow === null ? undefined : gatedTemplateIds(workflow))
+    )
     return runNeedsAttention(state) ? EXIT_ATTENTION : EXIT_OK
   }
   if (command === "events") {

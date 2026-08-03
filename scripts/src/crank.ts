@@ -27,7 +27,11 @@ import {
 import { classifyEvent, dispatchEventNotification } from "./notifications.js"
 import { resolveAutoContinue, resolvePlacement } from "./placement.js"
 import { prepareNode, renderAgentPrompt } from "./prompt.js"
-import { HerdrAgentStatusEventSchema, NodeDoneSubmissionSchema } from "./schema.js"
+import {
+  HerdrAgentStatusEventSchema,
+  HerdrPaneGoneEventSchema,
+  NodeDoneSubmissionSchema
+} from "./schema.js"
 import { applyStatePatch, diffState } from "./state-patch.js"
 import {
   acquireRunLock,
@@ -77,7 +81,7 @@ export interface CrankSurface {
   closePane(paneId: string): Promise<void>
   notify(title: string, body: string, sound: "none" | "done" | "request"): Promise<void>
   promptOrigin?(origin: RunOrigin, prompt: string): Promise<void>
-  agentStatus?(paneId: string): Promise<string | null>
+  waitForAgentStatus?(paneId: string, status: string, timeoutMs: number): Promise<boolean>
   openBoard?(runId: string, preferences: UiPreferences): Promise<void>
   prepareBoard?(preferences: UiPreferences): Promise<string | null>
   focusRuntime?(type: WorkflowNode["type"], pane: PaneReference): Promise<void>
@@ -599,6 +603,60 @@ export async function startWorkflowRun(
 
 const decodeNodeDoneSubmission = Schema.decodeUnknownOption(NodeDoneSubmissionSchema)
 const decodeHerdrAgentStatusEvent = Schema.decodeUnknownOption(HerdrAgentStatusEventSchema)
+const decodeHerdrPaneGoneEvent = Schema.decodeUnknownOption(HerdrPaneGoneEventSchema)
+
+async function handlePaneGoneEvent(
+  event: Schema.Schema.Type<typeof HerdrPaneGoneEventSchema>,
+  surface: CrankSurface
+): Promise<HerdrEventBridgeResult> {
+  if (surface.promptOrigin === undefined) {
+    throw new Error("The Herdr event surface cannot prompt an origin agent.")
+  }
+  const promptOrigin = surface.promptOrigin.bind(surface)
+  const matches = (await listRunStates()).states.flatMap((state) =>
+    Object.values(state.nodes).flatMap((node) => {
+      const attempt = node.attempts.at(-1)
+      return node.status === "running" &&
+        attempt?.status === "running" &&
+        attempt.pane?.paneId === event.data.pane_id &&
+        attempt.pane.workspaceId === event.data.workspace_id
+        ? [{ state, node, attempt }]
+        : []
+    })
+  )
+  if (matches.length === 0) {
+    return { status: "handled", matched: 0, prompted: 0 }
+  }
+  await surface.connect()
+  let prompted = 0
+  for (const { state, node, attempt } of matches) {
+    if (state.origin === null) {
+      continue
+    }
+    const submission = await readFile(completionSubmissionPath(attempt.resultPath), "utf8")
+      .then((raw) => Option.getOrNull(decodeNodeDoneSubmission(JSON.parse(raw) as unknown)))
+      .catch(() => null)
+    const submitted =
+      submission !== null &&
+      submission.runId === state.id &&
+      submission.nodeId === node.id &&
+      submission.token === attempt.token
+    if (submitted) {
+      // The pane closing after a valid submission is expected teardown; the
+      // agent-status event already requested reconciliation.
+      continue
+    }
+    await promptOrigin(
+      state.origin,
+      [
+        `Orchestrate node "${node.id}" lost its Herdr pane while running in run ${state.id}.`,
+        `Reconcile vanished panes with: orchestrate ui restore ${state.id} — or inspect first with: orchestrate status ${state.id}`
+      ].join("\n")
+    )
+    prompted += 1
+  }
+  return { status: "handled", matched: matches.length, prompted }
+}
 
 async function consumeNodeDoneSubmissions(
   runDir: string,
@@ -959,18 +1017,31 @@ export async function handleHerdrAgentStatusEvent(
   encodedEvent: string | undefined,
   surface: CrankSurface = new HerdrSurface()
 ): Promise<HerdrEventBridgeResult> {
-  if (eventName !== "pane.agent_status_changed" || encodedEvent === undefined) {
-    throw new Error("herdr-event requires a pane.agent_status_changed plugin event.")
+  const supportedEvents = new Set(["pane.agent_status_changed", "pane.closed", "pane.exited"])
+  if (eventName === undefined || !supportedEvents.has(eventName) || encodedEvent === undefined) {
+    throw new Error(
+      "herdr-event requires a pane.agent_status_changed, pane.closed, or pane.exited plugin event."
+    )
   }
   if (surface.promptOrigin === undefined) {
     throw new Error("The Herdr event surface cannot prompt an origin agent.")
   }
-  let event: Schema.Schema.Type<typeof HerdrAgentStatusEventSchema> | null
+  let parsedEvent: unknown = null
   try {
-    event = Option.getOrNull(decodeHerdrAgentStatusEvent(JSON.parse(encodedEvent) as unknown))
+    parsedEvent = JSON.parse(encodedEvent) as unknown
   } catch {
-    event = null
+    parsedEvent = null
   }
+  if (eventName !== "pane.agent_status_changed") {
+    const gone =
+      parsedEvent === null ? null : Option.getOrNull(decodeHerdrPaneGoneEvent(parsedEvent))
+    if (gone === null) {
+      throw new Error("Herdr supplied an invalid pane event.")
+    }
+    return handlePaneGoneEvent(gone, surface)
+  }
+  const event =
+    parsedEvent === null ? null : Option.getOrNull(decodeHerdrAgentStatusEvent(parsedEvent))
   if (event === null) {
     throw new Error("Herdr supplied an invalid agent-status event.")
   }
@@ -1015,10 +1086,11 @@ export async function handleHerdrAgentStatusEvent(
         submission.runId === state.id &&
         submission.nodeId === node.id &&
         submission.token === attempt.token
-      if (!valid && surface.agentStatus !== undefined) {
-        await new Promise((resolve) => setTimeout(resolve, DONE_WAKE_RECHECK_MS))
-        const live = await surface.agentStatus(event.data.pane_id).catch(() => null)
-        if (live === "working") {
+      if (!valid && surface.waitForAgentStatus !== undefined) {
+        const resumed = await surface
+          .waitForAgentStatus(event.data.pane_id, "working", DONE_WAKE_RECHECK_MS)
+          .catch(() => false)
+        if (resumed) {
           continue
         }
       }

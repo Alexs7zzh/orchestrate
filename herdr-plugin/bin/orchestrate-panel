@@ -52,8 +52,18 @@ case "$MODE" in
   herdr-event)
     exec orchestrate herdr-event --json
     ;;
+  startup-attention)
+    # After a herdr server restart or handoff, panes may have vanished in bulk.
+    RUN_ID="$(pick_run --needs-attention)"
+    if [ -n "$RUN_ID" ]; then
+      herdr notification show "Orchestrate" \
+        --body "Run $RUN_ID needs attention after restart. Inspect with: orchestrate status $RUN_ID" \
+        --sound request >/dev/null 2>&1 || true
+    fi
+    exit 0
+    ;;
   *)
-    echo "orchestrate-panel: unknown mode \"$MODE\" (expected: panel, pause, resume, herdr-event)." >&2
+    echo "orchestrate-panel: unknown mode \"$MODE\" (expected: panel, pause, resume, herdr-event, startup-attention)." >&2
     exit 2
     ;;
 esac

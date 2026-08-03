@@ -131,7 +131,7 @@ class FakeSurface implements CrankSurface {
   readonly spawns: string[] = []
   readonly closed: string[] = []
   readonly handoffs: string[] = []
-  agentStatus?: (paneId: string) => Promise<string | null>
+  waitForAgentStatus?: (paneId: string, status: string, timeoutMs: number) => Promise<boolean>
   readonly origin: RunOrigin = {
     workspaceId: "origin-workspace",
     tabId: "origin-tab",
@@ -867,7 +867,7 @@ describe("crank shell", () => {
     })
     expect(surface.handoffs.at(-1)).toContain(`orchestrate reconcile ${started.state.id}`)
     await expect(handleHerdrAgentStatusEvent(undefined, event, surface)).rejects.toThrow(
-      "requires a pane.agent_status_changed plugin event"
+      "requires a pane.agent_status_changed, pane.closed, or pane.exited plugin event"
     )
   })
 
@@ -896,7 +896,7 @@ describe("crank shell", () => {
 
   test("suppresses a done wake when the agent is observed working again", async () => {
     const surface = new FakeSurface()
-    surface.agentStatus = async () => "working"
+    surface.waitForAgentStatus = async () => true
     const started = await start(workflow([agent("review")]), surface)
     const pane = started.state.nodes.review?.attempts.at(-1)?.pane
     if (pane === null || pane === undefined) {
@@ -918,6 +918,48 @@ describe("crank shell", () => {
       )
     ).toEqual({ status: "handled", matched: 1, prompted: 0 })
     expect(surface.handoffs).toHaveLength(before)
+  })
+
+  test("prompts restore when a running node's pane closes without a submission", async () => {
+    const surface = new FakeSurface()
+    const started = await start(workflow([agent("review")]), surface)
+    const pane = started.state.nodes.review?.attempts.at(-1)?.pane
+    if (pane === null || pane === undefined) {
+      throw new Error("missing review pane")
+    }
+    const event = JSON.stringify({
+      event: "pane_closed",
+      data: { pane_id: pane.paneId, workspace_id: pane.workspaceId }
+    })
+    expect(await handleHerdrAgentStatusEvent("pane.closed", event, surface)).toEqual({
+      status: "handled",
+      matched: 1,
+      prompted: 1
+    })
+    expect(surface.handoffs.at(-1)).toContain("lost its Herdr pane")
+    expect(surface.handoffs.at(-1)).toContain(`orchestrate ui restore ${started.state.id}`)
+  })
+
+  test("stays silent when a pane closes after a valid submission", async () => {
+    const surface = new FakeSurface()
+    const started = await start(workflow([agent("review")]), surface)
+    const runDir = runDirectory(started.state.id)
+    const attempt = started.state.nodes.review?.attempts.at(-1)
+    if (attempt === undefined || attempt.pane === null) {
+      throw new Error("missing review attempt")
+    }
+    await mkdir(path.dirname(attempt.resultPath), { recursive: true })
+    await writeFile(attempt.resultPath, '{"clean":true}\n')
+    await submitNodeDone(runDir, "review", attempt.token, "completed")
+    const event = JSON.stringify({
+      event: "pane_exited",
+      data: { pane_id: attempt.pane.paneId, workspace_id: attempt.pane.workspaceId }
+    })
+    expect(await handleHerdrAgentStatusEvent("pane.exited", event, surface)).toEqual({
+      status: "handled",
+      matched: 1,
+      prompted: 0
+    })
   })
 
   test("submits without Herdr authority and explicit reconcile spawns downstream exactly once", async () => {

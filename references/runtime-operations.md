@@ -17,7 +17,9 @@ recovery for a missing or torn snapshot.
 
 Before a pane starts, Orchestrate persists an intent and attempt token. The surface records one
 small receipt after Herdr creates a pane and marks it `ready` only after command start or agent
-prompt succeeds. A prompt error is recorded as `ambiguous`. Reconcile adopts a live ready pane or a
+prompt succeeds. Agent prompts are delivered atomically and wait until the agent is observed
+working, so a `ready` receipt means the prompt was actually taken, not merely accepted. A prompt
+error or wait timeout is recorded as `ambiguous`. Reconcile adopts a live ready pane or a
 token-valid completed submission, retries when the recorded pane is explicitly absent, and stops
 for agent-assisted inspection for every other live incomplete or ambiguous receipt. It does not
 infer prompt acceptance from provider lifecycle status or close label-matched tabs.
@@ -39,6 +41,11 @@ agent is observed working again, because provider status can flap through done m
 prompt names the pane, points at the saved `prompt.txt`, and directs the master to
 `orchestrate status` for the recovery command. This
 wake-up is a latency hint; the master or human can safely run `orchestrate reconcile` at any time.
+The bridge also consumes `pane.closed` and `pane.exited`: a pane vanishing under a durably running
+node without a valid submission prompts the master with the `ui restore` command, while teardown
+after a valid submission stays silent. A plugin startup hook raises one attention notification
+after a herdr server restart or handoff when any run needs inspection. Board refresh and restore
+observe all panes and agent statuses through one snapshot call rather than per-node probes.
 
 Every authoritative mutation, including reconcile and destructive cleanup, is serialized by a
 kernel-held per-run lock. Concurrent invocations wait and then observe the latest committed state.

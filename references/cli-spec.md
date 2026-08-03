@@ -38,7 +38,7 @@ with an explicit noninteractive error.
 | `revise`     | `revise <run> --discard [--json]`                                                       | Discard the pending revision.                                                                         |
 | `node-done`  | `node-done <run> <node> --token <token> --outcome <completed\|failed> [--hold] [--json]` | Submit an authenticated envelope; `--hold` atomically commits `completed` and a separate downstream hold. |
 | `node-exit`  | `node-exit <run> <node> --token <token> --code <integer> [--json]`                      | Command-pane completion trampoline.                                                                   |
-| `herdr-event` | `herdr-event [--json]`                                                                   | Trusted Herdr plugin bridge for agent blocked/done events.                                             |
+| `herdr-event` | `herdr-event [--json]`                                                                   | Trusted Herdr plugin bridge for agent blocked/done and pane closed/exited events.                                             |
 | `ui show`    | `ui show [--origin] [--project <cwd>] [--json]`                                         | Show merged UI choices and optional origins.                                                          |
 | `ui set`     | `ui set <path> <json-value> [--project <cwd>] [--json]`                                 | Set one validated UI choice.                                                                          |
 | `ui edit`    | `ui edit [--project <cwd>] [--json]`                                                    | Edit one layer with `$EDITOR`.                                                                        |
@@ -62,7 +62,7 @@ attention participates in the default board selection, so an older result-missin
 before a newer healthy run. A nonempty `runs --needs-attention` and an attentive board exit `2`.
 
 `run --dry-run` performs the same read-only `herdr --version` requirement as a real start and rejects
-versions older than 0.7 without creating state, worktrees, workspaces, tabs, or panes.
+versions older than 0.7.5 without creating state, worktrees, workspaces, tabs, or panes.
 `status --wait` and `events --follow` install their filesystem watch before each authoritative scan,
 then rescan, so a terminal state or event cannot be lost between a scan and watch registration.
 

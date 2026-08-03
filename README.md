@@ -14,7 +14,7 @@ is no per-run background controller.
 ## Requirements
 
 - macOS on Apple silicon
-- herdr 0.7 or newer
+- herdr 0.7.5 or newer
 - Codex and/or Claude for the providers used by a workflow
 - Git only when a node requests an isolated Git worktree
 
@@ -63,7 +63,7 @@ orchestrate board <run-id>
 Preview prints the exact digest required by `run`. Preflight verifies the workflow, provider
 commands, herdr, paths, output schemas, worktree prerequisites, and declared write conflicts before
 state or panes are created. `--dry-run` performs the read-only `herdr --version` check and requires
-0.7 or newer, but creates no state, worktrees, workspaces, tabs, or panes.
+0.7.5 or newer, but creates no state, worktrees, workspaces, tabs, or panes.
 
 Every agent prompt has a stable frame: objective, node contract, declared inputs, result path, and
 the exact `node-done` command. Dynamic inputs are resolved only when dependencies finish. A task

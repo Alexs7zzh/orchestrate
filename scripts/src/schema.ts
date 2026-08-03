@@ -388,6 +388,14 @@ export const HerdrAgentStatusEventSchema = Schema.Struct({
   })
 })
 
+export const HerdrPaneGoneEventSchema = Schema.Struct({
+  event: Schema.Literals(["pane_closed", "pane_exited"]),
+  data: Schema.Struct({
+    pane_id: NonEmptyString,
+    workspace_id: NonEmptyString
+  })
+})
+
 export const SpawnReceiptSchema = Schema.Struct({
   status: Schema.Literals(["created", "ready", "ambiguous"]),
   pane: PaneReferenceSchema,

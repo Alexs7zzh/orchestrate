@@ -1,7 +1,7 @@
 id = "orchestrate"
 name = "Orchestrate"
 version = "0.1.0"
-min_herdr_version = "0.7.0"
+min_herdr_version = "0.7.5"
 description = "Open the Orchestrate workflow board and pause or resume runs through the crank CLI."
 platforms = ["macos"]
 
@@ -26,3 +26,14 @@ command = ["sh", "bin/orchestrate-panel", "resume"]
 [[events]]
 on = "pane.agent_status_changed"
 command = ["sh", "bin/orchestrate-panel", "herdr-event"]
+
+[[events]]
+on = "pane.closed"
+command = ["sh", "bin/orchestrate-panel", "herdr-event"]
+
+[[events]]
+on = "pane.exited"
+command = ["sh", "bin/orchestrate-panel", "herdr-event"]
+
+[[startup]]
+command = ["sh", "bin/orchestrate-panel", "startup-attention"]

@@ -248,31 +248,37 @@ export async function observePaneGarnish(
   state: RunState,
   surface: HerdrSurface
 ): Promise<Readonly<Record<string, PaneGarnish>>> {
-  const entries = await Promise.all(
-    Object.values(state.nodes).map(async (node) => {
-      const pane = node.attempts.at(-1)?.pane
-      if (node.status !== "running" || pane === null || pane === undefined) {
-        return null
-      }
-      const live = await surface.paneExists(pane.paneId)
-      const agentStatus =
-        live && node.type === "agent" ? await surface.agentStatus(pane.paneId) : null
-      const sample = classifyLivePane(live, node.type, agentStatus)
-      return [
-        node.id,
-        sample.condition === "live"
-          ? ({ condition: "live", detail: null } as const)
-          : sample.condition === "blocked"
-            ? ({
-                condition: "blocked",
-                detail: sample.detail
-              } as const)
-            : sample.condition === "done"
-              ? ({ condition: "done", detail: sample.detail } as const)
-              : ({ condition: "gone", detail: sample.detail } as const)
-      ] as const
-    })
+  const observed = Object.values(state.nodes).filter(
+    (node) =>
+      node.status === "running" &&
+      node.attempts.at(-1)?.pane !== null &&
+      node.attempts.at(-1)?.pane !== undefined
   )
+  // One `pane list` snapshot replaces a pane-get plus agent-get pair per node.
+  const snapshot = observed.length === 0 ? new Map() : await surface.paneSnapshot()
+  const entries = observed.map((node) => {
+    const pane = node.attempts.at(-1)?.pane
+    if (pane === null || pane === undefined) {
+      return null
+    }
+    const observation = snapshot.get(pane.paneId)
+    const live = observation !== undefined
+    const agentStatus = live && node.type === "agent" ? (observation.agentStatus ?? null) : null
+    const sample = classifyLivePane(live, node.type, agentStatus)
+    return [
+      node.id,
+      sample.condition === "live"
+        ? ({ condition: "live", detail: null } as const)
+        : sample.condition === "blocked"
+          ? ({
+              condition: "blocked",
+              detail: sample.detail
+            } as const)
+          : sample.condition === "done"
+            ? ({ condition: "done", detail: sample.detail } as const)
+            : ({ condition: "gone", detail: sample.detail } as const)
+    ] as const
+  })
   return Object.fromEntries(entries.filter((entry) => entry !== null))
 }
 
