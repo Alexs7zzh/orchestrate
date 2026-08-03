@@ -1,5 +1,6 @@
 import { Option, Schema } from "effect"
 import { spawn } from "node:child_process"
+import { createHash } from "node:crypto"
 import { lstatSync, realpathSync } from "node:fs"
 import { access, mkdir, readFile, rm } from "node:fs/promises"
 import os from "node:os"
@@ -43,6 +44,7 @@ const MINIMUM_HERDR = [0, 7, 5] as const
 const STDERR_LIMIT = 8_192
 const AGENT_PANE_READY_TIMEOUT_MS = 5_000
 const AGENT_PANE_READY_POLL_MS = 50
+const AGENT_START_TIMEOUT_MS = 120_000
 const AGENT_SESSION_TIMEOUT_MS = 30_000
 const AGENT_SESSION_POLL_MS = 50
 const AGENT_PROMPT_ACCEPT_TIMEOUT_MS = 15_000
@@ -63,8 +65,8 @@ const HerdrCurrentOriginSchema = Schema.Struct({
       workspace_id: Schema.String,
       tab_id: Schema.String,
       pane_id: Schema.String,
-      agent: Schema.Literals(["codex", "claude"]),
-      agent_session: HerdrAgentSessionSchema
+      agent: Schema.NullOr(Schema.Literals(["codex", "claude"])),
+      agent_session: Schema.NullOr(HerdrAgentSessionSchema)
     })
   })
 })
@@ -86,6 +88,10 @@ const HerdrAgentStatusDetailsSchema = Schema.Struct({
     })
   })
 })
+const HerdrErrorEnvelopeSchema = Schema.Struct({
+  error: Schema.Struct({ code: Schema.String, message: Schema.String }),
+  id: Schema.optionalKey(Schema.String)
+})
 
 const decodeUnknownRecord = Schema.decodeUnknownOption(UnknownRecordSchema)
 const decodeNodeDoneSubmission = Schema.decodeUnknownOption(NodeDoneSubmissionSchema)
@@ -94,13 +100,44 @@ const decodeHerdrCurrentOrigin = Schema.decodeUnknownOption(HerdrCurrentOriginSc
 const decodeHerdrCurrentPane = Schema.decodeUnknownOption(HerdrCurrentPaneSchema)
 const decodeHerdrAgentDetails = Schema.decodeUnknownOption(HerdrAgentDetailsSchema)
 const decodeHerdrAgentStatusDetails = Schema.decodeUnknownOption(HerdrAgentStatusDetailsSchema)
+const decodeHerdrErrorEnvelope = Schema.decodeUnknownOption(HerdrErrorEnvelopeSchema)
 
 function asError(error: unknown): Error {
   return error instanceof Error ? error : new Error(String(error))
 }
 
+export class HerdrCommandError extends Error {
+  readonly code: string | null
+
+  constructor(message: string, code: string | null, cause?: unknown) {
+    super(message, cause === undefined ? undefined : { cause })
+    this.name = "HerdrCommandError"
+    this.code = code
+  }
+}
+
+function decodeHerdrFailure(
+  stderr: string
+): { readonly code: string; readonly message: string } | null {
+  for (const line of stderr.trim().split("\n").toReversed()) {
+    try {
+      const decoded = Option.getOrNull(decodeHerdrErrorEnvelope(JSON.parse(line) as unknown))
+      if (decoded !== null) {
+        return decoded.error
+      }
+    } catch {
+      // Continue through any diagnostic lines surrounding the JSON envelope.
+    }
+  }
+  return null
+}
+
+function isHerdrErrorCode(error: unknown, code: string): boolean {
+  return error instanceof HerdrCommandError && error.code === code
+}
+
 function isPaneNotFound(error: unknown): boolean {
-  return asError(error).message.includes('"code":"pane_not_found"')
+  return isHerdrErrorCode(error, "pane_not_found")
 }
 
 export class HerdrObservationError extends Error {
@@ -132,10 +169,13 @@ export async function runHerdr(args: readonly string[]): Promise<string> {
         resolve(stdout)
         return
       }
-      const detail = stderr.trim().length > 0 ? `: ${stderr.trim()}` : ""
+      const trimmed = stderr.trim()
+      const decoded = decodeHerdrFailure(trimmed)
+      const detail = trimmed.length > 0 ? `: ${trimmed}` : ""
       reject(
-        new Error(
-          `herdr ${args.slice(0, 2).join(" ")} ${signal === null ? `exited ${code}` : `was killed by ${signal}`}${detail}`
+        new HerdrCommandError(
+          `herdr ${args.slice(0, 2).join(" ")} ${signal === null ? `exited ${code}` : `was killed by ${signal}`}${detail}`,
+          decoded?.code ?? null
         )
       )
     })
@@ -210,7 +250,10 @@ function inheritedEnvironment(names: readonly string[]): Record<string, string> 
 
 function nodeEnvironment(node: WorkflowNode): Record<string, string> {
   return node.type === "agent"
-    ? { ...inheritedEnvironment(node.permissions.inheritEnv), ...node.permissions.env }
+    ? {
+        ...inheritedEnvironment(node.permissions.inheritEnv),
+        ...node.permissions.env
+      }
     : { ...inheritedEnvironment(node.inheritEnv), ...node.env }
 }
 
@@ -220,7 +263,10 @@ function workspacePath(workflow: WorkflowSpec, node: WorkflowNode): string {
 
 async function runProcess(command: string, args: readonly string[]): Promise<string> {
   return new Promise((resolve, reject) => {
-    const child = spawn(command, args, { env: process.env, stdio: ["ignore", "pipe", "pipe"] })
+    const child = spawn(command, args, {
+      env: process.env,
+      stdio: ["ignore", "pipe", "pipe"]
+    })
     let stdout = ""
     let stderr = ""
     child.stdout.on("data", (chunk: Buffer) => (stdout += chunk.toString("utf8")))
@@ -472,11 +518,12 @@ function sourceSession(node: AgentNode, state: RunState): string | null {
   return source.sessionId
 }
 
-function codexControlProfile(state: RunState): string {
-  return `orchestrate-control-${state.id}`
+function codexControlProfile(paneId: string): string {
+  const suffix = createHash("sha256").update(paneId).digest("hex").slice(0, 24)
+  return `orchestrate-control-${suffix}`
 }
 
-function codexControlProfileOverride(
+function codexControlProfileDocument(
   profile: string,
   submissionDirectory: string,
   writeRoots: readonly string[]
@@ -488,10 +535,26 @@ function codexControlProfileOverride(
     ...orchestrateAuthorityPaths()
       .filter((protectedPath) => protectedPath !== submissionsRoot())
       .map((protectedPath) => [protectedPath, "deny"] as const)
-  ]
-    .map(([candidate, permission]) => `${JSON.stringify(candidate)}=${JSON.stringify(permission)}`)
-    .join(",")
-  return `permissions.${profile}={extends=":read-only",filesystem={${filesystem}}}`
+  ].map(([candidate, permission]) => `${JSON.stringify(candidate)}=${JSON.stringify(permission)}`)
+  return [
+    `default_permissions=${JSON.stringify(profile)}`,
+    "",
+    `[permissions.${JSON.stringify(profile)}]`,
+    'extends=":read-only"',
+    "",
+    `[permissions.${JSON.stringify(profile)}.filesystem]`,
+    ...filesystem,
+    ""
+  ].join("\n")
+}
+
+function codexProfilePath(profile: string): string {
+  const configuredHome = process.env.CODEX_HOME?.trim()
+  const codexHome =
+    configuredHome === undefined || configuredHome.length === 0
+      ? path.join(os.homedir(), ".codex")
+      : path.resolve(configuredHome)
+  return path.join(codexHome, `${profile}.config.toml`)
 }
 
 function claudeAbsolutePattern(directory: string): string {
@@ -527,21 +590,10 @@ function claudeNodeDoneRule(
 function codexArguments(
   node: Extract<AgentNode, { readonly provider: "codex" }>,
   source: string | null,
-  state: RunState,
-  submissionDirectory: string,
-  sourceRoot: string
+  profile: string
 ) {
   const approval = node.permissions.escalation === "deny" ? "never" : "on-request"
-  const profile = codexControlProfile(state)
-  const writeRoots = providerWriteRoots(node, sourceRoot)
-  const args: string[] = [
-    "--ask-for-approval",
-    approval,
-    "--config",
-    `default_permissions=${JSON.stringify(profile)}`,
-    "--config",
-    codexControlProfileOverride(profile, submissionDirectory, writeRoots)
-  ]
+  const args: string[] = ["--ask-for-approval", approval, "--profile", profile]
   if (node.permissions.escalation === "auto-review") {
     args.push("--config", 'approvals_reviewer="auto_review"')
   }
@@ -622,17 +674,29 @@ function claudeArguments(
   return args
 }
 
-function providerArguments(
+async function prepareProviderLaunch(
   node: AgentNode,
   state: RunState,
   intent: SpawnIntent,
-  sourceRoot: string
-): readonly string[] {
+  sourceRoot: string,
+  paneId: string
+): Promise<{
+  readonly args: readonly string[]
+}> {
   const source = sourceSession(node, state)
   const transportDirectory = path.dirname(attemptFor(state, intent).resultPath)
-  return node.provider === "codex"
-    ? codexArguments(node, source, state, transportDirectory, sourceRoot)
-    : claudeArguments(node, source, state, intent, transportDirectory, sourceRoot)
+  if (node.provider === "claude") {
+    return {
+      args: claudeArguments(node, source, state, intent, transportDirectory, sourceRoot)
+    }
+  }
+  const profile = codexControlProfile(paneId)
+  const profilePath = codexProfilePath(profile)
+  await atomicWriteFile(
+    profilePath,
+    codexControlProfileDocument(profile, transportDirectory, providerWriteRoots(node, sourceRoot))
+  )
+  return { args: codexArguments(node, source, profile) }
 }
 
 async function startAgentWhenShellReady(args: readonly string[]): Promise<void> {
@@ -642,7 +706,7 @@ async function startAgentWhenShellReady(args: readonly string[]): Promise<void> 
       await runHerdr(args)
       return
     } catch (error) {
-      if (!asError(error).message.includes('"code":"agent_pane_busy"') || Date.now() >= deadline) {
+      if (!isHerdrErrorCode(error, "agent_pane_busy") || Date.now() >= deadline) {
         throw error
       }
       await new Promise<void>((resolve) => {
@@ -905,25 +969,33 @@ export class HerdrSurface {
   }
 
   async captureOrigin(): Promise<RunOrigin | null> {
-    return runHerdr(["pane", "current"])
-      .then((raw) => {
-        const decoded = Option.getOrNull(decodeHerdrCurrentOrigin(JSON.parse(raw) as unknown))
-        if (decoded === null) {
-          return null
-        }
-        const pane = decoded.result.pane
-        if (pane.agent_session.agent !== pane.agent) {
-          return null
-        }
-        return {
-          workspaceId: pane.workspace_id,
-          tabId: pane.tab_id,
-          paneId: pane.pane_id,
-          provider: pane.agent,
-          sessionId: pane.agent_session.value
-        }
-      })
-      .catch(() => null)
+    const raw = await runHerdr(["pane", "current"])
+    let decoded: Schema.Schema.Type<typeof HerdrCurrentOriginSchema> | null = null
+    try {
+      decoded = Option.getOrNull(decodeHerdrCurrentOrigin(JSON.parse(raw) as unknown))
+    } catch {
+      decoded = null
+    }
+    if (decoded === null) {
+      throw new HerdrObservationError("Herdr returned an invalid current-pane response.", raw)
+    }
+    const pane = decoded.result.pane
+    if (pane.agent === null || pane.agent_session === null) {
+      return null
+    }
+    if (pane.agent_session.agent !== pane.agent) {
+      throw new HerdrObservationError(
+        "Herdr current-pane agent and session providers do not match.",
+        raw
+      )
+    }
+    return {
+      workspaceId: pane.workspace_id,
+      tabId: pane.tab_id,
+      paneId: pane.pane_id,
+      provider: pane.agent,
+      sessionId: pane.agent_session.value
+    }
   }
 
   async promptOrigin(origin: RunOrigin, prompt: string): Promise<void> {
@@ -977,9 +1049,15 @@ export class HerdrSurface {
     }
     const preparedCwd = await prepareWorkspace(workflow, state, intent.nodeId, node)
     assertProviderAuthorityIsolation(workflow, node, preparedCwd)
-    await mkdir(path.dirname(attempt.outputPath), { recursive: true, mode: 0o700 })
+    await mkdir(path.dirname(attempt.outputPath), {
+      recursive: true,
+      mode: 0o700
+    })
     if (node.type === "agent") {
-      await mkdir(path.dirname(attempt.resultPath), { recursive: true, mode: 0o700 })
+      await mkdir(path.dirname(attempt.resultPath), {
+        recursive: true,
+        mode: 0o700
+      })
     }
     const hook = beforeProviderBoundaryForTests
     beforeProviderBoundaryForTests = null
@@ -1094,7 +1172,7 @@ export class HerdrSurface {
         return observation
       }
 
-      const args = providerArguments(node, state, intent, sourceRoot)
+      const launch = await prepareProviderLaunch(node, state, intent, sourceRoot, pane.paneId)
       await startAgentWhenShellReady([
         "agent",
         "start",
@@ -1104,8 +1182,8 @@ export class HerdrSurface {
         "--pane",
         pane.paneId,
         "--timeout",
-        "30000",
-        ...(args.length === 0 ? [] : ["--", ...args])
+        String(AGENT_START_TIMEOUT_MS),
+        ...(launch.args.length === 0 ? [] : ["--", ...launch.args])
       ])
       if (request.prompt === null) {
         throw new Error(`Agent node "${intent.nodeId}" has no prompt.`)
@@ -1181,7 +1259,10 @@ export class HerdrSurface {
       }
       if (receiptPaneIsLive) {
         if (recorded.status === "ready") {
-          return { pane: recorded.pane, providerSessionId: recorded.providerSessionId }
+          return {
+            pane: recorded.pane,
+            providerSessionId: recorded.providerSessionId
+          }
         }
         const node = templateFor(request.workflow, request.state, request.intent.nodeId)
         if (
@@ -1196,7 +1277,10 @@ export class HerdrSurface {
                   node.provider,
                   request.intent.nodeId
                 )
-          const observation = { pane: recorded.pane, providerSessionId: sessionId }
+          const observation = {
+            pane: recorded.pane,
+            providerSessionId: sessionId
+          }
           await atomicWriteJson(receiptPath(attempt), {
             status: "ready",
             ...observation,
@@ -1209,6 +1293,9 @@ export class HerdrSurface {
           new Error(recorded.detail ?? "incomplete spawn")
         )
       }
+      await rm(codexProfilePath(codexControlProfile(recorded.pane.paneId)), { force: true }).catch(
+        () => undefined
+      )
       await rm(receiptPath(attempt), { force: true })
     }
     return this.spawn(request)
@@ -1302,7 +1389,14 @@ export class HerdrSurface {
   }
 
   async closePane(paneId: string): Promise<void> {
-    await runHerdr(["pane", "close", paneId])
+    try {
+      await runHerdr(["pane", "close", paneId])
+    } catch (error) {
+      if (!isPaneNotFound(error)) {
+        throw error
+      }
+    }
+    await rm(codexProfilePath(codexControlProfile(paneId)), { force: true }).catch(() => undefined)
   }
 
   async paneExists(paneId: string): Promise<boolean> {

@@ -8,7 +8,7 @@ import { isDeepStrictEqual } from "node:util"
 import type { EventRecord, HoldState, RunState, UiPreferences, WorkflowSpec } from "./types.js"
 
 import packageJson from "../package.json" with { type: "json" }
-import { EventRecordSchema, RunStateSchema } from "./schema.js"
+import { EventRecordSchema, RunStateSchema, UiPreferencesSchema, WorkflowSchema } from "./schema.js"
 import { replayEvents } from "./state-patch.js"
 
 declare const ORCHESTRATE_BUILD_EMBEDDED: string
@@ -21,6 +21,14 @@ const LOCK_POLL_MS = 25
 const ownedDataParseOptions = { onExcessProperty: "error" } as const
 const decodeRunState = Schema.decodeUnknownSync(RunStateSchema, ownedDataParseOptions)
 const decodeEvent = Schema.decodeUnknownSync(EventRecordSchema, ownedDataParseOptions)
+const decodeWorkflow = Schema.decodeUnknownSync(WorkflowSchema, {
+  ...ownedDataParseOptions,
+  errors: "all"
+})
+const decodeUiPreferences = Schema.decodeUnknownSync(UiPreferencesSchema, {
+  ...ownedDataParseOptions,
+  errors: "all"
+})
 
 export function runtimeBuild(): string {
   if (runtimeBuildForTests !== null) {
@@ -328,11 +336,21 @@ export async function readRunState(
 }
 
 export async function readWorkflow(runDir: string): Promise<WorkflowSpec> {
-  return readJson<WorkflowSpec>(workflowPath(runDir))
+  const value: unknown = await readJson(workflowPath(runDir))
+  try {
+    return decodeWorkflow(value)
+  } catch (error) {
+    throw new Error(`Invalid workflow snapshot: ${String(error)}.`, { cause: error })
+  }
 }
 
 export async function readUiSnapshot(runDir: string): Promise<UiPreferences> {
-  return readJson<UiPreferences>(uiPath(runDir))
+  const value: unknown = await readJson(uiPath(runDir))
+  try {
+    return decodeUiPreferences(value)
+  } catch (error) {
+    throw new Error(`Invalid UI snapshot: ${String(error)}.`, { cause: error })
+  }
 }
 
 export async function appendEvents(runDir: string, events: readonly EventRecord[]): Promise<void> {

@@ -4,12 +4,16 @@ import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises
 import os from "node:os"
 import path from "node:path"
 
+import type { CommandNode, WorkflowSpec } from "../src/types.js"
+
 import {
   COMMAND_COMPLETION_SHAPES,
   PUBLIC_COMMANDS,
   PUBLIC_COMMAND_HELP,
+  jsonError,
   runCli,
   setWatchInstalledHookForTests,
+  structuralDiff,
   watchBeforeScan
 } from "../src/cli.js"
 
@@ -63,6 +67,79 @@ function completionValues(raw: string): readonly string[] {
 }
 
 describe("CLI contract", () => {
+  test("classifies JSON errors without changing their messages", () => {
+    const cases = [
+      [new Error("Unknown flag --bad for run."), "usage"],
+      [new Error("ERROR schema: Expected an object."), "validation"],
+      [new Error('No run matches "missing".'), "not_found"],
+      [new Error('Run prefix "2026" is ambiguous: a, b.'), "conflict"],
+      [new Error("herdr pane get exited 1"), "herdr"],
+      [Object.assign(new Error("permission denied"), { code: "EACCES" }), "io"],
+      [new Error("Unexpected provider failure."), "command_failed"]
+    ] as const
+
+    for (const [error, code] of cases) {
+      expect(jsonError(error)).toEqual({
+        ok: false,
+        error: { code, message: error.message }
+      })
+    }
+  })
+
+  test("structural workflow diffs ignore object key insertion order", () => {
+    const before: WorkflowSpec = {
+      name: "diff-test",
+      objective: "Compare workflows semantically.",
+      cwd: "/tmp",
+      concurrency: 1,
+      callback: { type: "none" },
+      milestones: false,
+      limits: { maxStarts: null },
+      writeConflicts: "reject",
+      repeats: [],
+      nodes: [
+        {
+          id: "build",
+          type: "command",
+          title: "Build",
+          needs: [],
+          cwd: null,
+          workspace: {
+            mode: "shared",
+            path: null,
+            vcs: "none",
+            writes: [],
+            exclusiveResources: []
+          },
+          inputs: [],
+          retry: { maxAttempts: 1 },
+          gate: "none",
+          argv: ["true"],
+          mutates: false,
+          inheritEnv: [],
+          env: { ALPHA: "1", BETA: "2" },
+          allowedExitCodes: [0]
+        }
+      ]
+    }
+    const reorderedNode: CommandNode = {
+      ...(before.nodes[0] as CommandNode),
+      env: { BETA: "2", ALPHA: "1" }
+    }
+    const after: WorkflowSpec = {
+      ...before,
+      nodes: [reorderedNode]
+    }
+
+    expect(structuralDiff(before, after)).toEqual([])
+    expect(
+      structuralDiff(before, {
+        ...after,
+        nodes: [{ ...reorderedNode, env: { BETA: "changed", ALPHA: "1" } }]
+      })
+    ).toEqual(["~ node build"])
+  })
+
   test("publishes the command vocabulary and the global exit table", async () => {
     const result = await capture(() => runCli(["--help"]))
     expect(result.code).toBe(0)

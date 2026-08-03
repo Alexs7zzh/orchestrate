@@ -4,6 +4,7 @@ import {
   chmod,
   mkdir,
   mkdtemp,
+  readdir,
   readFile,
   realpath,
   rm,
@@ -33,7 +34,9 @@ import {
 let temporaryRoot = ""
 let shimDirectory = ""
 let logPath = ""
+let profileCapturePath = ""
 let originalPath = ""
+let originalCodexHome: string | undefined
 
 function workspace() {
   return {
@@ -256,9 +259,16 @@ case "$1 $2" in
   "agent start")
     if ${busyOnce ? "true" : "false"} && [ ! -f ${JSON.stringify(busyMarker)} ]; then
       touch ${JSON.stringify(busyMarker)}
-      printf '%s\n' '{"error":{"code":"agent_pane_busy","message":"agent target pane is not an available shell"}}' >&2
+      printf '%s\n' '{ "error": { "code": "agent_pane_busy", "message": "agent target pane is not an available shell" } }' >&2
       exit 1
     fi
+    previous=""
+    for argument in "$@"; do
+      if [ "$previous" = "--profile" ]; then
+        cp "$CODEX_HOME/$argument.config.toml" ${JSON.stringify(profileCapturePath)}
+      fi
+      previous="$argument"
+    done
     if [ "$5" = "claude" ]; then touch ${JSON.stringify(claudeMarker)}; fi ;;
   "agent get")
     if [ "$3" = "origin-pane" ]; then
@@ -290,11 +300,14 @@ beforeEach(async () => {
   temporaryRoot = await mkdtemp(path.join(os.tmpdir(), "orchestrate-herdr-surface-"))
   shimDirectory = path.join(temporaryRoot, "bin")
   logPath = path.join(temporaryRoot, "herdr.log")
+  profileCapturePath = path.join(temporaryRoot, "codex-profile.toml")
   await mkdir(shimDirectory)
   originalPath = process.env.PATH ?? ""
   process.env.PATH = `${shimDirectory}:${originalPath}`
   process.env.ORCHESTRATE_BIN = "/tmp/orchestrate"
   process.env.ORCHESTRATE_STATE_DIR = `${temporaryRoot}-state`
+  originalCodexHome = process.env.CODEX_HOME
+  process.env.CODEX_HOME = path.join(temporaryRoot, "codex-home")
   await writeShim()
 })
 
@@ -303,8 +316,16 @@ afterEach(async () => {
   injectBeforeProviderBoundaryForTests(null)
   process.env.PATH = originalPath
   delete process.env.ORCHESTRATE_BIN
-  await rm(process.env.ORCHESTRATE_STATE_DIR as string, { recursive: true, force: true })
+  await rm(process.env.ORCHESTRATE_STATE_DIR as string, {
+    recursive: true,
+    force: true
+  })
   delete process.env.ORCHESTRATE_STATE_DIR
+  if (originalCodexHome === undefined) {
+    delete process.env.CODEX_HOME
+  } else {
+    process.env.CODEX_HOME = originalCodexHome
+  }
   await rm(temporaryRoot, { recursive: true, force: true })
 })
 
@@ -418,18 +439,31 @@ describe("herdr surface", () => {
     })
     const log = await readFile(logPath, "utf8")
     expect(observation).toEqual({
-      pane: { workspaceId: "w1", tabId: "t1", paneId: "p1", group: "review", surface: "tab" },
+      pane: {
+        workspaceId: "w1",
+        tabId: "t1",
+        paneId: "p1",
+        group: "review",
+        surface: "tab"
+      },
       providerSessionId: "session-1"
     })
     expect(log).toContain("agent start review --kind codex --pane p1")
     const submissionDirectory = path.dirname(state(node.id).nodes[node.id]!.attempts[0]!.resultPath)
     const runDirectory = path.join(process.env.ORCHESTRATE_STATE_DIR!, "runs", state(node.id).id)
-    const profile = `orchestrate-control-${state(node.id).id}`
+    const profileDocument = await readFile(profileCapturePath, "utf8")
     expect(log).toContain("--ask-for-approval never")
-    expect(log).toContain(`--config default_permissions="${profile}"`)
-    expect(log).toContain(`--config permissions.${profile}={extends=":read-only",filesystem={`)
-    expect(log).toContain(`${JSON.stringify(submissionDirectory)}="write"`)
-    expect(log).not.toContain(`filesystem={"${runDirectory}"="write"}`)
+    expect(log).toContain("--profile orchestrate-control-")
+    expect(log).not.toContain("default_permissions")
+    expect(profileDocument).toContain('default_permissions="orchestrate-control-')
+    expect(profileDocument).toContain('[permissions."orchestrate-control-')
+    expect(profileDocument).toContain('extends=":read-only"')
+    expect(profileDocument).toContain(".filesystem]")
+    expect(profileDocument).toContain(`${JSON.stringify(submissionDirectory)}="write"`)
+    expect(profileDocument).not.toContain(`filesystem={"${runDirectory}"="write"}`)
+    expect(await readdir(process.env.CODEX_HOME!)).toHaveLength(1)
+    await surface.closePane(observation.pane.paneId)
+    expect(await readdir(process.env.CODEX_HOME!)).toEqual([])
     expect(log).not.toContain("--sandbox workspace-write")
     expect(log).not.toContain(`--add-dir ${process.env.ORCHESTRATE_STATE_DIR}`)
     expect(log).toContain("agent get p1")
@@ -483,12 +517,13 @@ describe("herdr surface", () => {
     const canonicalTemporaryRoot = await realpath(temporaryRoot)
     const canonicalAllowedRoot = path.join(canonicalTemporaryRoot, "allowed")
     const canonicalSubmissionsRoot = `${canonicalTemporaryRoot}-state-submissions`
-    expect(log).toContain("--ask-for-approval never --config default_permissions=")
-    expect(log).toContain('extends=":read-only"')
-    expect(log).toContain(`${JSON.stringify(canonicalAllowedRoot)}="write"`)
-    expect(log).toContain(`${JSON.stringify(submissionDirectory)}="write"`)
-    expect(log).toContain(`${JSON.stringify(canonicalSubmissionsRoot)}="deny"`)
-    expect(log).not.toContain('extends=":workspace"')
+    const profileDocument = await readFile(profileCapturePath, "utf8")
+    expect(log).toContain("--ask-for-approval never --profile orchestrate-control-")
+    expect(profileDocument).toContain('extends=":read-only"')
+    expect(profileDocument).toContain(`${JSON.stringify(canonicalAllowedRoot)}="write"`)
+    expect(profileDocument).toContain(`${JSON.stringify(submissionDirectory)}="write"`)
+    expect(profileDocument).toContain(`${JSON.stringify(canonicalSubmissionsRoot)}="deny"`)
+    expect(profileDocument).not.toContain('extends=":workspace"')
     expect(log).not.toContain("--sandbox workspace-write")
     expect(log).not.toContain(`--add-dir ${submissionDirectory}`)
     expect(log).not.toContain(`--add-dir ${authoritativeRunDirectory}`)
@@ -665,7 +700,10 @@ describe("herdr surface", () => {
   test("routes auto-review separately from the execution sandbox", async () => {
     const node = {
       ...agent(),
-      permissions: { ...agent().permissions, escalation: "auto-review" as const }
+      permissions: {
+        ...agent().permissions,
+        escalation: "auto-review" as const
+      }
     }
     await new HerdrSurface().spawn({
       workflow: workflow(node),
@@ -675,8 +713,10 @@ describe("herdr surface", () => {
       placement: placement(node.id)
     })
     const log = await readFile(logPath, "utf8")
+    const profileDocument = await readFile(profileCapturePath, "utf8")
     expect(log).toContain("--ask-for-approval on-request")
-    expect(log).toContain('extends=":read-only"')
+    expect(log).toContain("--profile orchestrate-control-")
+    expect(profileDocument).toContain('extends=":read-only"')
     expect(log).toContain('approvals_reviewer="auto_review"')
   })
 
@@ -692,6 +732,7 @@ describe("herdr surface", () => {
     })
     const log = await readFile(logPath, "utf8")
     expect(log.match(/agent start review/g)).toHaveLength(2)
+    expect(log).toContain("--timeout 120000")
   })
 
   test("captures and verifies the launching agent before prompting it", async () => {
@@ -708,6 +749,27 @@ describe("herdr surface", () => {
     const log = await readFile(logPath, "utf8")
     expect(log).toContain("agent get origin-pane")
     expect(log).toContain("agent prompt origin-pane The workflow completed.")
+  })
+
+  test("distinguishes a non-agent origin from invalid or failed Herdr observation", async () => {
+    const shim = path.join(shimDirectory, "herdr")
+    await writeFile(
+      shim,
+      `#!/bin/sh\nprintf '%s\\n' '{"result":{"pane":{"agent":null,"agent_session":null,"workspace_id":"w1","tab_id":"t1","pane_id":"p1"}}}'\n`
+    )
+    await chmod(shim, 0o755)
+    expect(await new HerdrSurface().captureOrigin()).toBeNull()
+
+    await writeFile(shim, "#!/bin/sh\nprintf '%s\\n' 'not-json'\n")
+    await expect(new HerdrSurface().captureOrigin()).rejects.toThrow(
+      "invalid current-pane response"
+    )
+
+    await writeFile(
+      shim,
+      `#!/bin/sh\nprintf '%s\\n' '{ "error": { "code": "server_unavailable", "message": "outage" } }' >&2\nexit 1\n`
+    )
+    await expect(new HerdrSurface().captureOrigin()).rejects.toThrow("server_unavailable")
   })
 
   test("runs a command through the durable node-exit trampoline", async () => {
@@ -790,7 +852,10 @@ describe("herdr surface", () => {
         }
       })
       const expectedWorkspace = destination === "origin" ? "origin-workspace" : "w1"
-      expect(observation.pane).toMatchObject({ workspaceId: expectedWorkspace, surface: "tab" })
+      expect(observation.pane).toMatchObject({
+        workspaceId: expectedWorkspace,
+        surface: "tab"
+      })
       const log = await readFile(logPath, "utf8")
       expect(log).toContain("pane get stale-anchor")
       expect(log).toContain(`tab create --workspace ${expectedWorkspace}`)
@@ -846,7 +911,10 @@ describe("herdr surface", () => {
         }
       }
     })
-    expect(observation.pane).toMatchObject({ workspaceId: "w1", surface: "tab" })
+    expect(observation.pane).toMatchObject({
+      workspaceId: "w1",
+      surface: "tab"
+    })
     expect(runState.nodes.check?.attempts).toHaveLength(1)
     const log = await readFile(logPath, "utf8")
     expect(log.match(/pane get anchor/g)).toHaveLength(1)
@@ -1032,7 +1100,11 @@ describe("herdr surface", () => {
         vcs: "git",
         writes: ["src/**"],
         exclusiveResources: [],
-        git: { branch: "test/{{runId}}/{{nodeId}}", startPoint: "HEAD", removeOnClean: true }
+        git: {
+          branch: "test/{{runId}}/{{nodeId}}",
+          startPoint: "HEAD",
+          removeOnClean: true
+        }
       }
     }
     const spec = workflow(node)
@@ -1124,7 +1196,10 @@ describe("herdr surface", () => {
         )
       ).toBeFalse()
     }
-    await rm(path.dirname(targets[0] as string), { recursive: true, force: true })
+    await rm(path.dirname(targets[0] as string), {
+      recursive: true,
+      force: true
+    })
   })
 
   test("rejects unrelated and wrong-branch pre-existing worktree targets before pane creation", async () => {
@@ -1185,7 +1260,9 @@ describe("herdr surface", () => {
       'is on branch "wrong", expected "expected"'
     )
     expect(await readFile(logPath, "utf8").catch(() => "")).toBe("")
-    Bun.spawnSync(["git", "worktree", "remove", "--force", target], { cwd: temporaryRoot })
+    Bun.spawnSync(["git", "worktree", "remove", "--force", target], {
+      cwd: temporaryRoot
+    })
   })
 
   test("fails a lineage-requiring spawn when herdr reports no session", async () => {

@@ -23,6 +23,9 @@
       "allOf": [
         {
           "minLength": 1
+        },
+        {
+          "pattern": "^\\/"
         }
       ]
     },
@@ -93,11 +96,17 @@
               "allOf": [
                 {
                   "minLength": 1
+                },
+                {
+                  "pattern": "^https?:\\/\\/[^\\s/$.?#].[^\\s]*$"
                 }
               ]
             },
             "headers": {
-              "$ref": "#/$defs/Objects_"
+              "type": "object",
+              "additionalProperties": {
+                "type": "string"
+              }
             },
             "timeoutSeconds": {
               "type": "number",
@@ -179,6 +188,9 @@
                 "allOf": [
                   {
                     "minLength": 1
+                  },
+                  {
+                    "pattern": "^(?!.*--r[1-9][0-9]*$)[a-z0-9][a-z0-9-]*$"
                   }
                 ]
               },
@@ -196,7 +208,15 @@
               "cwd": {
                 "anyOf": [
                   {
-                    "type": "string"
+                    "type": "string",
+                    "allOf": [
+                      {
+                        "minLength": 1
+                      },
+                      {
+                        "pattern": "^\\/"
+                      }
+                    ]
                   },
                   {
                     "type": "null"
@@ -207,10 +227,10 @@
                 "$ref": "#/$defs/Union_"
               },
               "inputs": {
-                "$ref": "#/$defs/Arrays_2"
+                "$ref": "#/$defs/Arrays_3"
               },
               "retry": {
-                "$ref": "#/$defs/Objects_1"
+                "$ref": "#/$defs/Objects_"
               },
               "gate": {
                 "type": "string",
@@ -247,10 +267,10 @@
                 "type": "string"
               },
               "session": {
-                "$ref": "#/$defs/Objects_2"
+                "$ref": "#/$defs/Objects_1"
               },
               "output": {
-                "$ref": "#/$defs/Objects_3"
+                "$ref": "#/$defs/Objects_2"
               },
               "provider": {
                 "type": "string",
@@ -286,13 +306,13 @@
                     ]
                   },
                   "extraArgs": {
-                    "$ref": "#/$defs/Arrays_1"
+                    "$ref": "#/$defs/Arrays_2"
                   },
                   "inheritEnv": {
-                    "$ref": "#/$defs/Arrays_1"
+                    "$ref": "#/$defs/Arrays_4"
                   },
                   "env": {
-                    "$ref": "#/$defs/Objects_"
+                    "$ref": "#/$defs/Objects_3"
                   }
                 },
                 "required": [
@@ -333,6 +353,9 @@
                 "allOf": [
                   {
                     "minLength": 1
+                  },
+                  {
+                    "pattern": "^(?!.*--r[1-9][0-9]*$)[a-z0-9][a-z0-9-]*$"
                   }
                 ]
               },
@@ -350,7 +373,15 @@
               "cwd": {
                 "anyOf": [
                   {
-                    "type": "string"
+                    "type": "string",
+                    "allOf": [
+                      {
+                        "minLength": 1
+                      },
+                      {
+                        "pattern": "^\\/"
+                      }
+                    ]
                   },
                   {
                     "type": "null"
@@ -361,10 +392,10 @@
                 "$ref": "#/$defs/Union_"
               },
               "inputs": {
-                "$ref": "#/$defs/Arrays_2"
+                "$ref": "#/$defs/Arrays_3"
               },
               "retry": {
-                "$ref": "#/$defs/Objects_1"
+                "$ref": "#/$defs/Objects_"
               },
               "gate": {
                 "type": "string",
@@ -401,10 +432,10 @@
                 "type": "string"
               },
               "session": {
-                "$ref": "#/$defs/Objects_2"
+                "$ref": "#/$defs/Objects_1"
               },
               "output": {
-                "$ref": "#/$defs/Objects_3"
+                "$ref": "#/$defs/Objects_2"
               },
               "provider": {
                 "type": "string",
@@ -444,13 +475,13 @@
                     ]
                   },
                   "extraArgs": {
-                    "$ref": "#/$defs/Arrays_1"
+                    "$ref": "#/$defs/Arrays_2"
                   },
                   "inheritEnv": {
-                    "$ref": "#/$defs/Arrays_1"
+                    "$ref": "#/$defs/Arrays_4"
                   },
                   "env": {
-                    "$ref": "#/$defs/Objects_"
+                    "$ref": "#/$defs/Objects_3"
                   }
                 },
                 "required": [
@@ -491,6 +522,9 @@
                 "allOf": [
                   {
                     "minLength": 1
+                  },
+                  {
+                    "pattern": "^(?!.*--r[1-9][0-9]*$)[a-z0-9][a-z0-9-]*$"
                   }
                 ]
               },
@@ -508,7 +542,15 @@
               "cwd": {
                 "anyOf": [
                   {
-                    "type": "string"
+                    "type": "string",
+                    "allOf": [
+                      {
+                        "minLength": 1
+                      },
+                      {
+                        "pattern": "^\\/"
+                      }
+                    ]
                   },
                   {
                     "type": "null"
@@ -519,10 +561,10 @@
                 "$ref": "#/$defs/Union_"
               },
               "inputs": {
-                "$ref": "#/$defs/Arrays_2"
+                "$ref": "#/$defs/Arrays_3"
               },
               "retry": {
-                "$ref": "#/$defs/Objects_1"
+                "$ref": "#/$defs/Objects_"
               },
               "gate": {
                 "type": "string",
@@ -544,10 +586,26 @@
                 "type": "boolean"
               },
               "inheritEnv": {
-                "$ref": "#/$defs/Arrays_1"
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "allOf": [
+                    {
+                      "minLength": 1
+                    },
+                    {
+                      "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+                    }
+                  ]
+                }
               },
               "env": {
-                "$ref": "#/$defs/Objects_"
+                "type": "object",
+                "patternProperties": {
+                  "^[A-Za-z_][A-Za-z0-9_]*$": {
+                    "type": "string"
+                  }
+                }
               },
               "allowedExitCodes": {
                 "type": "array",
@@ -597,11 +655,30 @@
             "allOf": [
               {
                 "minLength": 1
+              },
+              {
+                "pattern": "^(?!.*--r[1-9][0-9]*$)[a-z0-9][a-z0-9-]*$"
               }
             ]
           },
           "members": {
-            "$ref": "#/$defs/Arrays_"
+            "type": "array",
+            "items": {
+              "type": "string",
+              "allOf": [
+                {
+                  "minLength": 1
+                },
+                {
+                  "pattern": "^(?!.*--r[1-9][0-9]*$)[a-z0-9][a-z0-9-]*$"
+                }
+              ]
+            },
+            "allOf": [
+              {
+                "minItems": 1
+              }
+            ]
           },
           "until": {
             "anyOf": [
@@ -619,6 +696,9 @@
                     "allOf": [
                       {
                         "minLength": 1
+                      },
+                      {
+                        "pattern": "^(?!.*--r[1-9][0-9]*$)[a-z0-9][a-z0-9-]*$"
                       }
                     ]
                   }
@@ -643,11 +723,19 @@
                     "allOf": [
                       {
                         "minLength": 1
+                      },
+                      {
+                        "pattern": "^(?!.*--r[1-9][0-9]*$)[a-z0-9][a-z0-9-]*$"
                       }
                     ]
                   },
                   "pointer": {
-                    "type": "string"
+                    "type": "string",
+                    "allOf": [
+                      {
+                        "pattern": "^(?:\\/(?:[^~/]|~[01])*)*$"
+                      }
+                    ]
                   },
                   "equals": {}
                 },
@@ -710,13 +798,21 @@
         }
       ]
     },
-    "Objects_": {
-      "type": "object",
-      "additionalProperties": {
-        "type": "string"
+    "Arrays_1": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "allOf": [
+          {
+            "minLength": 1
+          },
+          {
+            "pattern": "^(?!.*--r[1-9][0-9]*$)[a-z0-9][a-z0-9-]*$"
+          }
+        ]
       }
     },
-    "Arrays_1": {
+    "Arrays_2": {
       "type": "array",
       "items": {
         "type": "string"
@@ -753,10 +849,10 @@
               ]
             },
             "writes": {
-              "$ref": "#/$defs/Arrays_1"
+              "$ref": "#/$defs/Arrays_2"
             },
             "exclusiveResources": {
-              "$ref": "#/$defs/Arrays_1"
+              "$ref": "#/$defs/Arrays_2"
             }
           },
           "required": [
@@ -782,6 +878,9 @@
               "allOf": [
                 {
                   "minLength": 1
+                },
+                {
+                  "pattern": "^\\/"
                 }
               ]
             },
@@ -795,10 +894,10 @@
               ]
             },
             "writes": {
-              "$ref": "#/$defs/Arrays_1"
+              "$ref": "#/$defs/Arrays_2"
             },
             "exclusiveResources": {
-              "$ref": "#/$defs/Arrays_1"
+              "$ref": "#/$defs/Arrays_2"
             }
           },
           "required": [
@@ -856,10 +955,10 @@
               "additionalProperties": false
             },
             "writes": {
-              "$ref": "#/$defs/Arrays_1"
+              "$ref": "#/$defs/Arrays_2"
             },
             "exclusiveResources": {
-              "$ref": "#/$defs/Arrays_1"
+              "$ref": "#/$defs/Arrays_2"
             }
           },
           "required": [
@@ -874,7 +973,7 @@
         }
       ]
     },
-    "Arrays_2": {
+    "Arrays_3": {
       "type": "array",
       "items": {
         "type": "object",
@@ -884,6 +983,9 @@
             "allOf": [
               {
                 "minLength": 1
+              },
+              {
+                "pattern": "^(?!.*--r[1-9][0-9]*$)[a-z0-9][a-z0-9-]*$"
               }
             ]
           },
@@ -919,7 +1021,7 @@
         "additionalProperties": false
       }
     },
-    "Objects_1": {
+    "Objects_": {
       "type": "object",
       "properties": {
         "maxAttempts": {
@@ -936,7 +1038,7 @@
       ],
       "additionalProperties": false
     },
-    "Objects_2": {
+    "Objects_1": {
       "type": "object",
       "properties": {
         "mode": {
@@ -985,7 +1087,7 @@
       ],
       "additionalProperties": false
     },
-    "Objects_3": {
+    "Objects_2": {
       "type": "object",
       "properties": {
         "format": {
@@ -1011,6 +1113,28 @@
         "schema"
       ],
       "additionalProperties": false
+    },
+    "Arrays_4": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "allOf": [
+          {
+            "minLength": 1
+          },
+          {
+            "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+          }
+        ]
+      }
+    },
+    "Objects_3": {
+      "type": "object",
+      "patternProperties": {
+        "^[A-Za-z_][A-Za-z0-9_]*$": {
+          "type": "string"
+        }
+      }
     }
   }
 }

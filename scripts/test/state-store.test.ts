@@ -15,9 +15,12 @@ import {
   persistNewRun,
   readEvents,
   readRunState,
+  readUiSnapshot,
   readWorkflow,
   runStatePath,
-  setRuntimeBuildForTests
+  setRuntimeBuildForTests,
+  uiPath,
+  workflowPath
 } from "../src/state.js"
 
 let temporaryRoot = ""
@@ -106,6 +109,7 @@ function event(after: RunState, before: RunState | null, type: EventRecord["type
     runId: after.id,
     type,
     message: type,
+    ...(type === "run.paused" ? { data: { kind: "human" } } : {}),
     patch: diffState(before, after)
   }
 }
@@ -265,6 +269,17 @@ describe("state store", () => {
     await expect(readRunState(runDir)).rejects.toThrow("matching CLI")
   })
 
+  test("rejects corrupted durable workflow and UI snapshots at the read boundary", async () => {
+    const initial = state(1)
+    const runDir = await persistNewRun(workflow(), DEFAULT_UI_PREFERENCES, initial, [
+      event(initial, null, "run.started")
+    ])
+    await writeFile(workflowPath(runDir), JSON.stringify({ name: "incomplete" }))
+    await expect(readWorkflow(runDir)).rejects.toThrow("Invalid workflow snapshot")
+    await writeFile(uiPath(runDir), JSON.stringify({ board: "split-right" }))
+    await expect(readUiSnapshot(runDir)).rejects.toThrow("Invalid UI snapshot")
+  })
+
   test("atomically replaces a multi-event journal batch across short-write ENOSPC and restart", async () => {
     const initial = state(1)
     const runDir = await persistNewRun(workflow(), DEFAULT_UI_PREFERENCES, initial, [
@@ -283,7 +298,11 @@ describe("state store", () => {
     }
     const batch = [
       event(paused, initial, "run.paused"),
-      { ...event(held, paused, "hold.set"), nodeId: "check" }
+      {
+        ...event(held, paused, "hold.set"),
+        nodeId: "check",
+        data: { scope: "instance", source: "manual" }
+      }
     ] as const
     const priorJournal = await readFile(eventsPath(runDir), "utf8")
     const enospc = Object.assign(new Error("injected ENOSPC after a short write"), {
@@ -324,7 +343,11 @@ describe("state store", () => {
     }
     const batch = [
       event(paused, initial, "run.paused"),
-      { ...event(held, paused, "hold.set"), nodeId: "check" }
+      {
+        ...event(held, paused, "hold.set"),
+        nodeId: "check",
+        data: { scope: "instance", source: "manual" }
+      }
     ] as const
     const eio = Object.assign(new Error("injected directory fsync EIO after rename"), {
       code: "EIO"

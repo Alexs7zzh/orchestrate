@@ -1,3 +1,5 @@
+import { isDeepStrictEqual } from "node:util"
+
 import type {
   AttemptState,
   CrankEvent,
@@ -9,11 +11,12 @@ import type {
   RunOrigin,
   RunState,
   SpawnIntent,
-  StatePatchOperation,
   TransitionResult,
   WorkflowNode,
   WorkflowSpec
 } from "./types.js"
+
+import { diffState } from "./state-patch.js"
 
 export interface PreparedNode {
   readonly token: string
@@ -124,29 +127,7 @@ export function createInitialRunState(
 }
 
 function same(left: unknown, right: unknown): boolean {
-  return JSON.stringify(left) === JSON.stringify(right)
-}
-
-function pointerPart(value: string): string {
-  return value.replaceAll("~", "~0").replaceAll("/", "~1")
-}
-
-function statePatch(before: RunState, after: RunState): StatePatchOperation[] {
-  const patch: StatePatchOperation[] = []
-  const beforeRecord = before as unknown as Record<string, unknown>
-  const afterRecord = after as unknown as Record<string, unknown>
-  const keys = new Set([...Object.keys(beforeRecord), ...Object.keys(afterRecord)])
-  for (const key of [...keys].toSorted()) {
-    const path = `/${pointerPart(key)}`
-    if (!(key in afterRecord)) {
-      patch.push({ op: "remove", path })
-    } else if (!(key in beforeRecord)) {
-      patch.push({ op: "add", path, value: afterRecord[key] })
-    } else if (!same(beforeRecord[key], afterRecord[key])) {
-      patch.push({ op: "replace", path, value: afterRecord[key] })
-    }
-  }
-  return patch
+  return isDeepStrictEqual(left, right)
 }
 
 function replaceNode(state: RunState, node: NodeRunState): RunState {
@@ -410,8 +391,7 @@ export function transition(
       sequence: before.sequence + 1,
       updatedAt: now
     }
-    const patch: readonly StatePatchOperation[] =
-      options.root === true ? [{ op: "add", path: "", value: state }] : statePatch(before, state)
+    const patch = options.root === true ? diffState(null, state) : diffState(before, state)
     const record: EventRecord = {
       runtimeVersion: state.runtimeVersion,
       sequence: state.sequence,

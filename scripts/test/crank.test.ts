@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test"
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 
@@ -18,6 +18,7 @@ import {
   crankRun,
   handleHerdrAgentStatusEvent,
   originHandoffEvents,
+  readBoundedResult,
   reconcileRun,
   startWorkflowRun,
   submitNodeDone,
@@ -167,7 +168,7 @@ class FakeSurface implements CrankSurface {
     this.closed.push(paneId)
   }
 
-  async notify(): Promise<void> {}
+  async notify(_title: string, _body: string, _sound: "none" | "done" | "request"): Promise<void> {}
 
   async promptOrigin(origin: RunOrigin, prompt: string): Promise<void> {
     expect(origin).toEqual(this.origin)
@@ -382,6 +383,33 @@ describe("crank shell", () => {
     expect(stoppedSurface.handoffs).toEqual([])
   })
 
+  test("keeps a committed completion successful when origin handoff and fallback both fail", async () => {
+    const surface = new FakeSurface()
+    let fallbackAttempts = 0
+    surface.promptOrigin = async () => {
+      throw new Error("origin unavailable")
+    }
+    surface.notify = async (title) => {
+      if (title.includes("origin handoff fallback")) {
+        fallbackAttempts += 1
+        throw new Error("notifications unavailable")
+      }
+    }
+    const started = await start(workflow([command("check")]), surface)
+    const token = started.state.nodes.check?.attempts.at(-1)?.token as string
+    const runDir = runDirectory(started.state.id)
+
+    const completed = await crankRun(
+      runDir,
+      { type: "node-exit", nodeId: "check", token, code: 0, error: null },
+      { surface }
+    )
+
+    expect(completed.state.status).toBe("completed")
+    expect((await readRunState(runDir)).status).toBe("completed")
+    expect(fallbackAttempts).toBe(1)
+  })
+
   test("reports an invalid submission path after consuming independent valid work", async () => {
     const surface = new FakeSurface()
     const started = await start(workflow([agent("review"), agent("independent")]), surface)
@@ -428,6 +456,27 @@ describe("crank shell", () => {
       `${MAX_RESULT_BYTES}-byte result limit`
     )
     expect((await readRunState(runDir)).nodes.review?.status).toBe("running")
+  })
+
+  test("rejects a provider result symlink without reading its target", async () => {
+    const secret = path.join(temporaryRoot, "outside-secret.txt")
+    const result = path.join(temporaryRoot, "submission", "result.txt")
+    await writeFile(secret, "must not escape")
+    await mkdir(path.dirname(result), { recursive: true })
+    await symlink(secret, result)
+
+    await expect(readBoundedResult(result, "Provider result")).rejects.toThrow(
+      "not a symbolic link"
+    )
+  })
+
+  test("rejects non-regular provider result files", async () => {
+    const result = path.join(temporaryRoot, "submission-directory")
+    await mkdir(result)
+
+    await expect(readBoundedResult(result, "Provider result")).rejects.toThrow(
+      "must be a regular file"
+    )
   })
 
   test("serializes simultaneous cranks without losing either hold", async () => {

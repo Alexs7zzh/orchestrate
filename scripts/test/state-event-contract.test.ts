@@ -47,6 +47,7 @@ function event(after: RunState, before: RunState | null, type: EventRecord["type
     runId: after.id,
     type,
     message: type,
+    ...(type === "run.paused" ? { data: { kind: "human" } } : {}),
     patch: diffState(before, after)
   }
 }
@@ -128,8 +129,16 @@ describe("state and event contract", () => {
     })
     const events = [
       event(base, null, "run.started"),
-      event(completed, base, "node.completed"),
-      event(held, completed, "hold.set")
+      {
+        ...event(completed, base, "node.completed"),
+        nodeId: "work",
+        data: { attempt: 1 }
+      },
+      {
+        ...event(held, completed, "hold.set"),
+        nodeId: "work",
+        data: { scope: "instance", source: "node-done" }
+      }
     ]
     const validateEvent = new Ajv2020({ allErrors: true, strict: false }).compile(eventSchema)
 
@@ -140,6 +149,22 @@ describe("state and event contract", () => {
       { op: "add", path: "/holds/work", value: held.holds.work },
       { op: "replace", path: "/sequence", value: 3 }
     ])
+  })
+
+  test("rejects event variants with missing node identity or mismatched data", () => {
+    const current = state()
+    const validateEvent = new Ajv2020({ allErrors: true, strict: false }).compile(eventSchema)
+    expect(validateEvent(event(current, null, "node.completed"))).toBe(false)
+    expect(
+      validateEvent({
+        ...event(current, null, "node.completed"),
+        nodeId: "work",
+        data: { digest: "not-completion-data" }
+      })
+    ).toBe(false)
+    expect(validateEvent({ ...event(current, null, "run.completed"), nodeId: "impossible" })).toBe(
+      false
+    )
   })
 
   test("omits the removed compound vocabulary from source, tests, schemas, and documents", async () => {

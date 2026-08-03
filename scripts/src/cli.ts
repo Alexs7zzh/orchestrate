@@ -4,6 +4,7 @@ import { access, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises
 import os from "node:os"
 import path from "node:path"
 import { createInterface } from "node:readline/promises"
+import { isDeepStrictEqual } from "node:util"
 
 import type { PaneGarnish } from "./board-model.js"
 import type {
@@ -70,15 +71,70 @@ export function jsonRequested(args: readonly string[]): boolean {
   return args.some((argument) => argument === "--json" || argument.startsWith("--json="))
 }
 
+export type JsonErrorCode =
+  | "usage"
+  | "validation"
+  | "not_found"
+  | "conflict"
+  | "herdr"
+  | "io"
+  | "command_failed"
+
+function jsonErrorCode(error: unknown, message: string): JsonErrorCode {
+  const candidateCode =
+    error !== null && typeof error === "object" && "code" in error
+      ? (error as { readonly code?: unknown }).code
+      : undefined
+  const systemCode = typeof candidateCode === "string" ? candidateCode : ""
+  if (/\bherdr\b/i.test(message)) {
+    return "herdr"
+  }
+  if (systemCode === "ENOENT") {
+    return "not_found"
+  }
+  if (["EEXIST", "EBUSY", "EAGAIN", "EALREADY"].includes(systemCode)) {
+    return "conflict"
+  }
+  if (/^E[A-Z0-9]+$/.test(systemCode)) {
+    return "io"
+  }
+  if (
+    /^(?:Usage:|Unknown (?:flag|command|global argument|ui subcommand)|--\S+ (?:requires|does not accept)|.* requires (?:one |exactly )?|.* accepts (?:at most |one )?|Unsupported shell |ui \S+ is interactive)/.test(
+      message
+    )
+  ) {
+    return "usage"
+  }
+  if (
+    /^(?:ERROR\b|Invalid\b)|\bmust be (?:an? |valid\b)|\bmust name\b|\bvalue must be valid JSON\b/.test(
+      message
+    )
+  ) {
+    return "validation"
+  }
+  if (
+    /^(?:No runs exist\.|No run matches |Unknown node |Unknown repeat )|\bnot found\b/i.test(
+      message
+    )
+  ) {
+    return "not_found"
+  }
+  if (/\b(?:already|ambiguous|conflict|digest mismatch)\b/i.test(message)) {
+    return "conflict"
+  }
+  return "command_failed"
+}
+
 export function jsonError(error: unknown): {
   readonly ok: false
-  readonly error: { readonly code: "command_failed"; readonly message: string }
+  readonly error: { readonly code: JsonErrorCode; readonly message: string }
 } {
+  const message = error instanceof Error ? error.message : String(error)
   return {
     ok: false,
     error: {
-      code: "command_failed",
-      message: error instanceof Error ? error.message : String(error)
+      code: jsonErrorCode(error, message),
+      message
     }
   }
 }
@@ -822,7 +878,7 @@ async function streamEvents(runDir: string, json: boolean, follow: boolean): Pro
   }
 }
 
-function structuralDiff(before: WorkflowSpec, after: WorkflowSpec): readonly string[] {
+export function structuralDiff(before: WorkflowSpec, after: WorkflowSpec): readonly string[] {
   const changes: string[] = []
   for (const key of [
     "name",
@@ -835,7 +891,7 @@ function structuralDiff(before: WorkflowSpec, after: WorkflowSpec): readonly str
     "writeConflicts",
     "repeats"
   ] as const) {
-    if (JSON.stringify(before[key]) !== JSON.stringify(after[key])) {
+    if (!isDeepStrictEqual(before[key], after[key])) {
       changes.push(`~ ${key}`)
     }
   }
@@ -849,7 +905,7 @@ function structuralDiff(before: WorkflowSpec, after: WorkflowSpec): readonly str
   for (const [id, node] of right) {
     if (!left.has(id)) {
       changes.push(`+ node ${id}`)
-    } else if (JSON.stringify(left.get(id)) !== JSON.stringify(node)) {
+    } else if (!isDeepStrictEqual(left.get(id), node)) {
       changes.push(`~ node ${id}`)
     }
   }

@@ -8,13 +8,12 @@ import {
 } from "@opentui/core"
 import { Effect } from "effect"
 import { watch, type FSWatcher } from "node:fs"
-import { readFile } from "node:fs/promises"
 
 import type { BoardAction, BoardInput, BoardViewModel, PaneGarnish } from "./board-model.js"
 import type { CrankEvent, RunState } from "./types.js"
 
 import { buildBoardModel, mapBoardInput } from "./board-model.js"
-import { crankRun } from "./crank.js"
+import { crankRun, readBoundedResult } from "./crank.js"
 import { HerdrSurface, type HerdrAgentStatus } from "./herdr-surface.js"
 import { installedBuild } from "./setup.js"
 import { readEvents, readRunState } from "./state.js"
@@ -44,6 +43,13 @@ export function mapBoardInputWhenReady(
   input: BoardInput
 ): BoardAction {
   return model === null ? { type: "none" } : mapBoardInput(model, selectedNodeId, input)
+}
+
+export async function readBoardResultDetail(resultPath: string | null): Promise<string> {
+  if (resultPath === null) {
+    return "No result file."
+  }
+  return readBoundedResult(resultPath, "Board result").catch((error: unknown) => String(error))
 }
 
 export interface ClockRefreshOptions {
@@ -424,10 +430,7 @@ async function runInteractiveBoard(runDir: string, renderer: CliRenderer): Promi
       return
     }
     if (action.type === "show-result") {
-      detail =
-        action.resultPath === null
-          ? "No result file."
-          : await readFile(action.resultPath, "utf8").catch((error: unknown) => String(error))
+      detail = await readBoardResultDetail(action.resultPath)
       frame = renderBoardFrame(model, selectedNodeId, detail, buildWarning)
       text.content = frame.text
       keepSelectionVisible()

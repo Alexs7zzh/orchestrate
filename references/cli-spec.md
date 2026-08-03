@@ -2,8 +2,9 @@
 
 Every command prints human text by default and exactly one JSON value on stdout with `--json`.
 Parse, dispatch, missing-file, and noninteractive errors use
-`{"ok":false,"error":{"code":"command_failed","message":"..."}}` on stdout and exit `1` with
-no human stderr. `events --json` returns one `{"events":[...]}` value; the explicit streaming
+`{"ok":false,"error":{"code":"<stable-code>","message":"..."}}` on stdout and exit `1` with
+no human stderr. Codes distinguish `usage`, `validation`, `not_found`, `conflict`, `herdr`, and
+`io`; unclassified failures use `command_failed`. `events --json` returns one `{"events":[...]}` value; the explicit streaming
 exception `events --follow --json` emits one event JSON value per line. Exit codes are `0` for
 success, `1` for error, and `2` when the observed run needs human attention. Run IDs accept a unique
 prefix, except `node-done`, whose sandbox-safe transport path requires the exact full run ID embedded

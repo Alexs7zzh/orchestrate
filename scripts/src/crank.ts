@@ -1,6 +1,7 @@
 import { Ajv2020 } from "ajv/dist/2020.js"
 import { Option, Schema } from "effect"
-import { open, readFile, stat } from "node:fs/promises"
+import { constants } from "node:fs"
+import { open } from "node:fs/promises"
 import path from "node:path"
 
 import type { NodeDoneSubmission } from "./state.js"
@@ -53,14 +54,33 @@ import { validateWorkflow } from "./validation.js"
 export const MAX_RESULT_BYTES = 1024 * 1024
 
 export async function readBoundedResult(file: string, label: string): Promise<string> {
-  const metadata = await stat(file)
-  if (metadata.size > MAX_RESULT_BYTES) {
-    throw new Error(`${label} exceeds the ${MAX_RESULT_BYTES}-byte result limit.`)
-  }
-  const handle = await open(file, "r")
+  const flags = constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0)
+  let handle: Awaited<ReturnType<typeof open>>
   try {
+    handle = await open(file, flags)
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ELOOP") {
+      throw new Error(`${label} must be a regular file, not a symbolic link.`, { cause: error })
+    }
+    throw error
+  }
+  try {
+    const metadata = await handle.stat()
+    if (!metadata.isFile()) {
+      throw new Error(`${label} must be a regular file.`)
+    }
+    if (metadata.size > MAX_RESULT_BYTES) {
+      throw new Error(`${label} exceeds the ${MAX_RESULT_BYTES}-byte result limit.`)
+    }
     const buffer = Buffer.alloc(MAX_RESULT_BYTES + 1)
-    const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0)
+    let bytesRead = 0
+    while (bytesRead < buffer.length) {
+      const read = await handle.read(buffer, bytesRead, buffer.length - bytesRead, bytesRead)
+      if (read.bytesRead === 0) {
+        break
+      }
+      bytesRead += read.bytesRead
+    }
     if (bytesRead > MAX_RESULT_BYTES) {
       throw new Error(`${label} exceeds the ${MAX_RESULT_BYTES}-byte result limit.`)
     }
@@ -443,11 +463,13 @@ async function presentActions(
     try {
       await surface.promptOrigin(state.origin, prompt)
     } catch {
-      await surface.notify(
-        `${workflow.name} · origin handoff fallback`,
-        `Run ${state.id} could not prompt its launching agent. Inspect orchestrate status ${state.id}.`,
-        "request"
-      )
+      await surface
+        .notify(
+          `${workflow.name} · origin handoff fallback`,
+          `Run ${state.id} could not prompt its launching agent. Inspect orchestrate status ${state.id}.`,
+          "request"
+        )
+        .catch(() => undefined)
     }
   }
 }
@@ -633,7 +655,10 @@ async function handlePaneGoneEvent(
     if (state.origin === null) {
       continue
     }
-    const submission = await readFile(completionSubmissionPath(attempt.resultPath), "utf8")
+    const submission = await readBoundedResult(
+      completionSubmissionPath(attempt.resultPath),
+      `Completion submission for node "${node.id}"`
+    )
       .then((raw) => Option.getOrNull(decodeNodeDoneSubmission(JSON.parse(raw) as unknown)))
       .catch(() => null)
     const submitted =
@@ -682,7 +707,10 @@ async function consumeNodeDoneSubmissions(
     const submissionPath = completionSubmissionPath(attempt.resultPath)
     let raw: string
     try {
-      raw = await readFile(submissionPath, "utf8")
+      raw = await readBoundedResult(
+        submissionPath,
+        `Completion submission for node "${liveCandidate.id}"`
+      )
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") {
         continue
@@ -1078,7 +1106,10 @@ export async function handleHerdrAgentStatusEvent(
         `Inspect its Herdr pane or run orchestrate board ${state.id}.`
       ].join("\n")
     } else {
-      const submission = await readFile(completionSubmissionPath(attempt.resultPath), "utf8")
+      const submission = await readBoundedResult(
+        completionSubmissionPath(attempt.resultPath),
+        `Completion submission for node "${node.id}"`
+      )
         .then((raw) => Option.getOrNull(decodeNodeDoneSubmission(JSON.parse(raw) as unknown)))
         .catch(() => null)
       const valid =

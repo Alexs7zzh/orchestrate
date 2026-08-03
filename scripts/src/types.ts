@@ -1,3 +1,11 @@
+import type {
+  EventRecordSchema,
+  RunStateSchema,
+  UiPreferencesSchema,
+  WorkflowSchema
+} from "./schema.js"
+import type { Schema } from "effect"
+
 export type Provider = "codex" | "claude"
 export type NodeType = "agent" | "command"
 export type NodeOrigin = "initial" | "loop-round"
@@ -67,7 +75,6 @@ export interface RetrySpec {
 }
 
 export type CodexSandbox = "read-only" | "workspace-write"
-export type CodexPermissionCeiling = CodexSandbox | "danger-full-access"
 export type AgentEscalation = "deny" | "ask-user" | "auto-review"
 export type ClaudePermissionMode =
   | "acceptEdits"
@@ -197,21 +204,9 @@ export interface CallbackNotification {
 
 export type CallbackSpec = CallbackNone | CallbackCommand | CallbackWebhook | CallbackNotification
 
-export interface WorkflowSpec {
-  readonly name: string
-  readonly objective: string
-  readonly cwd: string
-  // Maximum simultaneously open node panes. This is a human-attention budget.
-  readonly concurrency: number
-  readonly callback: CallbackSpec
-  readonly milestones: boolean
-  readonly limits: {
-    readonly maxStarts: number | null
-  }
-  readonly writeConflicts: "reject" | "allow-with-approval"
-  readonly nodes: readonly WorkflowNode[]
-  readonly repeats: readonly RepeatSpec[]
-}
+// Runtime-owned contracts are derived from their Effect schemas so validation
+// and TypeScript cannot silently drift apart.
+export type WorkflowSpec = Schema.Schema.Type<typeof WorkflowSchema>
 
 export interface ValidationIssue {
   readonly severity: "error" | "warning"
@@ -326,59 +321,7 @@ export interface RunOrigin {
   readonly sessionId: string
 }
 
-export interface RunState {
-  readonly runtimeVersion: string
-  readonly sequence: number
-  readonly id: string
-  readonly workflowName: string
-  readonly objective: string
-  readonly digest: string
-  readonly status: RunStatus
-  readonly createdAt: string
-  readonly startedAt: string
-  readonly finishedAt: string | null
-  readonly updatedAt: string
-  readonly error: string | null
-  readonly pause: PauseState | null
-  readonly origin: RunOrigin | null
-  readonly allowWriteConflicts: boolean
-  readonly starts: number
-  readonly fuseOverride: boolean
-  readonly repeatRoundExtensions: Readonly<Record<string, number>>
-  readonly pendingRevision: PendingRevision | null
-  readonly nodes: Readonly<Record<string, NodeRunState>>
-  readonly sessions: Readonly<Record<string, SessionState>>
-  readonly gates: Readonly<Record<string, GateState>>
-  readonly holds: Readonly<Record<string, HoldState>>
-  readonly repeats: Readonly<Record<string, RepeatRunState>>
-  readonly spawnIntents: Readonly<Record<string, SpawnIntent>>
-}
-
-export type EventType =
-  | "run.started"
-  | "run.paused"
-  | "run.resumed"
-  | "run.completed"
-  | "run.failed"
-  | "run.stopped"
-  | "node.ready"
-  | "node.spawn-planned"
-  | "node.started"
-  | "node.completed"
-  | "node.failed"
-  | "node.retrying"
-  | "node.cancelled"
-  | "gate.opened"
-  | "gate.approved"
-  | "hold.set"
-  | "hold.released"
-  | "revision.proposed"
-  | "revision.approved"
-  | "revision.discarded"
-  | "repeat.round-started"
-  | "repeat.completed"
-  | "repeat.max-rounds"
-  | "ui.degraded"
+export type RunState = Schema.Schema.Type<typeof RunStateSchema>
 
 export type StatePatchOperation =
   | { readonly op: "add" | "replace"; readonly path: string; readonly value: unknown }
@@ -388,16 +331,12 @@ export type StatePatchOperation =
 // complete initial state at the document root; later records contain only the
 // mutations caused by that event, so replay is exact without duplicating the
 // growing state document in every line.
-export interface EventRecord {
-  readonly runtimeVersion: string
-  readonly sequence: number
-  readonly timestamp: string
-  readonly runId: string
+type ValidatedEventRecord = Schema.Schema.Type<typeof EventRecordSchema>
+export type EventType = ValidatedEventRecord["type"]
+export type EventRecord = Omit<ValidatedEventRecord, "type" | "nodeId" | "data"> & {
   readonly type: EventType
-  readonly message: string
   readonly nodeId?: string
   readonly data?: unknown
-  readonly patch: readonly StatePatchOperation[]
 }
 
 export type EventSeverity = "attention" | "milestone" | "progress"
@@ -421,26 +360,7 @@ export interface ContinueRule {
   readonly autoContinue: boolean
 }
 
-export interface UiPreferences {
-  readonly board: "split-right" | "dedicated-workspace" | "current-workspace"
-  readonly placement: {
-    readonly workspace: "dedicated" | "origin"
-    readonly rules: readonly PlacementRule[]
-    readonly grouping:
-      | { readonly by: "root-ancestor" }
-      | { readonly by: "id-prefix"; readonly separator: string }
-    readonly maxSplitsPerTab: number
-  }
-  readonly completedPanes: {
-    readonly agent: "keep-open" | "close-success"
-    readonly command: "keep-open" | "close-success"
-  }
-  readonly focus: "never" | "attention" | "always"
-  readonly continuation: {
-    readonly rules: readonly ContinueRule[]
-  }
-  readonly notifications: Readonly<Record<EventSeverity, NotificationChannel>>
-}
+export type UiPreferences = Schema.Schema.Type<typeof UiPreferencesSchema>
 
 export interface UiPreferenceLayer {
   readonly board: UiPreferences["board"] | null

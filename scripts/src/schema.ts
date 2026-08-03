@@ -6,13 +6,18 @@ const NonNegativeInteger = Schema.Int.pipe(Schema.check(Schema.isGreaterThanOrEq
 const NullablePositiveInteger = Schema.NullOr(PositiveInteger)
 const NullableString = Schema.NullOr(Schema.String)
 const NonEmptyString = Schema.String.check(Schema.isMinLength(1))
+const AbsolutePath = NonEmptyString.check(Schema.isPattern(/^\//))
+const NodeId = NonEmptyString.check(Schema.isPattern(/^(?!.*--r[1-9][0-9]*$)[a-z0-9][a-z0-9-]*$/))
+const EnvironmentName = NonEmptyString.check(Schema.isPattern(/^[A-Za-z_][A-Za-z0-9_]*$/))
+const JsonPointer = Schema.String.check(Schema.isPattern(/^(?:\/(?:[^~/]|~[01])*)*$/))
+const HttpUrl = NonEmptyString.check(Schema.isPattern(/^https?:\/\/[^\s/$.?#].[^\s]*$/i))
 const StringArray = Schema.Array(Schema.String)
 const NonEmptyStringArray = Schema.Array(NonEmptyString).check(Schema.isMinLength(1))
 const StringRecord = Schema.Record(Schema.String, Schema.String)
 const UnknownRecord = Schema.Record(Schema.String, Schema.Unknown)
 
 const InputSchema = Schema.Struct({
-  from: NonEmptyString,
+  from: NodeId,
   as: NonEmptyString,
   include: Schema.Literals(["content", "path"]),
   round: Schema.Literals(["current", "previous"])
@@ -45,7 +50,7 @@ const SharedWorkspaceSchema = Schema.Struct({
 
 const ExistingWorkspaceSchema = Schema.Struct({
   mode: Schema.Literal("existing"),
-  path: NonEmptyString,
+  path: AbsolutePath,
   vcs: VcsSchema,
   ...WorkspaceCommonFields
 })
@@ -69,8 +74,8 @@ const RetrySchema = Schema.Struct({ maxAttempts: PositiveInteger })
 const PermissionsCommonFields = {
   escalation: Schema.Literals(["deny", "ask-user", "auto-review"]),
   extraArgs: StringArray,
-  inheritEnv: StringArray,
-  env: StringRecord
+  inheritEnv: Schema.Array(EnvironmentName),
+  env: Schema.Record(EnvironmentName, Schema.String)
 }
 
 const CodexPermissionsSchema = Schema.Struct({
@@ -100,10 +105,10 @@ const OutputSchema = Schema.Struct({
 })
 
 const CommonFields = {
-  id: NonEmptyString,
+  id: NodeId,
   title: NonEmptyString,
-  needs: StringArray,
-  cwd: NullableString,
+  needs: Schema.Array(NodeId),
+  cwd: Schema.NullOr(AbsolutePath),
   workspace: WorkspaceSchema,
   inputs: Schema.Array(InputSchema),
   retry: RetrySchema,
@@ -139,8 +144,8 @@ export const CommandNodeSchema = Schema.Struct({
   type: Schema.Literal("command"),
   argv: NonEmptyStringArray,
   mutates: Schema.Boolean,
-  inheritEnv: StringArray,
-  env: StringRecord,
+  inheritEnv: Schema.Array(EnvironmentName),
+  env: Schema.Record(EnvironmentName, Schema.String),
   allowedExitCodes: Schema.Array(Schema.Int).check(Schema.isMinLength(1))
 })
 
@@ -151,18 +156,18 @@ export const WorkflowNodeSchema = Schema.Union([
 ])
 
 const RepeatConditionSchema = Schema.Union([
-  Schema.Struct({ type: Schema.Literal("command-success"), node: NonEmptyString }),
+  Schema.Struct({ type: Schema.Literal("command-success"), node: NodeId }),
   Schema.Struct({
     type: Schema.Literal("agent-output"),
-    node: NonEmptyString,
-    pointer: Schema.String,
+    node: NodeId,
+    pointer: JsonPointer,
     equals: Schema.Unknown
   })
 ])
 
 const RepeatSchema = Schema.Struct({
-  id: NonEmptyString,
-  members: NonEmptyStringArray,
+  id: NodeId,
+  members: Schema.Array(NodeId).check(Schema.isMinLength(1)),
   until: RepeatConditionSchema,
   maxRounds: PositiveInteger
 })
@@ -176,7 +181,7 @@ const CallbackSchema = Schema.Union([
   }),
   Schema.Struct({
     type: Schema.Literal("webhook"),
-    url: NonEmptyString,
+    url: HttpUrl,
     headers: StringRecord,
     timeoutSeconds: PositiveNumber
   }),
@@ -186,7 +191,7 @@ const CallbackSchema = Schema.Union([
 export const WorkflowSchema = Schema.Struct({
   name: NonEmptyString,
   objective: NonEmptyString,
-  cwd: NonEmptyString,
+  cwd: AbsolutePath,
   concurrency: PositiveInteger,
   callback: CallbackSchema,
   milestones: Schema.Boolean,
@@ -231,6 +236,22 @@ const ContinuationPreferencesSchema = Schema.Struct({
 const PaneCompletionSchema = Schema.Literals(["keep-open", "close-success"])
 const FocusSchema = Schema.Literals(["never", "attention", "always"])
 const NotificationChannelSchema = Schema.Literals(["herdr", "board", "silent"])
+
+export const UiPreferencesSchema = Schema.Struct({
+  board: BoardPlacementSchema,
+  placement: PlacementPreferencesSchema,
+  completedPanes: Schema.Struct({
+    agent: PaneCompletionSchema,
+    command: PaneCompletionSchema
+  }),
+  focus: FocusSchema,
+  continuation: ContinuationPreferencesSchema,
+  notifications: Schema.Struct({
+    attention: NotificationChannelSchema,
+    milestone: NotificationChannelSchema,
+    progress: NotificationChannelSchema
+  })
+})
 
 const UiPreferenceLayerSchema = Schema.Struct({
   board: Schema.NullOr(BoardPlacementSchema),
@@ -431,56 +452,112 @@ export const RunStateSchema = Schema.Struct({
   spawnIntents: Schema.Record(Schema.String, SpawnIntentSchema)
 })
 
-const EventTypeSchema = Schema.Literals([
-  "run.started",
-  "run.paused",
-  "run.resumed",
-  "run.completed",
-  "run.failed",
-  "run.stopped",
-  "node.ready",
-  "node.spawn-planned",
-  "node.started",
-  "node.completed",
-  "node.failed",
-  "node.retrying",
-  "node.cancelled",
-  "gate.opened",
-  "gate.approved",
-  "hold.set",
-  "hold.released",
-  "revision.proposed",
-  "revision.approved",
-  "revision.discarded",
-  "repeat.round-started",
-  "repeat.completed",
-  "repeat.max-rounds",
-  "ui.degraded"
+const StatePatchOperationSchema = Schema.Union([
+  Schema.Struct({
+    op: Schema.Literals(["add", "replace"]),
+    path: JsonPointer,
+    value: Schema.Unknown
+  }),
+  Schema.Struct({
+    op: Schema.Literal("remove"),
+    path: JsonPointer
+  })
 ])
 
-export const EventRecordSchema = Schema.Struct({
+const EventRecordCommon = {
   runtimeVersion: NonEmptyString,
   sequence: PositiveInteger,
   timestamp: NonEmptyString,
   runId: NonEmptyString,
-  type: EventTypeSchema,
   message: Schema.String,
-  nodeId: Schema.optionalKey(NonEmptyString),
-  data: Schema.optionalKey(Schema.Unknown),
-  patch: Schema.Array(
-    Schema.Union([
-      Schema.Struct({
-        op: Schema.Literals(["add", "replace"]),
-        path: Schema.String.check(Schema.isPattern(/^(?:\/(?:[^~/]|~[01])*)*$/)),
-        value: Schema.Unknown
-      }),
-      Schema.Struct({
-        op: Schema.Literal("remove"),
-        path: Schema.String.check(Schema.isPattern(/^(?:\/(?:[^~/]|~[01])*)*$/))
-      })
-    ])
-  )
-})
+  patch: Schema.Array(StatePatchOperationSchema)
+}
+
+const ForbiddenField = Schema.optionalKey(Schema.Never)
+
+function eventWithoutData<const Type extends string>(type: Type) {
+  return Schema.Struct({
+    ...EventRecordCommon,
+    type: Schema.Literal(type),
+    nodeId: ForbiddenField,
+    data: ForbiddenField
+  })
+}
+
+function eventWithData<const Type extends string, Data extends Schema.Top>(type: Type, data: Data) {
+  return Schema.Struct({
+    ...EventRecordCommon,
+    type: Schema.Literal(type),
+    nodeId: ForbiddenField,
+    data
+  })
+}
+
+function nodeEventWithoutData<const Type extends string>(type: Type) {
+  return Schema.Struct({
+    ...EventRecordCommon,
+    type: Schema.Literal(type),
+    nodeId: NodeId,
+    data: ForbiddenField
+  })
+}
+
+function nodeEventWithData<const Type extends string, Data extends Schema.Top>(
+  type: Type,
+  data: Data
+) {
+  return Schema.Struct({ ...EventRecordCommon, type: Schema.Literal(type), nodeId: NodeId, data })
+}
+
+const AttemptData = Schema.Struct({ attempt: PositiveInteger })
+const SpawnData = Schema.Struct({ intentId: NonEmptyString, attempt: PositiveInteger })
+const DigestData = Schema.Struct({ digest: NonEmptyString })
+const HoldScope = Schema.Literals(["template", "instance"])
+
+export const EventRecordSchema = Schema.Union([
+  eventWithoutData("run.started"),
+  eventWithData("run.paused", Schema.Struct({ kind: Schema.Literals(["human", "fuse"]) })),
+  eventWithoutData("run.resumed"),
+  eventWithoutData("run.completed"),
+  eventWithoutData("run.failed"),
+  eventWithoutData("run.stopped"),
+  nodeEventWithoutData("node.ready"),
+  nodeEventWithData("node.spawn-planned", SpawnData),
+  nodeEventWithData("node.started", SpawnData),
+  nodeEventWithData(
+    "node.completed",
+    Schema.Union([AttemptData, Schema.Struct({ attempt: PositiveInteger, exitCode: Schema.Int })])
+  ),
+  nodeEventWithData(
+    "node.failed",
+    Schema.Struct({ attempt: PositiveInteger, exitCode: Schema.NullOr(Schema.Int) })
+  ),
+  nodeEventWithData("node.retrying", Schema.Struct({ nextAttempt: PositiveInteger })),
+  nodeEventWithoutData("node.cancelled"),
+  nodeEventWithData("gate.opened", DigestData),
+  nodeEventWithData("gate.approved", DigestData),
+  nodeEventWithData(
+    "hold.set",
+    Schema.Struct({ scope: HoldScope, source: Schema.Literals(["node-done", "manual"]) })
+  ),
+  nodeEventWithData("hold.released", Schema.Struct({ scope: HoldScope })),
+  eventWithData(
+    "revision.proposed",
+    Schema.Struct({ digest: NonEmptyString, summary: StringArray })
+  ),
+  eventWithData(
+    "revision.approved",
+    Schema.Struct({ digest: NonEmptyString, workflow: WorkflowSchema })
+  ),
+  eventWithData("revision.discarded", DigestData),
+  eventWithData(
+    "repeat.round-started",
+    Schema.Struct({ repeatId: NodeId, round: PositiveInteger })
+  ),
+  eventWithData("repeat.completed", Schema.Struct({ repeatId: NodeId, accepted: Schema.Boolean })),
+  eventWithData("repeat.max-rounds", Schema.Struct({ repeatId: NodeId, rounds: PositiveInteger })),
+  eventWithData("ui.degraded", Schema.Struct({ reason: NonEmptyString }))
+])
 
 export function jsonSchemaDocumentFor(
   schema: Parameters<typeof Schema.toJsonSchemaDocument>[0]

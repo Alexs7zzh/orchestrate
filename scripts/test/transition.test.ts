@@ -537,6 +537,43 @@ describe("pure crank transition", () => {
     expect(completed.state.status).toBe("completed")
   })
 
+  test("treats reordered object keys as the same agent-output verdict", () => {
+    const review = agent("review", {
+      output: { format: "json", schema: { type: "object" } }
+    })
+    const spec = workflow([review], {
+      repeats: [
+        {
+          id: "review-loop",
+          members: ["review"],
+          until: {
+            type: "agent-output",
+            node: "review",
+            pointer: "/verdict",
+            equals: { clean: true, reason: "verified" }
+          },
+          maxRounds: 2
+        }
+      ]
+    })
+    const planned = start(spec, context("review--r1"))
+    const running = observe(planned.state, spec, "review--r1")
+    const completed = crank(running.state, spec, {
+      type: "node-done",
+      nodeId: "review--r1",
+      token: token(running.state, "review--r1"),
+      outcome: "completed",
+      hold: false,
+      result: { verdict: { reason: "verified", clean: true } },
+      error: null,
+      providerSessionId: null
+    })
+
+    expect(completed.state.repeats["review-loop"]?.status).toBe("completed")
+    expect(completed.state.nodes["review--r2"]).toBeUndefined()
+    expect(completed.state.status).toBe("completed")
+  })
+
   test("template holds and gates apply independently to every repeat instance", () => {
     const review = agent("review", {
       gate: "approval",
@@ -701,6 +738,56 @@ describe("pure crank transition", () => {
     })
     const discarded = crank(reproposed.state, revised, { type: "discard-revision" })
     expect(discarded.state.pendingRevision).toBeNull()
+  })
+
+  test("accepts a revision whose repeat contract only reorders object keys", () => {
+    const review = agent("review", {
+      output: { format: "json", schema: { type: "object" } }
+    })
+    const base = workflow([review], {
+      repeats: [
+        {
+          id: "review-loop",
+          members: ["review"],
+          until: {
+            type: "agent-output",
+            node: "review",
+            pointer: "/verdict",
+            equals: { clean: true, reason: "verified" }
+          },
+          maxRounds: 2
+        }
+      ]
+    })
+    const revised = workflow([review], {
+      repeats: [
+        {
+          id: "review-loop",
+          members: ["review"],
+          until: {
+            type: "agent-output",
+            node: "review",
+            pointer: "/verdict",
+            equals: { reason: "verified", clean: true }
+          },
+          maxRounds: 2
+        }
+      ]
+    })
+    const running = start(base, context("review--r1"))
+    const proposed = crank(running.state, base, {
+      type: "propose-revision",
+      workflow: revised,
+      digest: "revision-digest",
+      summary: []
+    })
+    const approved = crank(proposed.state, base, {
+      type: "approve-revision",
+      digest: "revision-digest"
+    })
+
+    expect(approved.workflow).toEqual(revised)
+    expect(approved.state.pendingRevision).toBeNull()
   })
 
   test("holds old-plan scheduling while a revision decision is pending", () => {
@@ -951,5 +1038,47 @@ describe("pure crank transition", () => {
       undefined
     )
     expect(replayed).toEqual(final.state)
+  })
+
+  test("later transition patches do not repeat an earlier large node result", () => {
+    const spec = workflow([agent("first"), agent("second")], { concurrency: 2 })
+    const planned = start(spec, context("first", "second"))
+    const firstObserved = observe(planned.state, spec, "first")
+    const bothObserved = observe(firstObserved.state, spec, "second")
+    const largeResult = { payload: "x".repeat(100_000) }
+    const firstCompleted = crank(bothObserved.state, spec, {
+      type: "node-done",
+      nodeId: "first",
+      token: token(bothObserved.state, "first"),
+      outcome: "completed",
+      hold: false,
+      result: largeResult,
+      error: null,
+      providerSessionId: null
+    })
+    const secondCompleted = crank(firstCompleted.state, spec, {
+      type: "node-done",
+      nodeId: "second",
+      token: token(firstCompleted.state, "second"),
+      outcome: "completed",
+      hold: false,
+      result: { payload: "small" },
+      error: null,
+      providerSessionId: null
+    })
+    const serialized = JSON.stringify(secondCompleted.events)
+
+    expect(serialized).not.toContain(largeResult.payload)
+    expect(serialized.length).toBeLessThan(10_000)
+    expect(
+      secondCompleted.events
+        .flatMap((record) => record.patch)
+        .some((operation) => operation.path.startsWith("/nodes/second/"))
+    ).toBe(true)
+    expect(
+      secondCompleted.events
+        .flatMap((record) => record.patch)
+        .some((operation) => operation.path === "/nodes")
+    ).toBe(false)
   })
 })

@@ -1,5 +1,5 @@
 import { Ajv2020 } from "ajv/dist/2020.js"
-import { Schema } from "effect"
+import { Result, Schema, SchemaIssue } from "effect"
 import { createHash } from "node:crypto"
 import { realpathSync } from "node:fs"
 import os from "node:os"
@@ -16,9 +16,38 @@ import type {
 import { WorkflowSchema } from "./schema.js"
 import { stateRoot, submissionsRoot } from "./state.js"
 
-const decodeWorkflow = Schema.decodeUnknownSync(WorkflowSchema, {
+const decodeWorkflow = Schema.decodeUnknownResult(WorkflowSchema, {
+  errors: "all",
   onExcessProperty: "error"
 })
+const formatSchemaIssues = SchemaIssue.makeFormatterStandardSchemaV1()
+
+function schemaIssueCode(issuePath: readonly unknown[] | undefined): string {
+  const parts = issuePath?.map(String) ?? []
+  const joined = parts.join(".")
+  if (joined === "callback.url") {
+    return "callback-url"
+  }
+  if (/^nodes\.\d+\.id$/.test(joined)) {
+    return "node-id"
+  }
+  if (/^nodes\.\d+\.cwd$/.test(joined)) {
+    return "node-cwd"
+  }
+  if (/^nodes\.\d+\.workspace\.path$/.test(joined)) {
+    return "workspace-path"
+  }
+  if (/^nodes\.\d+\.permissions\.(?:inheritEnv|env)/.test(joined)) {
+    return "environment-name"
+  }
+  if (/^nodes\.\d+\.(?:inheritEnv|env)/.test(joined)) {
+    return "environment-name"
+  }
+  if (/^repeats\.\d+\.until\.pointer$/.test(joined)) {
+    return "repeat-until"
+  }
+  return "schema"
+}
 const NODE_ID = /^[a-z0-9][a-z0-9-]*$/
 const ROUND_INSTANCE_SUFFIX = /--r[1-9][0-9]*$/
 const ENVIRONMENT_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/
@@ -834,16 +863,23 @@ function validateSessions(
 }
 
 export function validateWorkflow(input: unknown): ValidationResult {
-  let workflow: WorkflowSpec
-  try {
-    workflow = decodeWorkflow(input)
-  } catch (error) {
+  const decoded = decodeWorkflow(input)
+  if (Result.isFailure(decoded)) {
+    const issues = formatSchemaIssues(decoded.failure.issue).issues.map((issue) => {
+      const issuePath = issue.path?.map(String).join(".") ?? ""
+      return {
+        severity: "error" as const,
+        code: schemaIssueCode(issue.path),
+        message: issuePath.length === 0 ? issue.message : `${issuePath}: ${issue.message}`
+      }
+    })
     return {
       workflow: null,
       digest: null,
-      issues: [{ severity: "error", code: "schema", message: String(error) }]
+      issues
     }
   }
+  const workflow: WorkflowSpec = decoded.success
   const issues: ValidationIssue[] = []
   if (!path.isAbsolute(workflow.cwd)) {
     addIssue(issues, "error", "workflow-cwd", "Workflow cwd must be absolute.")

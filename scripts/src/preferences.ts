@@ -1,6 +1,5 @@
 import { Schema } from "effect"
-import { randomUUID } from "node:crypto"
-import { mkdir, open, readFile, rm } from "node:fs/promises"
+import { mkdir, open, readFile } from "node:fs/promises"
 import path from "node:path"
 
 import type {
@@ -12,7 +11,7 @@ import type {
 } from "./types.js"
 
 import { PreferencesSchema } from "./schema.js"
-import { atomicWriteJson, isProcessAlive, stateRoot } from "./state.js"
+import { atomicWriteJson, stateRoot } from "./state.js"
 
 const MAX_PROJECTS = 20
 const LOCK_WAIT_MS = 10_000
@@ -161,40 +160,74 @@ export async function readPreferences(now = new Date()): Promise<PreferencesFile
   return parsed
 }
 
-interface LockOwner {
-  readonly pid?: number
-  readonly token?: string
+const LOCK_EX = 2
+const LOCK_NB = 4
+const LOCK_UN = 8
+
+interface FlockLibrary {
+  readonly symbols: {
+    readonly flock: (fileDescriptor: number, operation: number) => number
+  }
+}
+
+let flockLibrary: Promise<FlockLibrary> | null = null
+
+async function nativeFlock(fileDescriptor: number, operation: number): Promise<number> {
+  if (process.platform !== "darwin" || process.arch !== "arm64") {
+    throw new Error("Orchestrate advisory locks require supported macOS ARM64.")
+  }
+  flockLibrary ??= import("bun:ffi").then(({ dlopen }) =>
+    dlopen("/usr/lib/libSystem.B.dylib", {
+      flock: { args: ["i32", "i32"], returns: "i32" }
+    })
+  )
+  return (await flockLibrary).symbols.flock(fileDescriptor, operation)
+}
+
+async function tryAcquirePreferencesLock(lockPath: string): Promise<(() => Promise<void>) | null> {
+  const handle = await open(lockPath, "a+", 0o600)
+  if ((await nativeFlock(handle.fd, LOCK_EX | LOCK_NB)) !== 0) {
+    await handle.close()
+    return null
+  }
+  try {
+    await handle.truncate(0)
+    await handle.writeFile(
+      `${JSON.stringify({ pid: process.pid, heldSince: new Date().toISOString() })}\n`
+    )
+    await handle.sync()
+  } catch (error) {
+    await handle.close()
+    throw error
+  }
+  let released = false
+  return async () => {
+    if (released) {
+      return
+    }
+    released = true
+    try {
+      if ((await nativeFlock(handle.fd, LOCK_UN)) !== 0) {
+        throw new Error(`Could not release advisory lock "${lockPath}".`)
+      }
+    } finally {
+      await handle.close()
+    }
+  }
 }
 
 async function withPreferencesLock<T>(action: () => Promise<T>): Promise<T> {
   const lockPath = path.join(stateRoot(), "preferences.lock")
   await mkdir(path.dirname(lockPath), { recursive: true })
-  const token = randomUUID()
   const deadline = Date.now() + LOCK_WAIT_MS
   while (Date.now() < deadline) {
-    try {
-      const handle = await open(lockPath, "wx", 0o600)
-      await handle.writeFile(`${JSON.stringify({ pid: process.pid, token })}\n`)
-      await handle.close()
+    const release = await tryAcquirePreferencesLock(lockPath)
+    if (release !== null) {
       try {
         return await action()
       } finally {
-        const current = JSON.parse(await readFile(lockPath, "utf8").catch(() => "{}")) as LockOwner
-        if (current.token === token) {
-          await rm(lockPath, { force: true })
-        }
+        await release()
       }
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "EEXIST") {
-        throw error
-      }
-    }
-    const owner: LockOwner = await readFile(lockPath, "utf8")
-      .then((raw) => JSON.parse(raw) as LockOwner)
-      .catch((): LockOwner => ({}))
-    if (!isProcessAlive(owner.pid ?? null)) {
-      await rm(lockPath, { force: true })
-      continue
     }
     await new Promise((resolve) => setTimeout(resolve, LOCK_POLL_MS))
   }

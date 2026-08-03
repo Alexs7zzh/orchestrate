@@ -1,5 +1,8 @@
 import { createTestRenderer } from "@opentui/core/testing"
 import { afterEach, describe, expect, test } from "bun:test"
+import { mkdtemp, rm, writeFile } from "node:fs/promises"
+import os from "node:os"
+import path from "node:path"
 
 import type { BoardViewModel } from "../src/board-model.js"
 import type { CliRenderer } from "@opentui/core"
@@ -8,10 +11,12 @@ import {
   boardLogicalRowAtScreenY,
   createBoardRenderables,
   mapBoardInputWhenReady,
+  readBoardResultDetail,
   renderBoardFrame,
   scrollBoardRowIntoView,
   type BoardFrame
 } from "../src/board.js"
+import { MAX_RESULT_BYTES } from "../src/crank.js"
 
 const renderers: CliRenderer[] = []
 
@@ -39,6 +44,25 @@ function model(objective: string): BoardViewModel {
 }
 
 describe("OpenTUI board viewport", () => {
+  test("shows bounded result content and reports oversized files instead of loading them", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "orchestrate-board-result-"))
+    try {
+      const resultPath = path.join(root, "result.txt")
+      await writeFile(resultPath, "bounded result")
+      const detail = await readBoardResultDetail(resultPath)
+      expect(renderBoardFrame(model("result display"), null, detail).text).toContain(
+        "DETAIL\nbounded result"
+      )
+
+      await writeFile(resultPath, "x".repeat(MAX_RESULT_BYTES + 1))
+      expect(await readBoardResultDetail(resultPath)).toContain(
+        `${MAX_RESULT_BYTES}-byte result limit`
+      )
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
   test("ignores keyboard and mouse actions until the first model exists", async () => {
     const setup = await createTestRenderer({ width: 40, height: 8 })
     renderers.push(setup.renderer)

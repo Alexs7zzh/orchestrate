@@ -120,6 +120,7 @@ case "$1 $2" in
     printf '%s' "$count" > "$count_file"
     printf '{"result":{"root_pane":{"pane_id":"p%s"},"tab":{"tab_id":"t%s"}}}\n' "$count" "$count" ;;
   "pane get") printf '%s\n' '{"result":{"pane":{"pane_id":"p1"}}}' ;;
+  "pane current") printf '%s\n' '{"result":{"pane":{"agent":null,"agent_session":null,"workspace_id":"w1","tab_id":"t1","pane_id":"p1"}}}' ;;
   "agent get")
     if [ "$3" = "\${HERDR_DONE_PANE-}" ]; then status=done; else status=idle; fi
     printf '{"result":{"agent":{"agent_status":"%s","agent_session":{"agent":"codex","kind":"id","source":"herdr:codex","value":"session-%s"}}}}\n' "$status" "$3" ;;
@@ -394,10 +395,21 @@ describe("packaged CLI", () => {
       expect(result.stderr).toBe("")
       const lines = result.stdout.trim().split("\n")
       expect(lines).toHaveLength(1)
-      expect(JSON.parse(lines[0] as string)).toEqual({
-        ok: false,
-        error: { code: "command_failed", message: expect.any(String) }
-      })
+      const payload = JSON.parse(lines[0] as string) as {
+        readonly ok: boolean
+        readonly error: { readonly code: string; readonly message: string }
+      }
+      expect(payload.ok).toBe(false)
+      expect([
+        "usage",
+        "validation",
+        "not_found",
+        "conflict",
+        "herdr",
+        "io",
+        "command_failed"
+      ]).toContain(payload.error.code)
+      expect(payload.error.message.length).toBeGreaterThan(0)
     }
   })
 

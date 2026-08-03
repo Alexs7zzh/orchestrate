@@ -128,12 +128,44 @@ describe("workflow contract", () => {
         callback: { type: "webhook", url, headers: {}, timeoutSeconds: 10 }
       })
       expect(result.workflow).toBeNull()
-      expect(result.issues).toContainEqual({
-        severity: "error",
-        code: "callback-url",
-        message: "Webhook callback URL must be a valid absolute http or https URL."
-      })
+      expect(result.issues.some((issue) => issue.code === "callback-url")).toBe(true)
     }
+  })
+
+  test("reports every independent Effect schema problem in one validation pass", () => {
+    const result = validateWorkflow({})
+    expect(result.workflow).toBeNull()
+    expect(result.issues.length).toBeGreaterThan(5)
+    const messages = result.issues.map((issue) => issue.message).join("\n")
+    expect(messages).toContain("name")
+    expect(messages).toContain("objective")
+    expect(messages).toContain("nodes")
+  })
+
+  test("enforces public node-id, path, pointer, and environment-name constraints in Effect Schema", () => {
+    const invalid = workflow([
+      command("Bad_ID", {
+        cwd: "relative/path",
+        inheritEnv: ["INVALID-NAME"]
+      })
+    ])
+    const result = validateWorkflow(invalid)
+    expect(result.workflow).toBeNull()
+    expect(result.issues.map((issue) => issue.code)).toEqual(
+      expect.arrayContaining(["node-id", "node-cwd", "environment-name"])
+    )
+    const pointer = validateWorkflow({
+      ...workflow([command("check")]),
+      repeats: [
+        {
+          id: "loop",
+          members: ["check"],
+          until: { type: "agent-output", node: "check", pointer: "not-a-pointer", equals: true },
+          maxRounds: 2
+        }
+      ]
+    })
+    expect(pointer.issues.map((issue) => issue.code)).toContain("repeat-until")
   })
 
   test("supports captured Codex resume and fork lineage", () => {

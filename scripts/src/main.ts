@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 
 import { jsonError, jsonRequested, runCli } from "./cli.js"
 

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test"
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
+import { mkdir, mkdtemp, open, readFile, rm, writeFile } from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 
@@ -12,6 +12,52 @@ import {
 } from "../src/preferences.js"
 
 let temporaryRoot = ""
+
+const LOCK_EX = 2
+const LOCK_UN = 8
+
+async function holdPreferencesLockWithStaleMetadata(): Promise<() => Promise<void>> {
+  const lockPath = path.join(process.env.ORCHESTRATE_STATE_DIR as string, "preferences.lock")
+  await mkdir(path.dirname(lockPath), { recursive: true })
+  const handle = await open(lockPath, "a+", 0o600)
+  const { dlopen } = await import("bun:ffi")
+  const library = dlopen("/usr/lib/libSystem.B.dylib", {
+    flock: { args: ["i32", "i32"], returns: "i32" }
+  })
+  if (library.symbols.flock(handle.fd, LOCK_EX) !== 0) {
+    await handle.close()
+    throw new Error("Could not establish the preferences test lock.")
+  }
+  await handle.truncate(0)
+  await handle.writeFile(`${JSON.stringify({ pid: 99_999_999, token: "stale" })}\n`)
+  await handle.sync()
+  return async () => {
+    try {
+      if (library.symbols.flock(handle.fd, LOCK_UN) !== 0) {
+        throw new Error("Could not release the preferences test lock.")
+      }
+    } finally {
+      library.close()
+      await handle.close()
+    }
+  }
+}
+
+async function waitForRecords(log: string, expected: readonly string[]): Promise<void> {
+  const deadline = Date.now() + 5_000
+  while (Date.now() < deadline) {
+    const records = new Set(
+      await readFile(log, "utf8")
+        .then((value) => value.trim().split("\n").filter(Boolean))
+        .catch((): string[] => [])
+    )
+    if (expected.every((record) => records.has(record))) {
+      return
+    }
+    await Bun.sleep(10)
+  }
+  throw new Error(`Timed out waiting for preference writer records: ${expected.join(", ")}.`)
+}
 
 beforeEach(async () => {
   temporaryRoot = await mkdtemp(path.join(os.tmpdir(), "orchestrate-ui-preferences-"))
@@ -126,5 +172,55 @@ describe("UI preferences contract", () => {
     await expect(setUiPreference("unknown", true, null)).rejects.toThrow("does not exist")
     const merged = await uiPreferencesWithOrigins("/tmp/project")
     expect(merged.value).toEqual(DEFAULT_UI_PREFERENCES)
+  })
+
+  test("serializes A B C writers across stale metadata without an ABA admission gap", async () => {
+    const interleavingLog = path.join(temporaryRoot, "preferences-writers.log")
+    const releaseHeldLock = await holdPreferencesLockWithStaleMetadata()
+    const moduleUrl = new URL("../src/preferences.ts", import.meta.url).href
+    const writerNames = ["A", "B", "C"] as const
+    const children = writerNames.map((name) =>
+      Bun.spawn(
+        [
+          process.execPath,
+          "-e",
+          `import { appendFileSync } from "node:fs"; const { setUiPreference } = await import(${JSON.stringify(moduleUrl)}); const originalSetTimeout = globalThis.setTimeout; globalThis.setTimeout = (callback, delay, ...args) => { appendFileSync(${JSON.stringify(interleavingLog)}, ${JSON.stringify(name)} + ":blocked\\n"); globalThis.setTimeout = originalSetTimeout; return originalSetTimeout(callback, delay, ...args); }; appendFileSync(${JSON.stringify(interleavingLog)}, ${JSON.stringify(name)} + ":calling\\n"); await setUiPreference("focus", "never", ${JSON.stringify("/tmp/preferences-")} + ${JSON.stringify(name)}); appendFileSync(${JSON.stringify(interleavingLog)}, ${JSON.stringify(name)} + ":done\\n");`
+        ],
+        { env: process.env, stdout: "ignore", stderr: "pipe" }
+      )
+    )
+
+    let interleavingError: unknown = null
+    try {
+      await waitForRecords(
+        interleavingLog,
+        writerNames.map((name) => `${name}:blocked`)
+      )
+      await expect(readFile(preferencesPath(), "utf8")).rejects.toMatchObject({ code: "ENOENT" })
+    } catch (error) {
+      interleavingError = error
+    } finally {
+      await releaseHeldLock()
+    }
+    const exits = await Promise.all(children.map((child) => child.exited))
+    if (exits.some((code) => code !== 0)) {
+      const errors = await Promise.all(children.map((child) => new Response(child.stderr).text()))
+      throw new Error(`Preference writers failed: ${errors.join("\n")}`)
+    }
+    if (interleavingError !== null) {
+      throw interleavingError
+    }
+
+    const stored = await readPreferences()
+    expect(Object.keys(stored.projects).toSorted()).toEqual([
+      "/tmp/preferences-A",
+      "/tmp/preferences-B",
+      "/tmp/preferences-C"
+    ])
+    expect(Object.values(stored.projects).map((project) => project.ui.focus)).toEqual([
+      "never",
+      "never",
+      "never"
+    ])
   })
 })
