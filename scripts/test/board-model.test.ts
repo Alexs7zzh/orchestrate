@@ -321,40 +321,77 @@ describe("board view model", () => {
         repeatId: "loop",
         round
       })
-    const model = buildBoardModel(
-      state(
-        [
-          roundNode("draft", 1),
-          roundNode("review", 1, ["draft"]),
-          roundNode("draft", 2),
-          roundNode("review", 2, ["draft"]),
-          node("after", "pending", { needs: ["review"] })
-        ],
-        {
-          repeats: {
-            loop: {
-              id: "loop",
-              round: 2,
-              status: "running",
-              instanceIds: ["draft--r1", "review--r1", "draft--r2", "review--r2"],
-              completedAt: null
-            }
+    const loopState = state(
+      [
+        roundNode("draft", 1),
+        roundNode("review", 1, ["draft"]),
+        roundNode("draft", 2),
+        roundNode("review", 2, ["draft"]),
+        node("after", "pending", { needs: ["review"] })
+      ],
+      {
+        repeats: {
+          loop: {
+            id: "loop",
+            round: 2,
+            status: "running",
+            instanceIds: ["draft--r1", "review--r1", "draft--r2", "review--r2"],
+            completedAt: null
           }
         }
-      ),
-      [],
-      { now: NOW }
+      }
     )
+    const model = buildBoardModel(loopState, [], {
+      now: NOW,
+      repeats: [
+        {
+          id: "loop",
+          members: ["draft", "review"],
+          until: { type: "agent-output", node: "review", pointer: "/agree", equals: true },
+          maxRounds: 3
+        }
+      ]
+    })
 
     expect(model.nodes.find((value) => value.id === "review--r2")?.needs).toEqual(["draft--r2"])
     expect(model.nodes.find((value) => value.id === "after")?.needs).toEqual(["review--r2"])
     expect(model.rows.map((row) => [row.kind, row.key])).toEqual([
+      ["repeat-round", "loop:round"],
       ["repeat-history", "loop:r1"],
       ["node", "draft--r2"],
       ["node", "review--r2"],
       ["node", "after"]
     ])
+    expect(model.rows[0]).toEqual({
+      kind: "repeat-round",
+      key: "loop:round",
+      depth: 0,
+      repeatId: "loop",
+      round: 2,
+      maxRounds: 3,
+      until: "until review reports agree = true"
+    })
     expect(model.selectableNodeIds).toEqual(["draft--r2", "review--r2", "after"])
+    expect(renderBoardFrame(model, null).text).toContain(
+      "↻ loop  round 2/3  until review reports agree = true"
+    )
+
+    const commandUntil = buildBoardModel(loopState, [], {
+      now: NOW,
+      repeats: [
+        {
+          id: "loop",
+          members: ["draft", "review"],
+          until: { type: "command-success", node: "review" },
+          maxRounds: 3
+        }
+      ]
+    })
+    expect(commandUntil.rows[0]).toMatchObject({ until: "until review succeeds" })
+
+    const withoutSpec = buildBoardModel(loopState, [], { now: NOW })
+    expect(withoutSpec.rows[0]).toMatchObject({ round: 2, maxRounds: null, until: null })
+    expect(renderBoardFrame(withoutSpec, null).text).toContain("↻ loop  round 2\n")
   })
 
   test("treats stale-pane data as garnish only and gives agent panes a manual command", () => {

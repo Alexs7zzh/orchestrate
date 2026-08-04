@@ -6,6 +6,8 @@ import type {
   NodeStatus,
   PaneReference,
   Provider,
+  RepeatCondition,
+  RepeatSpec,
   RunState
 } from "./types.js"
 
@@ -23,6 +25,9 @@ export interface BoardModelOptions {
   // Pane health is deliberately external presentation data. It must never be
   // used to infer or mutate workflow state.
   readonly paneGarnish?: Readonly<Record<string, PaneGarnish>>
+  // Repeat bounds and conditions live only in the workflow spec; without them
+  // the board still renders rounds, just without the "round R/N — until" line.
+  readonly repeats?: readonly RepeatSpec[]
 }
 
 export interface AttemptMetric {
@@ -80,7 +85,17 @@ export interface BoardRepeatHistoryRow {
   readonly elapsedMs: number | null
 }
 
-export type BoardRow = BoardNodeRow | BoardRepeatHistoryRow
+export interface BoardRepeatRoundRow {
+  readonly kind: "repeat-round"
+  readonly key: string
+  readonly depth: number
+  readonly repeatId: string
+  readonly round: number
+  readonly maxRounds: number | null
+  readonly until: string | null
+}
+
+export type BoardRow = BoardNodeRow | BoardRepeatHistoryRow | BoardRepeatRoundRow
 
 interface AttentionBase {
   readonly title: string
@@ -457,10 +472,37 @@ function buildAttention(
   return [...gates, ...revisions, ...fuse, ...maxRounds, ...downstreamHeld, ...stalled]
 }
 
-function visibleRows(nodes: readonly BoardNodeView[]): readonly BoardRow[] {
+function repeatConditionText(condition: RepeatCondition): string {
+  if (condition.type === "command-success") {
+    return `until ${condition.node} succeeds`
+  }
+  const field = condition.pointer.replace(/^\//, "").replaceAll("/", ".")
+  return `until ${condition.node} reports ${field.length === 0 ? "its result" : field} = ${JSON.stringify(condition.equals)}`
+}
+
+function visibleRows(
+  nodes: readonly BoardNodeView[],
+  repeats: readonly RepeatSpec[]
+): readonly BoardRow[] {
   const rows: BoardRow[] = []
   const emittedHistory = new Set<string>()
+  const emittedRounds = new Set<string>()
   for (const node of nodes) {
+    if (node.repeatId !== null && node.round !== null && !emittedRounds.has(node.repeatId)) {
+      emittedRounds.add(node.repeatId)
+      const members = nodes.filter((candidate) => candidate.repeatId === node.repeatId)
+      const currentRound = members.find((candidate) => candidate.currentRound)?.round ?? node.round
+      const spec = repeats.find((candidate) => candidate.id === node.repeatId)
+      rows.push({
+        kind: "repeat-round",
+        key: `${node.repeatId}:round`,
+        depth: Math.min(...members.map((candidate) => candidate.depth)),
+        repeatId: node.repeatId,
+        round: currentRound,
+        maxRounds: spec?.maxRounds ?? null,
+        until: spec === undefined ? null : repeatConditionText(spec.until)
+      })
+    }
     if (node.repeatId === null || node.round === null || node.currentRound) {
       rows.push({ kind: "node", key: node.id, depth: node.depth, node })
       continue
@@ -529,7 +571,7 @@ export function buildBoardModel(
       stalledPane: stalledPane(state, node, options.paneGarnish?.[node.id])
     }
   })
-  const rows = visibleRows(nodes)
+  const rows = visibleRows(nodes, options.repeats ?? [])
   return {
     run: {
       id: state.id,

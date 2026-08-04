@@ -1378,11 +1378,12 @@ export async function runCli(
     }
     const state = await readRunState(runDir)
     const paneGarnish = await observePaneGarnish(state, new HerdrSurface())
+    const boardWorkflow = await readWorkflow(runDir).catch(() => null)
     const model = buildBoardModel(state, await readEvents(runDir), {
       now: new Date().toISOString(),
-      paneGarnish
+      paneGarnish,
+      repeats: boardWorkflow?.repeats ?? []
     })
-    const boardWorkflow = await readWorkflow(runDir).catch(() => null)
     output(
       json,
       model,

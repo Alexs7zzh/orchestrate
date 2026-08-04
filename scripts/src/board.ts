@@ -16,7 +16,7 @@ import { buildBoardModel, mapBoardInput } from "./board-model.js"
 import { crankRun, readBoundedResult } from "./crank.js"
 import { HerdrSurface, type HerdrAgentStatus } from "./herdr-surface.js"
 import { installedBuild } from "./setup.js"
-import { readEvents, readRunState } from "./state.js"
+import { readEvents, readRunState, readWorkflow } from "./state.js"
 
 export interface BoardFrame {
   readonly text: string
@@ -219,6 +219,14 @@ export function renderBoardFrame(
   lines.push("WORKFLOW")
   const rowNodeIds: Record<number, string> = {}
   for (const row of model.rows) {
+    if (row.kind === "repeat-round") {
+      const bound =
+        row.maxRounds === null ? `round ${row.round}` : `round ${row.round}/${row.maxRounds}`
+      lines.push(
+        `${"  ".repeat(row.depth)}↻ ${row.repeatId}  ${bound}${row.until === null ? "" : `  ${row.until}`}`
+      )
+      continue
+    }
     if (row.kind === "repeat-history") {
       lines.push(
         `${"  ".repeat(row.depth)}… ${row.repeatId} round ${row.round}  ${row.statuses.join("/")}  ${duration(row.elapsedMs)}`
@@ -381,7 +389,12 @@ async function runInteractiveBoard(runDir: string, renderer: CliRenderer): Promi
         }
         model = buildBoardModel(state, await readEvents(runDir), {
           now: new Date().toISOString(),
-          paneGarnish: await observePaneGarnish(state, surface)
+          paneGarnish: await observePaneGarnish(state, surface),
+          // Re-read per refresh: an approved revision can change repeats.
+          repeats: await readWorkflow(runDir).then(
+            (workflow) => workflow.repeats,
+            () => []
+          )
         })
         const staged = await installedBuild()
         if (closed || renderer.isDestroyed) {
