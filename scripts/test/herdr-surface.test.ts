@@ -1499,7 +1499,7 @@ describe("herdr surface", () => {
   test("delivers an over-budget prompt as a pointer to the durable prompt file", async () => {
     await writeShim(true)
     const node = agent()
-    const longPrompt = `Review everything. ${"Detail. ".repeat(200)}`
+    const longPrompt = `Review everything. ${"Detail. ".repeat(600)}`
     const runState = state(node.id)
     const observation = await new HerdrSurface().spawn({
       workflow: workflow(node),
@@ -1514,7 +1514,8 @@ describe("herdr surface", () => {
     expect(await readFile(promptFile, "utf8")).toBe(longPrompt)
     const log = await readFile(logPath, "utf8")
     const promptLine = log.split("\n").find((line) => line.startsWith("agent prompt")) as string
-    expect(promptLine).toContain(`Your full task prompt is in the file ${promptFile}`)
+    expect(promptLine).toContain(`saved it to ${promptFile}`)
+    expect(promptLine).toContain("orchestrate launcher")
     expect(promptLine).not.toContain("Detail. Detail.")
     expect(promptLine.length).toBeLessThan(1_024)
   })
