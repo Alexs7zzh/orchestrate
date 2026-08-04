@@ -96,7 +96,7 @@ jobs:
           # custom-prefix setups fall back to building from source).
           case "$CELLAR" in
             :*) SHA_LINE="    sha256 cellar: $CELLAR, all: \"$BOTTLE_SHA\"" ;;
-            /opt/homebrew/Cellar) SHA_LINE="    sha256 all: \"$BOTTLE_SHA\"" ;;
+            null | /opt/homebrew/Cellar) SHA_LINE="    sha256 all: \"$BOTTLE_SHA\"" ;;
             *) echo "Unexpected bottle cellar: $CELLAR" >&2; exit 1 ;;
           esac
           mv orchestrate--*.bottle.tar.gz \
