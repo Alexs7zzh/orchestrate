@@ -90,18 +90,26 @@ jobs:
           TAG="$(jq -r '.["local/release/orchestrate"].bottle.tags | keys[0]' orchestrate--*.bottle.json)"
           CELLAR="$(jq -r ".[\"local/release/orchestrate\"].bottle.tags[\"$TAG\"].cellar" orchestrate--*.bottle.json)"
           BOTTLE_SHA="$(jq -r ".[\"local/release/orchestrate\"].bottle.tags[\"$TAG\"].sha256" orchestrate--*.bottle.json)"
-          test "$CELLAR" = ":any_skip_relocation"
+          # Mirror brew's own relocatability judgement: a :-prefixed cellar is
+          # written verbatim; the default cellar path is expressed by omitting
+          # the cellar key (the bottle then applies to standard installs, and
+          # custom-prefix setups fall back to building from source).
+          case "$CELLAR" in
+            :*) SHA_LINE="    sha256 cellar: $CELLAR, all: \"$BOTTLE_SHA\"" ;;
+            /opt/homebrew/Cellar) SHA_LINE="    sha256 all: \"$BOTTLE_SHA\"" ;;
+            *) echo "Unexpected bottle cellar: $CELLAR" >&2; exit 1 ;;
+          esac
           mv orchestrate--*.bottle.tar.gz \
             "release/orchestrate--$ORCHESTRATE_RELEASE_VERSION.all.bottle.tar.gz"
           shasum -a 256 -c <(echo "$BOTTLE_SHA  release/orchestrate--$ORCHESTRATE_RELEASE_VERSION.all.bottle.tar.gz")
           awk -v url="https://github.com/$GITHUB_REPOSITORY/releases/download/$GITHUB_REF_NAME" \
-            -v sha="$BOTTLE_SHA" '
+            -v shaline="$SHA_LINE" '
             { print }
             /^  license / {
               print ""
               print "  bottle do"
               print "    root_url \"" url "\""
-              print "    sha256 cellar: :any_skip_relocation, all: \"" sha "\""
+              print shaline
               print "  end"
             }' release/orchestrate.rb > release/orchestrate.rb.bottled
           mv release/orchestrate.rb.bottled release/orchestrate.rb
