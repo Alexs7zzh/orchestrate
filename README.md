@@ -203,8 +203,9 @@ git push origin v0.2.0
 ```
 
 The tag workflow derives one version from `v<semver>`, verifies the exact tagged source,
-builds the macOS ARM64 payload, and creates a draft GitHub Release with the archive, checksum, and
-rendered Homebrew formula attached. Review those assets and generated notes in GitHub, then publish
+builds the macOS ARM64 payload, and creates a draft GitHub Release with the archive, checksum,
+Homebrew bottle, and rendered formula attached. The formula's bottle stanza points at the release
+assets, so `brew install` pours the bottle instead of requiring build tools on user machines. Review those assets and generated notes in GitHub, then publish
 the draft manually. Release binaries and the generated `scripts/orchestrate.mjs` bundle are not
 committed to this repository; CI generates both from source. The formula can optionally be copied to
 `Formula/orchestrate.rb` in a separate Homebrew tap by automation running after the release is

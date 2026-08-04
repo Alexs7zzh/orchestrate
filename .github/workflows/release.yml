@@ -65,12 +65,53 @@ jobs:
           ORCHESTRATE_RELEASE_REPOSITORY: ${{ github.repository }}
           ORCHESTRATE_RELEASE_OUTPUT: ${{ github.workspace }}/release
         run: bun run release:assemble
+      - name: Build Homebrew bottle and add its stanza to the formula
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+          # Installing a local formula file is our own CI exercising our own
+          # release; the tap-trust prompt does not apply.
+          HOMEBREW_NO_REQUIRE_TAP_TRUST: "1"
+        run: |
+          set -euo pipefail
+          # Install the rendered formula from the locally assembled tarball,
+          # then let brew produce a real bottle of the resulting keg. The
+          # payload is architecture-gated but OS-independent, so the bottle is
+          # renamed to the "all" tag; the tarball content (and so its digest)
+          # does not change with the rename.
+          FORMULA_DIR="$RUNNER_TEMP/bottle-formula"
+          mkdir -p "$FORMULA_DIR"
+          sed "s|^  url .*|  url \"file://$GITHUB_WORKSPACE/release/orchestrate-macos-arm64.tar.gz\"|" \
+            release/orchestrate.rb > "$FORMULA_DIR/orchestrate.rb"
+          brew install --formula --build-from-source --ignore-dependencies "$FORMULA_DIR/orchestrate.rb"
+          brew bottle --json --no-rebuild \
+            --root-url "https://github.com/$GITHUB_REPOSITORY/releases/download/$GITHUB_REF_NAME" \
+            orchestrate
+          TAG="$(jq -r '.orchestrate.bottle.tags | keys[0]' orchestrate--*.bottle.json)"
+          CELLAR="$(jq -r ".orchestrate.bottle.tags[\"$TAG\"].cellar" orchestrate--*.bottle.json)"
+          BOTTLE_SHA="$(jq -r ".orchestrate.bottle.tags[\"$TAG\"].sha256" orchestrate--*.bottle.json)"
+          test "$CELLAR" = ":any_skip_relocation"
+          mv orchestrate--*.bottle.tar.gz \
+            "release/orchestrate--$ORCHESTRATE_RELEASE_VERSION.all.bottle.tar.gz"
+          shasum -a 256 -c <(echo "$BOTTLE_SHA  release/orchestrate--$ORCHESTRATE_RELEASE_VERSION.all.bottle.tar.gz")
+          awk -v url="https://github.com/$GITHUB_REPOSITORY/releases/download/$GITHUB_REF_NAME" \
+            -v sha="$BOTTLE_SHA" '
+            { print }
+            /^  license / {
+              print ""
+              print "  bottle do"
+              print "    root_url \"" url "\""
+              print "    sha256 cellar: :any_skip_relocation, all: \"" sha "\""
+              print "  end"
+            }' release/orchestrate.rb > release/orchestrate.rb.bottled
+          mv release/orchestrate.rb.bottled release/orchestrate.rb
+          grep -A3 "bottle do" release/orchestrate.rb
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: orchestrate-macos-arm64
           path: |
             release/orchestrate-macos-arm64.tar.gz
             release/orchestrate-macos-arm64.tar.gz.sha256
+            release/orchestrate--*.all.bottle.tar.gz
             release/orchestrate.rb
           if-no-files-found: error
           retention-days: 7
@@ -97,6 +138,7 @@ jobs:
           ASSETS=(
             release/orchestrate-macos-arm64.tar.gz
             release/orchestrate-macos-arm64.tar.gz.sha256
+            "release/orchestrate--$ORCHESTRATE_RELEASE_VERSION.all.bottle.tar.gz"
             release/orchestrate.rb
           )
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
