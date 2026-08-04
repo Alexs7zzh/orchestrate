@@ -121,6 +121,19 @@ case "$1 $2" in
     printf '{"result":{"root_pane":{"pane_id":"p%s"},"tab":{"tab_id":"t%s"}}}\n' "$count" "$count" ;;
   "pane get") printf '%s\n' '{"result":{"pane":{"pane_id":"p1"}}}' ;;
   "pane current") printf '%s\n' '{"result":{"pane":{"agent":null,"agent_session":null,"workspace_id":"w1","tab_id":"t1","pane_id":"p1"}}}' ;;
+  "pane list")
+    count_file=${JSON.stringify(`${herdrLog}.tabs`)}
+    count=$(cat "$count_file" 2>/dev/null || printf 0)
+    printf '%s' '{"result":{"panes":['
+    index=1
+    while [ "$index" -le "$count" ]; do
+      [ "$index" -eq 1 ] || printf ','
+      pane_id="p$index"
+      if [ "$pane_id" = "\${HERDR_DONE_PANE-}" ]; then status=done; else status=idle; fi
+      printf '{"pane_id":"%s","agent_status":"%s"}' "$pane_id" "$status"
+      index=$((index + 1))
+    done
+    printf '%s\n' ']}}' ;;
   "agent get")
     if [ "$3" = "\${HERDR_DONE_PANE-}" ]; then status=done; else status=idle; fi
     printf '{"result":{"agent":{"agent_status":"%s","agent_session":{"agent":"codex","kind":"id","source":"herdr:codex","value":"session-%s"}}}}\n' "$status" "$3" ;;

@@ -1,53 +1,63 @@
 name: Build release artifacts
 
 on:
-  workflow_dispatch:
-    inputs:
-      publish:
-        description: "Publish the selected tag after building and verifying"
-        required: true
-        type: boolean
-        default: false
   push:
     tags:
       - "orchestrate-*"
 
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
-  macos-arm64:
-    permissions:
-      contents: read
+  build:
+    name: Build macOS ARM64 release
     runs-on: macos-15
+    timeout-minutes: 30
+    outputs:
+      version: ${{ steps.version.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
+          fetch-depth: 0
           persist-credentials: false
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
         with:
           bun-version: 1.3.14
       - name: Assert native ARM64 runner
         run: test "$(uname -m)" = arm64
+      - name: Require the tagged commit to belong to main
+        run: |
+          TAG_COMMIT="$(git rev-list -n 1 "$GITHUB_REF_NAME")"
+          if ! git merge-base --is-ancestor "$TAG_COMMIT" refs/remotes/origin/main; then
+            echo "Release tag must point to a commit on main." >&2
+            exit 1
+          fi
       - name: Derive the release version from the tag
+        id: version
         run: |
           test "$GITHUB_REF_TYPE" = tag
           case "$GITHUB_REF_NAME" in orchestrate-*) ;; *) echo "Release tag must be orchestrate-<semver>." >&2; exit 1 ;; esac
           VERSION="${GITHUB_REF_NAME#orchestrate-}"
           ORCHESTRATE_TAG_VERSION="$VERSION" bun -e 'import { assertReleaseVersion } from "./scripts/src/semver.ts"; assertReleaseVersion(process.env.ORCHESTRATE_TAG_VERSION ?? "")'
           echo "ORCHESTRATE_RELEASE_VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
       - name: Install
         working-directory: scripts
         run: bun install --frozen-lockfile
-      - name: Verify and compile
+      - name: Verify source and compiled release payload
         working-directory: scripts
-        run: |
-          bun run verify
-          bun run build:compile
+        run: bun run verify
       - name: Package staged payload
         working-directory: scripts
         env:
           ORCHESTRATE_RELEASE_REPOSITORY: ${{ github.repository }}
           ORCHESTRATE_RELEASE_OUTPUT: ${{ github.workspace }}/release
         run: bun run release:assemble
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: orchestrate-macos-arm64
           path: |
@@ -55,24 +65,43 @@ jobs:
             release/orchestrate-macos-arm64.tar.gz.sha256
             release/orchestrate.rb
           if-no-files-found: error
-  publish:
-    if: github.event_name == 'workflow_dispatch' && inputs.publish && github.ref_type == 'tag'
-    needs: macos-arm64
+          retention-days: 7
+
+  draft-release:
+    name: Create draft GitHub release
+    needs: build
     permissions:
       contents: write
-    runs-on: macos-15
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: orchestrate-macos-arm64
           path: release
-      - name: Publish explicitly authorized tag
+      - name: Create or refresh the reviewable draft release
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          ORCHESTRATE_RELEASE_VERSION: ${{ needs.build.outputs.version }}
         run: |
-          gh release create "$GITHUB_REF_NAME" \
-            release/orchestrate-macos-arm64.tar.gz \
-            release/orchestrate-macos-arm64.tar.gz.sha256 \
-            release/orchestrate.rb \
-            --verify-tag \
-            --generate-notes
+          set -euo pipefail
+          ASSETS=(
+            release/orchestrate-macos-arm64.tar.gz
+            release/orchestrate-macos-arm64.tar.gz.sha256
+            release/orchestrate.rb
+          )
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            IS_DRAFT="$(gh release view "$GITHUB_REF_NAME" --json isDraft --jq .isDraft)"
+            if [ "$IS_DRAFT" != true ]; then
+              echo "Release $GITHUB_REF_NAME is already published; refusing to replace its assets." >&2
+              exit 1
+            fi
+            gh release upload "$GITHUB_REF_NAME" "${ASSETS[@]}" --clobber
+          else
+            FLAGS=(--draft --verify-tag --generate-notes --title "Orchestrate $ORCHESTRATE_RELEASE_VERSION")
+            if [[ "$ORCHESTRATE_RELEASE_VERSION" == *-* ]]; then
+              FLAGS+=(--prerelease)
+            fi
+            gh release create "$GITHUB_REF_NAME" "${ASSETS[@]}" "${FLAGS[@]}"
+          fi

@@ -23,6 +23,7 @@
 **/*.tsbuildinfo
 
 # Orchestrate build intermediates
+/scripts/orchestrate.mjs
 /scripts/orchestrate.mjs.map
 /scripts/dist/
 /scripts/.*.bun-build

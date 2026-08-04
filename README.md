@@ -179,13 +179,27 @@ The public contracts are [workflow.schema.json](references/workflow.schema.json)
 See [workflow-format.md](references/workflow-format.md),
 [runtime-operations.md](references/runtime-operations.md), and [cli-spec.md](references/cli-spec.md).
 
-This repository does not publish from local development commands. Release automation builds a
-tagged binary and formula artifact for review. It derives one version from the
-`orchestrate-<semver>` tag before compilation and uses one strict SemVer 2.0 validator for tag
-derivation, compilation, and assembly. Leading-zero core/numeric prerelease identifiers and empty
-prerelease identifiers are rejected. Release build metadata is deliberately unsupported because the
-compiled identity appends its own build hash. CI runs on native ARM64 `macos-15` and asserts
-`uname -m=arm64`. The release contract rejects binary, plugin, or formula version disagreement,
-pins the exact payload (binary, root license, complete third-party notices, skill, agent metadata,
-plugin, and all nine reference files), rejects unexpected extras, independently recomputes the archive checksum sidecar, and exercises the unpacked
-formula-shaped install tree without changing Homebrew or the host installation.
+Normal pushes to `main` run CI but do not build or publish a release. Start a release by pushing an
+annotated or signed strict-SemVer tag that points to a commit on `main`:
+
+```bash
+git tag -a orchestrate-0.2.0 -m "Orchestrate 0.2.0"
+git push origin orchestrate-0.2.0
+```
+
+The tag workflow derives one version from `orchestrate-<semver>`, verifies the exact tagged source,
+builds the macOS ARM64 payload, and creates a draft GitHub Release with the archive, checksum, and
+rendered Homebrew formula attached. Review those assets and generated notes in GitHub, then publish
+the draft manually. Release binaries and the generated `scripts/orchestrate.mjs` bundle are not
+committed to this repository; CI generates both from source. The formula can optionally be copied to
+`Formula/orchestrate.rb` in a separate Homebrew tap by automation running after the release is
+published.
+
+Release derivation, compilation, and assembly share one strict SemVer 2.0 validator. Leading-zero
+core/numeric prerelease identifiers and empty prerelease identifiers are rejected. Release build
+metadata is deliberately unsupported because the compiled identity appends its own build hash. The
+release build runs on native ARM64 `macos-15` and asserts `uname -m=arm64`. The release contract
+rejects binary, plugin, or formula version disagreement, pins the exact payload (binary, root
+license, complete third-party notices, skill, agent metadata, plugin, and all nine reference files),
+rejects unexpected extras, independently recomputes the archive checksum sidecar, and exercises the
+unpacked formula-shaped install tree without changing Homebrew or the host installation.

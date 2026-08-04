@@ -142,19 +142,26 @@ describe("release payload contract", () => {
     expect(nativeLicense).toBe(coreLicense)
   })
 
-  test("pins a supported native ARM64 release runner and the shared tag validator", async () => {
+  test("builds tags from main and creates a reviewable draft release", async () => {
     const releaseWorkflow = await readFile(
       path.resolve(import.meta.dir, "../../.github/workflows/release.yml"),
       "utf8"
     )
     expect(releaseWorkflow).toContain("runs-on: macos-15")
     expect(releaseWorkflow).toContain('test "$(uname -m)" = arm64')
+    expect(releaseWorkflow).toContain("fetch-depth: 0")
+    expect(releaseWorkflow).toContain("git merge-base --is-ancestor")
     expect(releaseWorkflow).toContain("assertReleaseVersion")
     expect(releaseWorkflow).toContain("persist-credentials: false")
-    expect(releaseWorkflow).toContain("needs: macos-arm64")
-    expect(releaseWorkflow).toContain("actions/download-artifact@v4")
+    expect(releaseWorkflow).toContain("needs: build")
+    expect(releaseWorkflow).toContain("--draft --verify-tag --generate-notes")
+    expect(releaseWorkflow).toContain("gh release upload")
+    expect(releaseWorkflow).toContain("GH_REPO:")
+    expect(releaseWorkflow).toContain("retention-days: 7")
     expect(releaseWorkflow.match(/contents: write/g)).toHaveLength(1)
     expect(releaseWorkflow.match(/contents: read/g)).toHaveLength(1)
+    expect(releaseWorkflow).not.toContain("workflow_dispatch")
+    expect(releaseWorkflow).not.toMatch(/uses:\s+actions\/[^@\s]+@v\d/)
     expect(releaseWorkflow).not.toContain("runs-on: macos-14")
   })
 

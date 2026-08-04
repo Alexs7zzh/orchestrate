@@ -170,7 +170,7 @@ describe("state and event contract", () => {
   test("omits the removed compound vocabulary from source, tests, schemas, and documents", async () => {
     const compound = ["completed", "held"].join("-")
     const roots = ["scripts/src", "scripts/test", "references", "agents", "herdr-plugin"] as const
-    const files = ["README.md", "SKILL.md", "scripts/orchestrate.mjs"]
+    const files = ["README.md", "SKILL.md"]
     const repositoryRoot = path.resolve(import.meta.dir, "../..")
     for (const root of roots) {
       const glob = new Bun.Glob("**/*.{ts,json,md,yaml,toml}")
