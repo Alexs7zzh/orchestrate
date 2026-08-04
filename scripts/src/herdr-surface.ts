@@ -40,6 +40,7 @@ import {
   readWorkflow,
   runDirectory,
   stateRoot,
+  submissionRunDirectory,
   submissionsRoot
 } from "./state.js"
 import {
@@ -566,16 +567,33 @@ function codexArguments(
   return args
 }
 
+// Claude sessions are project-scoped by launch directory, so every node of a
+// session lineage must start from the same cwd or --resume cannot find the
+// saved session. The run-shared directory lives beside the token-addressed
+// submission dirs and grants no access to authoritative state or other
+// completion channels.
+function claudeSessionLineage(node: Extract<AgentNode, { readonly provider: "claude" }>): boolean {
+  return node.session.saveAs !== null || node.session.mode !== "fresh"
+}
+
+async function claudeLineageDirectory(runId: string): Promise<string> {
+  const directory = path.join(submissionRunDirectory(runId), "claude-sessions")
+  await mkdir(directory, { recursive: true, mode: 0o755 })
+  return realpathSync.native(directory)
+}
+
 function claudeSettingsDocument(
   node: Extract<AgentNode, { readonly provider: "claude" }>,
   state: RunState,
   intent: SpawnIntent,
   submissionDirectory: string,
-  sourceRoot: string
+  sourceRoot: string,
+  lineageDirectory: string | null
 ): string {
   const writeRoots = providerWriteRoots(node, sourceRoot)
   const protectedPaths = orchestrateAuthorityPaths()
   const protectedWritePaths = protectedPaths.filter((candidate) => candidate !== submissionsRoot())
+  const lineage = lineageDirectory === null ? [] : [lineageDirectory]
   return JSON.stringify({
     permissions: {
       allow: [
@@ -591,8 +609,8 @@ function claudeSettingsDocument(
       autoAllowBashIfSandboxed: true,
       allowUnsandboxedCommands: false,
       filesystem: {
-        allowRead: [submissionDirectory],
-        allowWrite: [...writeRoots, submissionDirectory],
+        allowRead: [submissionDirectory, ...lineage],
+        allowWrite: [...writeRoots, submissionDirectory, ...lineage],
         denyRead: protectedPaths,
         denyWrite: protectedWritePaths
       }
@@ -653,9 +671,12 @@ async function prepareProviderLaunch(
   const transportDirectory = path.dirname(attemptFor(state, intent).resultPath)
   if (node.provider === "claude") {
     const settingsPath = path.join(transportDirectory, "claude-settings.json")
+    const lineageDirectory = claudeSessionLineage(node)
+      ? await claudeLineageDirectory(state.id)
+      : null
     await atomicWriteFile(
       settingsPath,
-      claudeSettingsDocument(node, state, intent, transportDirectory, sourceRoot)
+      claudeSettingsDocument(node, state, intent, transportDirectory, sourceRoot, lineageDirectory)
     )
     const sessionId =
       node.session.saveAs === null
@@ -675,6 +696,98 @@ async function prepareProviderLaunch(
     codexControlProfileDocument(profile, transportDirectory, providerWriteRoots(node, sourceRoot))
   )
   return { args: codexArguments(node, source, profile), providerSessionId: null }
+}
+
+const AGENT_INTERACTIVE_READY_TIMEOUT_MS = 60_000
+const AGENT_INTERACTIVE_READY_POLL_MS = 250
+const PROMPT_INLINE_LIMIT_BYTES = 900
+const AGENT_PROMPT_VISIBLE_TIMEOUT_MS = 6_000
+const AGENT_PROMPT_VISIBLE_POLL_MS = 400
+
+// A booting provider swallows input typed before its composer is ready, and
+// boot activity can register as a working state, so a prompt can be observed
+// as taken that the TUI never received. Herdr's interactive_ready flag is the
+// input-readiness signal; a herdr without the field skips the wait.
+async function waitForInteractiveReady(paneId: string): Promise<void> {
+  const deadline = Date.now() + AGENT_INTERACTIVE_READY_TIMEOUT_MS
+  for (;;) {
+    const raw = JSON.parse(await runHerdr(["agent", "get", paneId])) as {
+      readonly result?: { readonly agent?: { readonly interactive_ready?: unknown } }
+    }
+    const ready = raw.result?.agent?.interactive_ready
+    if (ready !== false) {
+      return
+    }
+    if (Date.now() >= deadline) {
+      throw new Error(
+        `Agent pane "${paneId}" did not become interactive within ${AGENT_INTERACTIVE_READY_TIMEOUT_MS} ms.`
+      )
+    }
+    await new Promise<void>((resolve) => {
+      setTimeout(resolve, AGENT_INTERACTIVE_READY_POLL_MS)
+    })
+  }
+}
+
+function normalizeForScreenMatch(value: string): string {
+  return value.replaceAll(/\s+/g, "")
+}
+
+// The pane transcript is the only delivery proof: a provider whose composer
+// is not yet listening silently drops typed input while its boot activity
+// can still be observed as a working state.
+async function promptVisible(paneId: string, marker: string): Promise<boolean> {
+  const deadline = Date.now() + AGENT_PROMPT_VISIBLE_TIMEOUT_MS
+  for (;;) {
+    const screen = await runHerdr(["agent", "read", paneId, "--format", "text"]).catch(() => "")
+    if (normalizeForScreenMatch(screen).includes(marker)) {
+      return true
+    }
+    if (Date.now() >= deadline) {
+      return false
+    }
+    await new Promise<void>((resolve) => {
+      setTimeout(resolve, AGENT_PROMPT_VISIBLE_POLL_MS)
+    })
+  }
+}
+
+// --wait --until working confirms herdr observed the agent take the prompt,
+// but that observation can be a boot flicker, and herdr's internal stall
+// detector fires after 5s of no state change regardless of the requested
+// timeout. Delivery therefore counts only when the prompt's own text appears
+// in the pane transcript; a stalled or invisible delivery was never accepted,
+// so re-prompting within the accept budget is safe.
+async function promptUntilWorking(paneId: string, prompt: string): Promise<void> {
+  const deadline = Date.now() + AGENT_PROMPT_ACCEPT_TIMEOUT_MS
+  const marker = normalizeForScreenMatch(prompt).slice(0, 40)
+  for (;;) {
+    const remaining = Math.max(1_000, deadline - Date.now())
+    try {
+      await runHerdr([
+        "agent",
+        "prompt",
+        paneId,
+        prompt,
+        "--wait",
+        "--until",
+        "working",
+        "--timeout",
+        String(remaining)
+      ])
+    } catch (error) {
+      if (!isHerdrErrorCode(error, "agent_prompt_stalled") || Date.now() >= deadline) {
+        throw error
+      }
+      continue
+    }
+    if (await promptVisible(paneId, marker)) {
+      return
+    }
+    if (Date.now() >= deadline) {
+      throw new Error(`Agent pane "${paneId}" reported the prompt taken but never displayed it.`)
+    }
+  }
 }
 
 async function startAgentWhenShellReady(args: readonly string[]): Promise<void> {
@@ -1054,7 +1167,9 @@ export class HerdrSurface {
     const sourceRoot = stableProviderRoot(workflow, node, preparedCwd)
     const providerCwd =
       node.type === "agent" && node.provider === "claude"
-        ? realpathSync.native(path.dirname(attempt.resultPath))
+        ? node.session.saveAs !== null || node.session.mode !== "fresh"
+          ? await claudeLineageDirectory(state.id)
+          : realpathSync.native(path.dirname(attempt.resultPath))
         : sourceRoot
     const workspaceId = await this.nodeWorkspace(request, true)
     if (workspaceId === null) {
@@ -1174,24 +1289,27 @@ export class HerdrSurface {
       if (request.prompt === null) {
         throw new Error(`Agent node "${intent.nodeId}" has no prompt.`)
       }
-      promptMayHaveBeenAccepted = true
-      const prompt =
+      await waitForInteractiveReady(pane.paneId)
+      const fullPrompt =
         node.provider === "claude"
           ? `Source workspace: ${sourceRoot}\n\n${request.prompt}`
           : request.prompt
-      // --wait --until working confirms the agent actually took the prompt instead of
-      // reporting acceptance for a prompt the provider then dropped.
-      await runHerdr([
-        "agent",
-        "prompt",
-        pane.paneId,
-        prompt,
-        "--wait",
-        "--until",
-        "working",
-        "--timeout",
-        String(AGENT_PROMPT_ACCEPT_TIMEOUT_MS)
-      ])
+      // Herdr types the prompt into the provider's PTY, whose canonical-mode
+      // input buffer silently drops everything past 1024 bytes while the
+      // provider can still flicker into an observed working state. Anything
+      // over the safe budget is delivered as a short pointer to a prompt copy
+      // in the attempt submission directory — the one path both provider
+      // sandboxes can already read; authoritative run state stays denied.
+      let prompt = fullPrompt
+      if (Buffer.byteLength(fullPrompt, "utf8") > PROMPT_INLINE_LIMIT_BYTES) {
+        const deliveredPromptPath = path.join(path.dirname(attempt.resultPath), "prompt.txt")
+        await atomicWriteFile(deliveredPromptPath, request.prompt)
+        prompt = `${
+          node.provider === "claude" ? `Source workspace: ${sourceRoot}\n\n` : ""
+        }Your full task prompt is in the file ${deliveredPromptPath} — read that file now and follow it exactly.`
+      }
+      promptMayHaveBeenAccepted = true
+      await promptUntilWorking(pane.paneId, prompt)
       promptDeliveryConfirmed = true
       const sessionId =
         node.session.saveAs === null
@@ -1210,12 +1328,14 @@ export class HerdrSurface {
       return observation
     } catch (error) {
       if (promptMayHaveBeenAccepted) {
-        // A launcher-chosen session id survives into the receipt so recovery
-        // never needs to observe it from herdr.
+        // A launcher-chosen session id survives into every failure receipt so
+        // recovery never needs to observe it from herdr: the id was fixed at
+        // agent start, before the prompt, so even an ambiguous delivery that
+        // later produces a token-valid submission ran under that id.
         await atomicWriteJson(receiptPath(attempt), {
           status: promptDeliveryConfirmed ? "session-pending" : "ambiguous",
           pane,
-          providerSessionId: promptDeliveryConfirmed ? launchSessionId : null,
+          providerSessionId: launchSessionId,
           detail: herdrError(error)
         } satisfies SpawnReceipt)
         throw new HerdrObservationError(
@@ -1261,14 +1381,18 @@ export class HerdrSurface {
           node.type === "agent" &&
           (await hasTokenValidSubmission(request.state, request.intent, attempt))
         ) {
+          // A launcher-chosen id recorded in the receipt was fixed before the
+          // prompt, so a token-valid submission from that pane necessarily
+          // ran under it; only Codex still observes the id from herdr.
           const sessionId =
             node.session.saveAs === null
               ? null
-              : await waitForProviderSession(
+              : (recorded.providerSessionId ??
+                (await waitForProviderSession(
                   recorded.pane.paneId,
                   node.provider,
                   request.intent.nodeId
-                )
+                )))
           const observation = {
             pane: recorded.pane,
             providerSessionId: sessionId

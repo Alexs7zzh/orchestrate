@@ -137,6 +137,7 @@ case "$1 $2" in
   "agent get")
     if [ "$3" = "\${HERDR_DONE_PANE-}" ]; then status=done; else status=idle; fi
     printf '{"id":"cli:agent:get","result":{"type":"agent_info","agent":{"terminal_id":"terminal-%s","agent_status":"%s","workspace_id":"w1","tab_id":"t1","pane_id":"%s","focused":false,"revision":1,"agent":"codex","agent_session":{"agent":"codex","kind":"id","source":"herdr:codex","value":"session-%s"}}}}\n' "$3" "$status" "$3" "$3" ;;
+  "agent read") cat ${JSON.stringify(herdrLog)} 2>/dev/null || true ;;
   "plugin list") printf '%s\n' '{"result":{"plugins":[{"id":"orchestrate"}]}}' ;;
   "plugin link") [ "\${HERDR_FAIL_LINK-}" = 1 ] && { printf 'link failed\n' >&2; exit 9; }; true ;;
   "plugin unlink") [ "\${HERDR_FAIL_UNLINK-}" = 1 ] && { printf 'unlink failed\n' >&2; exit 9; }; true ;;

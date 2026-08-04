@@ -40,6 +40,7 @@ import {
   removeWorkflowWorktrees,
   setAgentSessionTimeoutForTests
 } from "../src/herdr-surface.js"
+import { completionSubmissionPath } from "../src/state.js"
 
 let temporaryRoot = ""
 let shimDirectory = ""
@@ -292,11 +293,15 @@ async function writeShim(
   originLive = true,
   paneFailure: "none" | "transport" | "split-missing" | "split-transport" = "none",
   missingPane: string | null = null,
-  reportSessionLate = false
+  reportSessionLate = false,
+  promptFailure: "none" | "stall-once" | "always" = "none",
+  bootDelayOnce = false
 ): Promise<void> {
   const busyMarker = path.join(temporaryRoot, "agent-start-busy-once")
   const claudeMarker = path.join(temporaryRoot, "agent-is-claude")
   const sessionLateMarker = path.join(temporaryRoot, "agent-session-reported-late")
+  const stallMarker = path.join(temporaryRoot, "agent-prompt-stalled-once")
+  const bootMarker = path.join(temporaryRoot, "agent-boot-finished")
   const codexSession = {
     agent: "codex",
     kind: "id",
@@ -390,9 +395,27 @@ case "$1 $2" in
       previous="$argument"
     done
     if [ "$5" = "claude" ]; then touch ${JSON.stringify(claudeMarker)}; fi ;;
+  "agent read")
+    cat ${JSON.stringify(logPath)} 2>/dev/null || true ;;
+  "agent prompt")
+    if [ ${JSON.stringify(promptFailure)} = "stall-once" ] && [ ! -f ${JSON.stringify(stallMarker)} ]; then
+      touch ${JSON.stringify(stallMarker)}
+      printf '%s\n' '{"error":{"code":"agent_prompt_stalled","message":"agent prompt produced no observed state change within 5000 ms; status is idle"},"id":"cli:agent:prompt"}' >&2
+      exit 1
+    fi
+    if [ ${JSON.stringify(promptFailure)} = "always" ]; then
+      printf '%s\n' '{"error":{"code":"agent_prompt_failed","message":"delivery uncertain"},"id":"cli:agent:prompt"}' >&2
+      exit 1
+    fi ;;
   "agent get")
     if [ "$3" = "origin-pane" ]; then
       printf '%s\n' '${herdrResponse({ type: "agent_info", agent: herdrAgent("origin-pane", "codex", originSession) })}'
+    elif ${bootDelayOnce ? "true" : "false"} && [ ! -f ${JSON.stringify(bootMarker)} ]; then
+      touch ${JSON.stringify(bootMarker)}
+      printf '%s\n' '${herdrResponse({
+        type: "agent_info",
+        agent: { ...herdrAgent("p1", "codex", undefined), interactive_ready: false }
+      })}'
     elif ${reportSessionLate ? "true" : "false"} && [ ! -f ${JSON.stringify(sessionLateMarker)} ]; then
       touch ${JSON.stringify(sessionLateMarker)}
       printf '%s\n' '${herdrResponse({ type: "agent_info", agent: herdrAgent("p1", "codex", undefined) })}'
@@ -636,7 +659,7 @@ describe("herdr surface", () => {
     expect(log).not.toContain(`--add-dir ${process.env.ORCHESTRATE_STATE_DIR}`)
     expect(log).toContain("agent get p1")
     expect(log).toContain("agent prompt p1 Rendered prompt and node-done contract.")
-    expect(log.indexOf("agent prompt p1")).toBeLessThan(log.indexOf("agent get p1"))
+    expect(log.lastIndexOf("agent get p1")).toBeGreaterThan(log.indexOf("agent prompt p1"))
   })
 
   test("does not require a provider session id when no lineage alias is saved", async () => {
@@ -655,7 +678,7 @@ describe("herdr surface", () => {
     const log = await readFile(logPath, "utf8")
     expect(observation.providerSessionId).toBeNull()
     expect(log).toContain("agent prompt p1 Run without preserving this session.")
-    expect(log).not.toContain("agent get p1")
+    expect(log.slice(log.indexOf("agent prompt p1"))).not.toContain("agent get p1")
   })
 
   test("confines a workspace-write Codex node to declared roots and its submission", async () => {
@@ -1453,6 +1476,114 @@ describe("herdr surface", () => {
     })
   })
 
+  test("holds the prompt until the agent reports interactive readiness", async () => {
+    await writeShim(true, false, true, "none", null, false, "none", true)
+    const node = agent()
+    const observation = await new HerdrSurface().spawn({
+      workflow: workflow(node),
+      state: state(node.id),
+      intent: intent(node.id),
+      prompt: "Prompt",
+      placement: placement(node.id)
+    })
+    expect(observation.providerSessionId).toBe("session-1")
+    const log = await readFile(logPath, "utf8")
+    // Two readiness polls (not-ready, then ready) both precede the prompt.
+    const promptIndex = log.indexOf("agent prompt p1")
+    const polls = [...log.matchAll(/agent get p1/g)].filter(
+      (match) => (match.index ?? 0) < promptIndex
+    )
+    expect(polls.length).toBeGreaterThanOrEqual(2)
+  })
+
+  test("delivers an over-budget prompt as a pointer to the durable prompt file", async () => {
+    await writeShim(true)
+    const node = agent()
+    const longPrompt = `Review everything. ${"Detail. ".repeat(200)}`
+    const runState = state(node.id)
+    const observation = await new HerdrSurface().spawn({
+      workflow: workflow(node),
+      state: runState,
+      intent: intent(node.id),
+      prompt: longPrompt,
+      placement: placement(node.id)
+    })
+    expect(observation.providerSessionId).toBe("session-1")
+    const attempt = runState.nodes[node.id]!.attempts[0]!
+    const promptFile = path.join(path.dirname(attempt.resultPath), "prompt.txt")
+    expect(await readFile(promptFile, "utf8")).toBe(longPrompt)
+    const log = await readFile(logPath, "utf8")
+    const promptLine = log.split("\n").find((line) => line.startsWith("agent prompt")) as string
+    expect(promptLine).toContain(`Your full task prompt is in the file ${promptFile}`)
+    expect(promptLine).not.toContain("Detail. Detail.")
+    expect(promptLine.length).toBeLessThan(1_024)
+  })
+
+  test("retries a stalled prompt within the accept budget", async () => {
+    await writeShim(true, false, true, "none", null, false, "stall-once")
+    const node = agent()
+    const observation = await new HerdrSurface().spawn({
+      workflow: workflow(node),
+      state: state(node.id),
+      intent: intent(node.id),
+      prompt: "Prompt",
+      placement: placement(node.id)
+    })
+    expect(observation.providerSessionId).toBe("session-1")
+    const log = await readFile(logPath, "utf8")
+    expect(log.split("\n").filter((line) => line.startsWith("agent prompt")).length).toBe(2)
+    expect(log).not.toContain("pane close p1")
+  })
+
+  test("recovers an ambiguous Claude spawn from its recorded id and a token-valid submission", async () => {
+    await writeShim(false, false, true, "none", null, false, "always")
+    const node = {
+      ...claudeAgent(),
+      session: { mode: "fresh" as const, from: null, saveAs: "claude-session" }
+    }
+    const runState = state(node.id)
+    const request = {
+      workflow: workflow(node),
+      state: runState,
+      intent: intent(node.id),
+      prompt: "Review and report completion.",
+      placement: placement(node.id)
+    }
+    const surface = new HerdrSurface()
+    const failure = await surface.spawn(request).catch((error: unknown) => error)
+    expect(failure).toBeInstanceOf(HerdrObservationError)
+    expect((failure as Error).message).toContain("ambiguous")
+    const attempt = runState.nodes[node.id]!.attempts[0]!
+    const receipt = JSON.parse(
+      await readFile(path.join(path.dirname(attempt.outputPath), "spawn.json"), "utf8")
+    ) as { status: string; providerSessionId: string | null }
+    expect(receipt.status).toBe("ambiguous")
+    expect(receipt.providerSessionId).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
+    )
+
+    // The agent finishes out of band and submits; recovery must adopt the
+    // recorded id without observing herdr or re-prompting.
+    await mkdir(path.dirname(attempt.resultPath), { recursive: true })
+    await writeFile(
+      completionSubmissionPath(attempt.resultPath),
+      JSON.stringify({
+        runId: runState.id,
+        nodeId: node.id,
+        token: "token-1",
+        outcome: "completed",
+        hold: false
+      })
+    )
+    const before = await readFile(logPath, "utf8")
+    const observation = await surface.recoverOrSpawn(request)
+    expect(observation.providerSessionId).toBe(receipt.providerSessionId)
+    const after = await readFile(logPath, "utf8")
+    expect(after.split("agent get p1").length).toBe(before.split("agent get p1").length)
+    expect(after.split("agent prompt").length).toBe(before.split("agent prompt").length)
+    expect(after.split("agent start").length).toBe(before.split("agent start").length)
+  })
+
   test("chooses the Claude session id at launch instead of observing herdr", async () => {
     // herdr never reports a claude session (safe-mode disables the hook that
     // would); the launcher-chosen id must make that irrelevant.
@@ -1473,7 +1604,20 @@ describe("herdr surface", () => {
     )
     const log = await readFile(logPath, "utf8")
     expect(log).toContain(`--session-id ${observation.providerSessionId}`)
-    expect(log).not.toContain("agent get p1")
+    expect(log.slice(log.indexOf("agent prompt p1"))).not.toContain("agent get p1")
+    // Claude sessions are project-scoped by cwd: lineage nodes launch from
+    // the run-shared session directory, carved into the sandbox.
+    const tabLine = log.split("\n").find((line) => line.startsWith("tab create")) as string
+    expect(tabLine).toContain("claude-sessions")
+    const runState = state(node.id)
+    const settings = await readFile(
+      path.join(
+        path.dirname(runState.nodes[node.id]!.attempts[0]!.resultPath),
+        "claude-settings.json"
+      ),
+      "utf8"
+    )
+    expect(settings).toContain("claude-sessions")
   })
 
   test("records session-pending when herdr never reports a lineage session id", async () => {
@@ -1494,7 +1638,7 @@ describe("herdr surface", () => {
     expect((failure as Error).cause).toBeInstanceOf(Error)
     expect(((failure as Error).cause as Error).message).toContain("session.saveAs")
     const log = await readFile(logPath, "utf8")
-    expect(log.indexOf("agent prompt p1 Prompt")).toBeLessThan(log.indexOf("agent get p1"))
+    expect(log.indexOf("agent prompt p1 Prompt")).toBeLessThan(log.lastIndexOf("agent get p1"))
     expect(log).not.toContain("pane close p1")
 
     // Reconcile retries only the session capture on the live pane: once the

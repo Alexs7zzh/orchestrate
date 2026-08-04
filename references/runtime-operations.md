@@ -18,7 +18,10 @@ recovery for a missing or torn snapshot.
 Before a pane starts, Orchestrate persists an intent and attempt token. The surface records one
 small receipt after Herdr creates a pane and marks it `ready` only after command start or agent
 prompt succeeds. Agent prompts are delivered atomically and wait until the agent is observed
-working, so a `ready` receipt means the prompt was actually taken, not merely accepted. A prompt
+working, so a `ready` receipt means the prompt was actually taken, not merely accepted. Delivery
+waits for the agent to report interactive readiness first, requires the prompt text to appear in
+the pane transcript before trusting the observation, and delivers a prompt beyond the PTY-safe
+typed budget as a short pointer to a prompt copy in the attempt submission directory. A prompt
 error or wait timeout is recorded as `ambiguous`. A failure after the prompt was observed taken —
 such as a provider reporting the session id required by `session.saveAs` late — is recorded as
 `session-pending`: reconcile retries only the session capture on that live pane and promotes the
