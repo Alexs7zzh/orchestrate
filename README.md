@@ -12,20 +12,12 @@ or done; the sandboxed `node-done` path only writes its authenticated submission
 latency, but reconciliation is safe at any time and does not depend on a wake being delivered. There
 is no per-run background controller.
 
-## Requirements
-
-- macOS on Apple silicon
-- herdr 0.7.5 or newer
-- Codex and/or Claude for the providers used by a workflow
-- Git only when a node requests an isolated Git worktree
-
-## Install from this checkout
+## Install
 
 ```bash
-cd scripts
-bun install --frozen-lockfile
-bun run build:compile
-./dist/orchestrate setup
+brew tap alexs7zzh/tap
+brew install orchestrate
+orchestrate setup
 ```
 
 `setup` atomically stages the CLI, skill, and herdr plugin under
@@ -38,20 +30,18 @@ unhealthy. If Herdr cannot confirm either link or rollback, the versioned stage 
 plugin's recoverable target while the stable CLI/skill selection stays unchanged. Run
 `orchestrate doctor` after changing herdr or provider installations.
 
-Supported release builds are macOS ARM64 and are distributed through Homebrew. Source and release
-contracts currently run on macOS; Linux is not a supported or distributed platform. Once a tap is
-configured:
+Release builds are macOS ARM64 and are distributed through Homebrew; Linux is not a supported or
+distributed platform, and no npm package is used. Update with `brew upgrade orchestrate` followed
+by the unqualified `orchestrate setup`. The staged wrapper delegates setup to the distinct formula
+executable later on `PATH`, preventing the prior staged build from replacing a newer formula build.
+Before uninstalling the formula, run `orchestrate setup --remove` to unlink the skill and plugin.
 
-```bash
-brew tap <owner>/tap
-brew install orchestrate
-orchestrate setup
-```
+## Requirements
 
-Update with `brew upgrade orchestrate` followed by the unqualified `orchestrate setup`. The staged
-wrapper delegates setup to the distinct formula executable later on `PATH`, preventing the prior
-staged build from replacing a newer formula build. Before uninstalling the formula, run
-`orchestrate setup --remove` to unlink the skill and plugin. No npm package is used.
+- macOS on Apple silicon
+- herdr 0.7.5 or newer
+- Codex and/or Claude for the providers used by a workflow
+- Git only when a node requests an isolated Git worktree
 
 ## Run a workflow
 
@@ -190,9 +180,14 @@ The machine contracts are [workflow.schema.json](references/workflow.schema.json
 
 ```bash
 cd scripts
+bun install --frozen-lockfile
 bun run verify
 bun run build:compile
+./dist/orchestrate setup
 ```
+
+`./dist/orchestrate setup` installs the local build through the same staged layout as the formula
+install.
 
 The checked Herdr response decoders are generated from the checked-in socket schema snapshot. After
 raising or changing the supported Herdr API contract, run `bun run schema:herdr` with that Herdr
