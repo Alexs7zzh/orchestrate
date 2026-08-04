@@ -18,7 +18,12 @@ Use Orchestrate only when the task is materially clearer or safer as an explicit
 5. Prefer concurrency 3. It limits simultaneous active node attempts and is a human-attention budget.
 6. Run `orchestrate validate`, then `orchestrate preview`.
 7. Present the objective, graph, mutation boundaries, permissions, repeat limits, and preview
-   digest. Do not start until the user approves that digest.
+   digest as a readable prose walkthrough in your reply message — describe the nodes,
+   dependencies, loops, providers, and models in words. Never paste raw workflow JSON or terminal
+   preview output as the presentation, and never route approval through an interactive question
+   tool: terminal output is often collapsed, so the human would be approving work they never saw.
+   End your message after the walkthrough and wait for the human to reply. Do not start until the
+   user approves that digest.
 8. Start with `orchestrate run <file> --approve <digest>`. Report the run ID. Initial panes run
    independently. `node-done` writes only the authenticated submission; Herdr's trusted plugin event
    hook wakes the launching master when a workflow agent becomes blocked or done.
@@ -51,8 +56,11 @@ Use Orchestrate only when the task is materially clearer or safer as an explicit
 - Keep every mutating provider cwd, workspace path, sandbox root, and write prefix disjoint from
   Orchestrate state and installed control assets in both ancestor directions. For repeat Git
   worktrees, include `{{nodeId}}` in both the branch and any explicit path.
-- Repeats must be bounded and must have an objective clean condition. Round extensions and
-  acceptance are explicit human decisions.
+- Express iteration as a `repeat`: ordered members, a bounded `maxRounds`, and an objective
+  `until` condition — a command's success or a named field in a verdict node's JSON result. Never
+  unroll rounds into copied nodes; the board folds repeat rounds into one aligned group, while
+  copies render as an ever-deepening chain. Round extensions and acceptance are explicit human
+  decisions.
 - Holds control dependency release. Pausing prevents new panes but lets running panes finish.
   Stopping closes live panes and settles the run.
 - A human pause or stop does not prompt the launching agent. Completion, exhausted failure, gates,
