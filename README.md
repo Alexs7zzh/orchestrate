@@ -1,9 +1,10 @@
 # Orchestrate
 
-The normative reliability and ownership contract is
-[`references/guarantees.md`](references/guarantees.md).
+Orchestrate turns a multi-agent task into an explicit, reviewable workflow: you describe a DAG of
+agent and command nodes in one JSON file, approve its exact digest, and run it as real
+[herdr](https://herdr.dev) panes you can watch, pause, and steer.
 
-Orchestrate runs validated agent-and-command DAGs in real Herdr panes. It is interactive and
+Execution is interactive and
 master-driven: `run` starts the initial ready work, node agents submit authenticated results, and
 the launching master uses `orchestrate reconcile` to commit those results and start newly ready
 nodes. Herdr's trusted plugin event hook prompts that master when a workflow agent becomes blocked
@@ -30,8 +31,9 @@ bun run build:compile
 `setup` atomically stages the CLI, skill, and herdr plugin under
 `~/.local/share/orchestrate/current`, links the CLI into `~/.local/bin`, and offers a UI preference
 wizard. Use `setup --dry-run`, `setup --defaults`, `setup --no-wizard`, or `setup --remove` as
-needed. Herdr plugin link/unlink is required: setup or removal fails without switching/removing the
-stable staged installation if that operation fails, and `doctor` reports a missing registration as
+needed. Herdr plugin registration is required: if the plugin link fails, setup removes the new
+stage and leaves the prior installation selected; if unlink fails, removal fails rather than
+reporting success. `doctor` reports a missing registration as
 unhealthy. If Herdr cannot confirm either link or rollback, the versioned stage is retained as the
 plugin's recoverable target while the stable CLI/skill selection stays unchanged. Run
 `orchestrate doctor` after changing herdr or provider installations.
@@ -60,10 +62,13 @@ orchestrate run workflow.json --approve <digest>
 orchestrate board <run-id>
 ```
 
+A complete workflow file is shown in [references/examples.md](references/examples.md); the machine
+contract is [references/workflow.schema.json](references/workflow.schema.json).
+
 Preview prints the exact digest required by `run`. Preflight verifies the workflow, provider
 commands, herdr, paths, output schemas, worktree prerequisites, and declared write conflicts before
-state or panes are created. `--dry-run` performs the read-only `herdr --version` check and requires
-0.7.5 or newer, but creates no state, worktrees, workspaces, tabs, or panes.
+state or panes are created. `--dry-run` performs the same read-only `herdr --version` preflight as
+a real start, but creates no state, worktrees, workspaces, tabs, or panes.
 
 Every agent prompt has a stable frame: objective, node contract, declared inputs, result path, and
 the exact `node-done` command. Dynamic inputs are resolved only when dependencies finish. A task
@@ -165,6 +170,22 @@ Agent and command nodes always execute through herdr. `ORCHESTRATE_DISABLE_UI=1`
 auto-open and presentation notifications, but never changes execution. A named herdr remote must
 have access to the same checkout and state paths; otherwise use the local herdr session.
 
+## Documentation
+
+- [guarantees.md](references/guarantees.md) — the normative reliability and ownership contract; it
+  wins over any stronger mechanism described elsewhere.
+- [workflow-format.md](references/workflow-format.md) — the workflow file: node kinds, workspaces,
+  permissions, sessions, and repeats.
+- [runtime-operations.md](references/runtime-operations.md) — state, scheduling, crash semantics,
+  and presentation mechanics.
+- [cli-spec.md](references/cli-spec.md) — the command table and the JSON and exit-code contract.
+- [examples.md](references/examples.md) — a complete workflow file and UI preference examples.
+
+The machine contracts are [workflow.schema.json](references/workflow.schema.json),
+[preferences.schema.json](references/preferences.schema.json),
+[state.schema.json](references/state.schema.json), and
+[event.schema.json](references/event.schema.json).
+
 ## Development
 
 ```bash
@@ -173,11 +194,10 @@ bun run verify
 bun run build:compile
 ```
 
-The public contracts are [workflow.schema.json](references/workflow.schema.json),
-[preferences.schema.json](references/preferences.schema.json),
-[state.schema.json](references/state.schema.json), and [event.schema.json](references/event.schema.json).
-See [workflow-format.md](references/workflow-format.md),
-[runtime-operations.md](references/runtime-operations.md), and [cli-spec.md](references/cli-spec.md).
+The checked Herdr response decoders are generated from the checked-in socket schema snapshot. After
+raising or changing the supported Herdr API contract, run `bun run schema:herdr` with that Herdr
+version installed; this refreshes the narrowed snapshot from `herdr api schema --json` and
+regenerates `src/herdr-api.generated.ts`.
 
 Normal pushes to `main` run CI but do not build or publish a release. Start a release by pushing an
 annotated or signed strict-SemVer tag that points to a commit on `main`:

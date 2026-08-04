@@ -43,7 +43,7 @@ with an explicit noninteractive error.
 | `ui show`    | `ui show [--origin] [--project <cwd>] [--json]`                                         | Show merged UI choices and optional origins.                                                          |
 | `ui set`     | `ui set <path> <json-value> [--project <cwd>] [--json]`                                 | Set one validated UI choice.                                                                          |
 | `ui edit`    | `ui edit [--project <cwd>] [--json]`                                                    | Edit one layer with `$EDITOR`.                                                                        |
-| `ui wizard`  | `ui wizard [--project <cwd>] [--json]`                                                  | Choose placement, continuation, focus, and notifications.                                             |
+| `ui wizard`  | `ui wizard [--project <cwd>] [--json]`                                                  | Choose workspace, node surface, board placement, and notification routing.                            |
 | `ui restore` | `ui restore <run> [--json]`                                                             | Reopen the board, reconcile panes, and apply retry policy.                                            |
 | `clean`      | `clean <run> [--dry-run] [--json]`                                                      | Close panes, remove opted-in worktrees, and delete run files.                                         |
 | `clean`      | `clean --settled [--dry-run] [--json]`                                                  | Clean every settled run.                                                                              |
@@ -53,7 +53,9 @@ with an explicit noninteractive error.
 
 Read commands without a run ID select the newest run needing attention, otherwise the newest run.
 Mutating commands always require an ID. `ORCHESTRATE_STATE_DIR` or `XDG_STATE_HOME` selects state
-storage. `ORCHESTRATE_DISABLE_PREFS=1` disables preferences. `ORCHESTRATE_DISABLE_UI=1` suppresses
+storage. `ORCHESTRATE_BIN` selects the orchestrate executable injected into node panes; its
+resolved path is protected like other installed control assets. `ORCHESTRATE_DISABLE_PREFS=1`
+disables preferences. `ORCHESTRATE_DISABLE_UI=1` suppresses
 presentation only; node execution remains herdr-backed.
 
 `board`, `board --json`, and `runs --needs-attention` sample live Herdr pane/agent state for durably
@@ -63,7 +65,7 @@ attention participates in the default board selection, so an older result-missin
 before a newer healthy run. A nonempty `runs --needs-attention` and an attentive board exit `2`.
 
 `run --dry-run` performs the same read-only `herdr --version` requirement as a real start and rejects
-versions older than 0.7.5 without creating state, worktrees, workspaces, tabs, or panes.
+versions older than the enforced minimum without creating state, worktrees, workspaces, tabs, or panes.
 `status --wait` and `events --follow` install their filesystem watch before each authoritative scan,
 then rescan, so a terminal state or event cannot be lost between a scan and watch registration.
 

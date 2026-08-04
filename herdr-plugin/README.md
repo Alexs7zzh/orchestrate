@@ -22,14 +22,14 @@ It declares (see [herdr-plugin.toml](herdr-plugin.toml), requires herdr 0.7.5 or
 
 ## Install
 
-The supported plugin package targets macOS. It requires the `orchestrate` command on `PATH` and
-herdr 0.7.5 or newer. `orchestrate setup` installs
+The supported plugin package targets macOS and requires the `orchestrate` command on `PATH`.
+`orchestrate setup` installs
 the bundled skill and links this plugin. Plugin registration is required: a link or unlink failure
 makes setup/removal fail without silently reporting success, and `orchestrate doctor` reports the
 registration unhealthy.
 
 ```bash
-herdr plugin link /path/to/skill/herdr-plugin   # local checkout
+herdr plugin link /path/to/checkout/herdr-plugin   # local checkout
 herdr plugin list
 herdr plugin pane open --plugin orchestrate --entrypoint board
 herdr plugin action list --plugin orchestrate

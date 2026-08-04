@@ -9,7 +9,8 @@ Use Orchestrate only when the task is materially clearer or safer as an explicit
 
 ## Workflow
 
-1. Confirm that `herdr --version` is at least 0.7.5 and the required provider commands exist.
+1. Run `orchestrate doctor`; it verifies herdr, the provider commands, state access, and the
+   installed build. Stop and report if anything is unhealthy.
 2. Inspect project instructions and the current working tree before designing writes.
 3. Write a complete workflow JSON document using `references/workflow.schema.json`.
 4. Declare every dependency, input, workspace, write pattern, exclusive resource, permission,
@@ -74,6 +75,7 @@ are all reachable from that remote before starting.
 
 ## References
 
+- `references/workflow.schema.json`
 - `references/guarantees.md`
 - `references/workflow-format.md`
 - `references/runtime-operations.md`

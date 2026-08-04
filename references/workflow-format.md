@@ -45,10 +45,13 @@ All modes declare `writes` glob patterns and `exclusiveResources`:
 Parallel nodes with overlapping write prefixes are rejected unless the workflow explicitly permits
 an approval override. An exclusive resource serializes all nodes that name it.
 
+## Mid-run revisions
+
 Approved mid-run revisions may reorder, insert, remove, or change dependencies for nodes that have
 not started. Their runtime entries are rebuilt in revised declaration order and rescheduled from
 `pending`. Templates for nodes with an attempt are immutable; unsafe removal or rewriting is
-rejected so journal history and session lineage remain valid.
+rejected so journal history and session lineage remain valid. The proposal and approval mechanics
+are in [runtime-operations.md](runtime-operations.md).
 
 ## Agent nodes
 
@@ -85,19 +88,16 @@ run prefixes through authoritative state. Agent and command results are limited 
 trusted parsing, input rendering, journaling, or `orchestrate result` output.
 
 Orchestrate implicitly grants each agent write access only to its exact token-addressed attempt
-submission directory in the sibling transport root outside authoritative state. `node-done` writes
-a completion envelope there and cannot
-mutate the journal, snapshot, workflow/UI files, run lock, receipts, or other authoritative state.
-The launching master runs `orchestrate reconcile` outside the provider sandbox to validate the
-active token and result, commit the transition, and schedule newly ready work.
-
-The channel is separate from the declared execution and escalation axes: a Codex read-only source
-remains read-only, a workspace-write source gains no other writable path, and Claude's enforced
-`dontAsk` mode still produces no human prompt. Authoritative run paths and other submissions are not
-granted. `danger-full-access` is not a valid
-workflow sandbox. This runtime-only transport is
-intentionally absent from the workflow schema, `workspace.writes`, preferences, and provider
-`extraArgs`.
+submission directory in the sibling transport root outside authoritative state. This channel is
+separate from the declared execution and escalation axes: a Codex read-only source remains
+read-only, a workspace-write source gains no other writable path, and Claude's enforced `dontAsk`
+mode still produces no human prompt. `node-done` writes a completion envelope there and cannot
+mutate the journal, snapshot, workflow/UI files, run lock, receipts, another attempt's submission,
+or other authoritative state. The launching master runs `orchestrate reconcile` outside the
+provider sandbox to validate the active token and result, commit the transition, and schedule
+newly ready work. `danger-full-access` is not a valid workflow sandbox, and this runtime-only
+transport is intentionally absent from the workflow schema, `workspace.writes`, preferences, and
+provider `extraArgs`.
 
 Mutating provider nodes are invalid when the effective workspace/cwd sandbox root or any static
 write-prefix ancestor overlaps the configured state root or installed Orchestrate authority in
@@ -111,6 +111,15 @@ token-addressed submission allowance is the only exception.
 Command nodes add `argv`, `mutates`, `inheritEnv`, literal `env`, and `allowedExitCodes`. They run
 directly in a herdr pane. Output is tee'd to the attempt output path before `node-exit` reports the
 numeric status.
+
+## Node environment
+
+Beyond declared `inheritEnv` and literal `env`, every pane receives `ORCHESTRATE_BIN`,
+`ORCHESTRATE_STATE_DIR`, `ORCHESTRATE_RUN_ID`, `ORCHESTRATE_NODE_ID`, `ORCHESTRATE_NODE_TOKEN`,
+`ORCHESTRATE_OUTPUT_PATH`, `ORCHESTRATE_RESULT_PATH`, and `ORCHESTRATE_SOURCE_ROOT`. Agents write
+the declared result to `ORCHESTRATE_RESULT_PATH`; the command trampoline uses the output path and
+token to tee output and report `node-exit`. The token authenticates only that attempt's
+submission, and reconciliation rejects stale tokens.
 
 ## Repeats
 
