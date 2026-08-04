@@ -15,7 +15,7 @@ import {
 import os from "node:os"
 import path from "node:path"
 
-import { runSetup } from "../src/setup.js"
+import { installedBuild, migrateStagedInstallation, runSetup } from "../src/setup.js"
 import { setRuntimeBuildForTests } from "../src/state.js"
 
 let root = ""
@@ -24,6 +24,7 @@ let bin = ""
 let executable = ""
 let originalHome: string | undefined
 let originalPath: string | undefined
+let originalStateDir: string | undefined
 
 beforeEach(async () => {
   root = await mkdtemp(path.join(os.tmpdir(), "orchestrate-setup-"))
@@ -49,8 +50,10 @@ exit 0
   await chmod(path.join(bin, "herdr"), 0o755)
   originalHome = process.env.HOME
   originalPath = process.env.PATH
+  originalStateDir = process.env.ORCHESTRATE_STATE_DIR
   process.env.HOME = home
   process.env.PATH = bin
+  process.env.ORCHESTRATE_STATE_DIR = path.join(home, ".local", "state", "orchestrate")
 })
 
 afterEach(async () => {
@@ -63,6 +66,11 @@ afterEach(async () => {
     delete process.env.PATH
   } else {
     process.env.PATH = originalPath
+  }
+  if (originalStateDir === undefined) {
+    delete process.env.ORCHESTRATE_STATE_DIR
+  } else {
+    process.env.ORCHESTRATE_STATE_DIR = originalStateDir
   }
   delete process.env.ORCHESTRATE_BUILD_ID
   delete process.env.HERDR_FAIL_LINK
@@ -290,6 +298,91 @@ esac
         )
       )
     ).not.toBeNull()
+  })
+
+  test("migrates a stale staged installation and is idempotent", async () => {
+    setRuntimeBuildForTests("build-a")
+    await runSetup({ invokedPath: executable, remove: false, dryRun: false })
+
+    setRuntimeBuildForTests("build-b")
+    expect(await migrateStagedInstallation(executable)).toEqual({
+      migrated: true,
+      from: "build-a",
+      to: "build-b"
+    })
+    expect(await installedBuild()).toBe("build-b")
+    expect(await migrateStagedInstallation(executable)).toEqual({
+      migrated: false,
+      reason: "already current"
+    })
+  })
+
+  test("defers migration while any run is unsettled or unreadable", async () => {
+    setRuntimeBuildForTests("build-a")
+    await runSetup({ invokedPath: executable, remove: false, dryRun: false })
+    setRuntimeBuildForTests("build-b")
+    const runDir = path.join(home, ".local", "state", "orchestrate", "runs", "20260804-aaaaaaaa")
+    await mkdir(runDir, { recursive: true })
+
+    const statePath = path.join(runDir, "state.json")
+    await writeFile(statePath, JSON.stringify({ status: "running" }))
+    expect(await migrateStagedInstallation(executable)).toEqual({
+      migrated: false,
+      reason: "unsettled runs"
+    })
+    await writeFile(statePath, "torn-snapshot")
+    expect(await migrateStagedInstallation(executable)).toEqual({
+      migrated: false,
+      reason: "unsettled runs"
+    })
+    expect(await installedBuild()).toBe("build-a")
+
+    const runsRoot = path.dirname(runDir)
+    await chmod(runsRoot, 0o000)
+    try {
+      expect(await migrateStagedInstallation(executable)).toEqual({
+        migrated: false,
+        reason: "unsettled runs"
+      })
+    } finally {
+      await chmod(runsRoot, 0o755)
+    }
+
+    await writeFile(statePath, JSON.stringify({ status: "completed" }))
+    expect(await migrateStagedInstallation(executable)).toEqual({
+      migrated: true,
+      from: "build-a",
+      to: "build-b"
+    })
+  })
+
+  test("never migrates development builds, a missing installation, or the staged binary", async () => {
+    expect(await migrateStagedInstallation(executable)).toEqual({
+      migrated: false,
+      reason: "development build"
+    })
+    setRuntimeBuildForTests("build-a")
+    expect(await migrateStagedInstallation(executable)).toEqual({
+      migrated: false,
+      reason: "not installed"
+    })
+
+    await runSetup({ invokedPath: executable, remove: false, dryRun: false })
+    setRuntimeBuildForTests("build-b")
+    const stagedBinary = path.join(
+      home,
+      ".local",
+      "share",
+      "orchestrate",
+      "current",
+      "bin",
+      "orchestrate-bin"
+    )
+    expect(await migrateStagedInstallation(stagedBinary)).toEqual({
+      migrated: false,
+      reason: "invoked the staged build"
+    })
+    expect(await installedBuild()).toBe("build-a")
   })
 
   test("fails removal before touching staged assets when plugin unlink fails", async () => {

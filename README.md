@@ -31,10 +31,14 @@ plugin's recoverable target while the stable CLI/skill selection stays unchanged
 `orchestrate doctor` after changing herdr or provider installations.
 
 Release builds are macOS ARM64 and are distributed through Homebrew; Linux is not a supported or
-distributed platform, and no npm package is used. Update with `brew upgrade orchestrate` followed
-by the unqualified `orchestrate setup`. The staged wrapper delegates setup to the distinct formula
-executable later on `PATH`, preventing the prior staged build from replacing a newer formula build.
-Before uninstalling the formula, run `orchestrate setup --remove` to unlink the skill and plugin.
+distributed platform, and no npm package is used. Update with `brew upgrade orchestrate`; the next
+interactive command migrates the staged installation to the new build automatically. Migration
+waits while any run is unsettled and never runs from node completion or plugin event handling,
+shell completion, `doctor`, or non-interactive invocations — the unqualified `orchestrate setup`
+remains the explicit path. The
+staged wrapper delegates setup to the distinct formula executable later on `PATH`, preventing the
+prior staged build from replacing a newer formula build. Before uninstalling the formula, run
+`orchestrate setup --remove` to unlink the skill and plugin.
 
 ## Requirements
 

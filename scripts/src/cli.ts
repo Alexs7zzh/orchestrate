@@ -38,7 +38,7 @@ import {
   setUiPreference,
   uiPreferencesWithOrigins
 } from "./preferences.js"
-import { herdrPluginHealth, installedBuild, runSetup } from "./setup.js"
+import { herdrPluginHealth, installedBuild, migrateStagedInstallation, runSetup } from "./setup.js"
 import {
   acquireRunLock,
   createRunId,
@@ -181,6 +181,17 @@ export const PUBLIC_COMMAND_HELP = {
 export type PublicCommand = keyof typeof PUBLIC_COMMAND_HELP
 export const PUBLIC_COMMANDS = Object.freeze(Object.keys(PUBLIC_COMMAND_HELP) as PublicCommand[])
 const PUBLIC_COMMAND_SET: ReadonlySet<string> = new Set(PUBLIC_COMMANDS)
+// Agent panes, the plugin event hook, and shell-completion helpers must never
+// mutate the installation; setup and doctor stay the explicit lifecycle and
+// read-only diagnostic paths.
+const MIGRATION_EXEMPT_COMMANDS: ReadonlySet<string> = new Set([
+  "node-done",
+  "node-exit",
+  "herdr-event",
+  "completion",
+  "setup",
+  "doctor"
+])
 const HELP: Readonly<Record<string, string>> = PUBLIC_COMMAND_HELP
 
 const GLOBAL_HELP = `orchestrate — herdr-native agent workflow state machine
@@ -1262,6 +1273,21 @@ export async function runCli(
   if (has(parsed, "help")) {
     output(json, { command, help: HELP[command] }, HELP[command] as string)
     return EXIT_OK
+  }
+
+  if (!MIGRATION_EXEMPT_COMMANDS.has(command) && process.stdout.isTTY && process.stderr.isTTY) {
+    try {
+      const migration = await migrateStagedInstallation(scriptPath)
+      if (migration.migrated) {
+        console.error(
+          `Migrated the staged installation to ${migration.to} (was ${migration.from}).`
+        )
+      }
+    } catch (error) {
+      console.error(
+        `Staged installation migration failed: ${error instanceof Error ? error.message : String(error)}. Run orchestrate setup.`
+      )
+    }
   }
 
   if (command === "validate") {

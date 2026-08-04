@@ -18,7 +18,7 @@ import os from "node:os"
 import path from "node:path"
 
 import { bundledAssets } from "./assets.js"
-import { runtimeBuild } from "./state.js"
+import { runDirectory, runStatePath, runsRoot, runtimeBuild } from "./state.js"
 
 export interface SetupStep {
   readonly action: string
@@ -341,6 +341,72 @@ export function setupPlan(
       detail: "keep current only"
     }
   ]
+}
+
+export type StagedMigration =
+  | { readonly migrated: false; readonly reason: string }
+  | { readonly migrated: true; readonly from: string; readonly to: string }
+
+const SETTLED_RUN_STATUSES: ReadonlySet<string> = new Set(["completed", "failed", "stopped"])
+
+async function allRunsSettled(): Promise<boolean> {
+  // A missing runs directory means no runs; any other listing failure hides
+  // unknown run state, so it defers like an unreadable snapshot below.
+  const entries = await readdir(runsRoot(), { withFileTypes: true }).catch((error: unknown) =>
+    (error as NodeJS.ErrnoException).code === "ENOENT" ? [] : null
+  )
+  if (entries === null) {
+    return false
+  }
+  for (const entry of entries) {
+    if (!entry.isDirectory()) {
+      continue
+    }
+    // Reads the snapshot loosely, without the schema or runtime-build fence:
+    // runs created by an older build must still defer migration, and this
+    // guard only ever errs toward deferring.
+    const status = await readFile(runStatePath(runDirectory(entry.name)), "utf8")
+      .then((raw) => {
+        const value = JSON.parse(raw) as unknown
+        return value !== null && typeof value === "object" && !Array.isArray(value)
+          ? (value as Record<string, unknown>).status
+          : null
+      })
+      .catch(() => null)
+    if (typeof status !== "string" || !SETTLED_RUN_STATUSES.has(status)) {
+      return false
+    }
+  }
+  return true
+}
+
+export async function migrateStagedInstallation(invokedPath: string): Promise<StagedMigration> {
+  const current = runtimeBuild()
+  if (current.endsWith("+development")) {
+    return { migrated: false, reason: "development build" }
+  }
+  const staged = await installedBuild()
+  if (staged === null) {
+    return { migrated: false, reason: "not installed" }
+  }
+  if (staged === current) {
+    return { migrated: false, reason: "already current" }
+  }
+  const requested = path.resolve(invokedPath)
+  const invoked =
+    (await lstat(requested).then(
+      () => requested,
+      () => null
+    )) ?? process.execPath
+  const root = shareRoot()
+  if (invoked === root || invoked.startsWith(`${root}${path.sep}`)) {
+    return { migrated: false, reason: "invoked the staged build" }
+  }
+  if (!(await allRunsSettled())) {
+    return { migrated: false, reason: "unsettled runs" }
+  }
+  await runSetup({ invokedPath, remove: false, dryRun: false })
+  return { migrated: true, from: staged, to: current }
 }
 
 export async function runSetup(options: {
