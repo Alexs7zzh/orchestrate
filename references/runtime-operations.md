@@ -19,10 +19,15 @@ Before a pane starts, Orchestrate persists an intent and attempt token. The surf
 small receipt after Herdr creates a pane and marks it `ready` only after command start or agent
 prompt succeeds. Agent prompts are delivered atomically and wait until the agent is observed
 working, so a `ready` receipt means the prompt was actually taken, not merely accepted. A prompt
-error or wait timeout is recorded as `ambiguous`. Reconcile adopts a live ready pane or a
-token-valid completed submission, retries when the recorded pane is explicitly absent, and stops
-for agent-assisted inspection for every other live incomplete or ambiguous receipt. It does not
-infer prompt acceptance from provider lifecycle status or close label-matched tabs.
+error or wait timeout is recorded as `ambiguous`. A failure after the prompt was observed taken —
+such as a provider reporting the session id required by `session.saveAs` late — is recorded as
+`session-pending`: reconcile retries only the session capture on that live pane and promotes the
+receipt to ready without re-prompting. Reconcile adopts a live ready pane or a token-valid
+completed submission, retries when the recorded pane is explicitly absent, and stops for
+agent-assisted inspection for every other live incomplete or ambiguous receipt. It does not infer
+prompt acceptance from provider lifecycle status or close label-matched tabs. One node's ambiguous
+or pending spawn is surfaced after the other planned intents of the same reconciliation have
+started; it never starves independent ready work.
 
 New agent panes may briefly exist before their interactive shell is ready; the surface retries only
 Herdr's explicit `agent_pane_busy` readiness response within a fixed bound. Other unambiguous start

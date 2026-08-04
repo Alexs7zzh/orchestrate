@@ -760,6 +760,30 @@ describe("crank shell", () => {
     ).toBe(false)
   })
 
+  test("starts independent planned intents before surfacing an ambiguous spawn", async () => {
+    const persisted = await persistPlanned(workflow([command("flaky"), command("solid")]))
+    class PartialObservationSurface extends FakeSurface {
+      async recoverOrSpawn(request: SpawnRequest) {
+        if (request.intent.nodeId === "flaky") {
+          throw new HerdrObservationError(
+            'Spawn for node "flaky" is session-pending; inspect pane "p-flaky" and resume explicitly.',
+            new Error("no session id")
+          )
+        }
+        return super.recoverOrSpawn(request)
+      }
+    }
+    const surface = new PartialObservationSurface()
+    await expect(crankRun(persisted.runDir, { type: "reconcile" }, { surface })).rejects.toThrow(
+      "session-pending"
+    )
+    expect(surface.spawns).toEqual(["solid:a1"])
+    const state = await readRunState(persisted.runDir)
+    expect(state.nodes.solid?.status).toBe("running")
+    expect(state.spawnIntents["flaky:a1"]?.status).toBe("planned")
+    expect(state.spawnIntents["solid:a1"]?.status).toBe("spawned")
+  })
+
   test("consumes a prompt-accepted completion after restart without a duplicate start", async () => {
     const persisted = await persistPlanned(
       workflow([agent("planned"), command("dependent", ["planned"])])

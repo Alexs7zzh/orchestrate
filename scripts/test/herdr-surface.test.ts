@@ -37,7 +37,8 @@ import {
   HerdrSurface,
   injectAfterAgentPromptForTests,
   injectBeforeProviderBoundaryForTests,
-  removeWorkflowWorktrees
+  removeWorkflowWorktrees,
+  setAgentSessionTimeoutForTests
 } from "../src/herdr-surface.js"
 
 let temporaryRoot = ""
@@ -290,10 +291,12 @@ async function writeShim(
   busyOnce = false,
   originLive = true,
   paneFailure: "none" | "transport" | "split-missing" | "split-transport" = "none",
-  missingPane: string | null = null
+  missingPane: string | null = null,
+  reportSessionLate = false
 ): Promise<void> {
   const busyMarker = path.join(temporaryRoot, "agent-start-busy-once")
   const claudeMarker = path.join(temporaryRoot, "agent-is-claude")
+  const sessionLateMarker = path.join(temporaryRoot, "agent-session-reported-late")
   const codexSession = {
     agent: "codex",
     kind: "id",
@@ -390,6 +393,9 @@ case "$1 $2" in
   "agent get")
     if [ "$3" = "origin-pane" ]; then
       printf '%s\n' '${herdrResponse({ type: "agent_info", agent: herdrAgent("origin-pane", "codex", originSession) })}'
+    elif ${reportSessionLate ? "true" : "false"} && [ ! -f ${JSON.stringify(sessionLateMarker)} ]; then
+      touch ${JSON.stringify(sessionLateMarker)}
+      printf '%s\n' '${herdrResponse({ type: "agent_info", agent: herdrAgent("p1", "codex", undefined) })}'
     else
       if [ -f ${JSON.stringify(claudeMarker)} ]; then
         printf '%s\n' '${
@@ -434,6 +440,7 @@ beforeEach(async () => {
 afterEach(async () => {
   injectAfterAgentPromptForTests(null)
   injectBeforeProviderBoundaryForTests(null)
+  setAgentSessionTimeoutForTests(null)
   process.env.PATH = originalPath
   delete process.env.ORCHESTRATE_BIN
   await rm(process.env.ORCHESTRATE_STATE_DIR as string, {
@@ -1437,25 +1444,55 @@ describe("herdr surface", () => {
     })
   })
 
-  test("fails a lineage-requiring spawn when herdr reports no session", async () => {
+  test("records session-pending when herdr never reports a lineage session id", async () => {
     await writeShim(false)
+    setAgentSessionTimeoutForTests(300)
     const node = agent()
     const surface = new HerdrSurface()
-    const failure = await surface
-      .spawn({
-        workflow: workflow(node),
-        state: state(node.id),
-        intent: intent(node.id),
-        prompt: "Prompt",
-        placement: placement(node.id)
-      })
-      .catch((error: unknown) => error)
+    const request = {
+      workflow: workflow(node),
+      state: state(node.id),
+      intent: intent(node.id),
+      prompt: "Prompt",
+      placement: placement(node.id)
+    }
+    const failure = await surface.spawn(request).catch((error: unknown) => error)
     expect(failure).toBeInstanceOf(HerdrObservationError)
-    expect((failure as Error).message).toContain("Prompt delivery")
+    expect((failure as Error).message).toContain("Session capture")
     expect((failure as Error).cause).toBeInstanceOf(Error)
     expect(((failure as Error).cause as Error).message).toContain("session.saveAs")
     const log = await readFile(logPath, "utf8")
     expect(log.indexOf("agent prompt p1 Prompt")).toBeLessThan(log.indexOf("agent get p1"))
+    expect(log).not.toContain("pane close p1")
+
+    // Reconcile retries only the session capture on the live pane: once the
+    // provider reports its id, the receipt promotes to ready without a second
+    // prompt delivery.
+    await writeShim(true)
+    const observation = await surface.recoverOrSpawn(request)
+    expect(observation.providerSessionId).toBe("session-1")
+    expect(observation.pane.paneId).toBe("p1")
+    const healed = await readFile(logPath, "utf8")
+    expect(healed.split("agent prompt p1").length - 1).toBe(1)
+    expect(healed.split("agent start").length - 1).toBe(1)
+
+    const adopted = await surface.recoverOrSpawn(request)
+    expect(adopted.providerSessionId).toBe("session-1")
+  })
+
+  test("keeps polling a working agent until the late session id arrives", async () => {
+    await writeShim(true, false, true, "none", null, true)
+    const node = agent()
+    const observation = await new HerdrSurface().spawn({
+      workflow: workflow(node),
+      state: state(node.id),
+      intent: intent(node.id),
+      prompt: "Prompt",
+      placement: placement(node.id)
+    })
+    expect(observation.providerSessionId).toBe("session-1")
+    const log = await readFile(logPath, "utf8")
+    expect(log.split("agent get p1").length - 1).toBeGreaterThanOrEqual(2)
     expect(log).not.toContain("pane close p1")
   })
 })

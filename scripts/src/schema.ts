@@ -418,7 +418,7 @@ export const HerdrPaneGoneEventSchema = Schema.Struct({
 })
 
 export const SpawnReceiptSchema = Schema.Struct({
-  status: Schema.Literals(["created", "ready", "ambiguous"]),
+  status: Schema.Literals(["created", "ready", "ambiguous", "session-pending"]),
   pane: PaneReferenceSchema,
   providerSessionId: NullableString,
   detail: NullableString

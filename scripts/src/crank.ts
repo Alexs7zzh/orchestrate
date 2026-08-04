@@ -512,9 +512,11 @@ async function reconcilePlannedSpawns(
 ): Promise<{ readonly workflow: WorkflowSpec; readonly state: RunState }> {
   let currentWorkflow = workflow
   let currentState = state
+  const deferred: HerdrObservationError[] = []
+  const deferredIntentIds = new Set<string>()
   while (currentState.status === "running" && currentState.pendingRevision === null) {
     const intent = Object.values(currentState.spawnIntents).find(
-      (candidate) => candidate.status === "planned"
+      (candidate) => candidate.status === "planned" && !deferredIntentIds.has(candidate.id)
     )
     if (intent === undefined) {
       break
@@ -534,7 +536,12 @@ async function reconcilePlannedSpawns(
       }
     } catch (error) {
       if (error instanceof HerdrObservationError) {
-        throw error
+        // An ambiguous observation is that node's attention, not a barrier:
+        // the intent stays planned for the next reconcile, independent
+        // planned work still starts, and the error is rethrown afterwards.
+        deferredIntentIds.add(intent.id)
+        deferred.push(error)
+        continue
       }
       event = {
         type: "spawn-failed",
@@ -554,6 +561,9 @@ async function reconcilePlannedSpawns(
     collected.push(...result.events)
     currentWorkflow = result.workflow
     currentState = result.state
+  }
+  if (deferred[0] !== undefined) {
+    throw deferred[0]
   }
   return { workflow: currentWorkflow, state: currentState }
 }

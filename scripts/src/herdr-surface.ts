@@ -673,12 +673,23 @@ function providerSession(value: unknown, provider: AgentNode["provider"]): strin
   return session?.agent === provider && session.kind === "id" ? session.value : null
 }
 
+let agentSessionTimeoutForTests: number | null = null
+
+export function setAgentSessionTimeoutForTests(timeoutMs: number | null): void {
+  if (typeof ORCHESTRATE_BUILD_EMBEDDED === "string") {
+    throw new TypeError(
+      "Agent-session timeout injection is unavailable in embedded production builds."
+    )
+  }
+  agentSessionTimeoutForTests = timeoutMs
+}
+
 async function waitForProviderSession(
   paneId: string,
   provider: AgentNode["provider"],
   nodeId: string
 ): Promise<string> {
-  const deadline = Date.now() + AGENT_SESSION_TIMEOUT_MS
+  const deadline = Date.now() + (agentSessionTimeoutForTests ?? AGENT_SESSION_TIMEOUT_MS)
   for (;;) {
     const details = decodeHerdrJson(
       await runHerdr(["agent", "get", paneId]),
@@ -689,7 +700,10 @@ async function waitForProviderSession(
     if (sessionId !== null) {
       return sessionId
     }
-    if (details.result.agent.agent_status !== "idle" || Date.now() >= deadline) {
+    // Some providers report their session id only after they begin working
+    // (Codex does), and the spawn path prompts with --until working, so a
+    // live agent status must keep the poll going until the deadline.
+    if (Date.now() >= deadline) {
       throw new Error(
         `herdr did not report the ${provider} session id required by session.saveAs for node "${nodeId}".`
       )
@@ -1087,6 +1101,7 @@ export class HerdrSurface {
       await this.closePane(request.placement.reusePane.paneId).catch(() => undefined)
     }
     let promptMayHaveBeenAccepted = false
+    let promptDeliveryConfirmed = false
     try {
       await runHerdr([
         "pane",
@@ -1148,6 +1163,7 @@ export class HerdrSurface {
         "--timeout",
         String(AGENT_PROMPT_ACCEPT_TIMEOUT_MS)
       ])
+      promptDeliveryConfirmed = true
       const sessionId =
         node.session.saveAs === null
           ? null
@@ -1165,13 +1181,15 @@ export class HerdrSurface {
     } catch (error) {
       if (promptMayHaveBeenAccepted) {
         await atomicWriteJson(receiptPath(attempt), {
-          status: "ambiguous",
+          status: promptDeliveryConfirmed ? "session-pending" : "ambiguous",
           pane,
           providerSessionId: null,
           detail: herdrError(error)
         } satisfies SpawnReceipt)
         throw new HerdrObservationError(
-          `Prompt delivery for node "${intent.nodeId}" is ambiguous; preserving its pane for reconciliation.`,
+          promptDeliveryConfirmed
+            ? `Session capture for node "${intent.nodeId}" is pending; its prompt was taken and the pane is preserved for reconciliation.`
+            : `Prompt delivery for node "${intent.nodeId}" is ambiguous; preserving its pane for reconciliation.`,
           error
         )
       }
@@ -1229,6 +1247,31 @@ export class HerdrSurface {
             detail: null
           } satisfies SpawnReceipt)
           return observation
+        }
+        if (recorded.status === "session-pending" && node.type === "agent") {
+          // The receipt durably records that the prompt was observed taken;
+          // only the session id capture is outstanding, so reconcile retries
+          // that capture alone and never re-prompts. A capture failure falls
+          // through to the attention path below.
+          const observation =
+            node.session.saveAs === null
+              ? { pane: recorded.pane, providerSessionId: null }
+              : await waitForProviderSession(
+                  recorded.pane.paneId,
+                  node.provider,
+                  request.intent.nodeId
+                ).then(
+                  (sessionId) => ({ pane: recorded.pane, providerSessionId: sessionId }),
+                  () => null
+                )
+          if (observation !== null) {
+            await atomicWriteJson(receiptPath(attempt), {
+              status: "ready",
+              ...observation,
+              detail: null
+            } satisfies SpawnReceipt)
+            return observation
+          }
         }
         throw new HerdrObservationError(
           `Spawn for node "${request.intent.nodeId}" is ${recorded.status}; inspect pane "${recorded.pane.paneId}" and resume explicitly.`,
