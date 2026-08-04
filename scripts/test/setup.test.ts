@@ -156,6 +156,40 @@ esac
     ).toHaveLength(1)
   })
 
+  test("installed plugin uses its staged CLI instead of an earlier PATH entry", async () => {
+    const installedLog = path.join(root, "installed.log")
+    await writeFile(
+      executable,
+      `#!/bin/sh\nprintf '%s\\n' "$*" >> ${JSON.stringify(installedLog)}\nexit 0\n`
+    )
+    await chmod(executable, 0o755)
+    await runSetup({ invokedPath: executable, remove: false, dryRun: false })
+
+    const staleBin = path.join(root, "stale-bin")
+    const staleLog = path.join(root, "stale.log")
+    await mkdir(staleBin)
+    await writeFile(
+      path.join(staleBin, "orchestrate"),
+      `#!/bin/sh\nprintf '%s\\n' "$*" >> ${JSON.stringify(staleLog)}\nexit 77\n`
+    )
+    await chmod(path.join(staleBin, "orchestrate"), 0o755)
+
+    const current = await target(path.join(home, ".local", "share", "orchestrate", "current"))
+    const panel = path.join(current, "herdr-plugin", "bin", "orchestrate-panel")
+    expect(await readFile(panel, "utf8")).toContain(
+      `ORCHESTRATE_EXECUTABLE='${path.join(current, "bin", "orchestrate")}'`
+    )
+
+    const invoked = spawnSync("/bin/sh", [panel, "herdr-event"], {
+      encoding: "utf8",
+      env: { ...process.env, PATH: `${staleBin}:/usr/bin:/bin` }
+    })
+    expect(invoked.status).toBe(0)
+    expect(invoked.stderr).toBe("")
+    expect(await readFile(installedLog, "utf8")).toBe("herdr-event --json\n")
+    expect(await readFile(staleLog, "utf8").catch(() => "")).toBe("")
+  })
+
   test("atomically changes builds, prunes old and interrupted stages, and supports downgrade", async () => {
     const share = path.join(home, ".local", "share", "orchestrate")
     setRuntimeBuildForTests("build-a")

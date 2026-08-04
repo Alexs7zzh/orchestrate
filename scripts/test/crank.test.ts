@@ -130,6 +130,7 @@ function workflow(nodes: readonly WorkflowNode[]): WorkflowSpec {
 
 class FakeSurface implements CrankSurface {
   readonly spawns: string[] = []
+  readonly requests: SpawnRequest[] = []
   readonly closed: string[] = []
   readonly handoffs: string[] = []
   waitForAgentStatus?: (paneId: string, status: string, timeoutMs: number) => Promise<boolean>
@@ -147,8 +148,11 @@ class FakeSurface implements CrankSurface {
     return this.origin
   }
 
-  async recoverOrSpawn(request: SpawnRequest) {
+  async recoverOrSpawn(
+    request: SpawnRequest
+  ): Promise<{ pane: PaneReference; providerSessionId: string | null }> {
     this.spawns.push(request.intent.id)
+    this.requests.push(request)
     const attempt = request.state.nodes[request.intent.nodeId]?.attempts.at(-1)
     if (attempt !== undefined) {
       await mkdir(path.dirname(attempt.outputPath), { recursive: true })
@@ -1103,5 +1107,52 @@ describe("crank shell", () => {
       events.filter((event) => event.type === "node.spawn-planned" && event.nodeId === "dependent")
     ).toHaveLength(1)
     expect(replayEvents(events)).toEqual(await readRunState(runDir))
+  })
+
+  test("reuses and advances the live pane for a linear resumed session", async () => {
+    class SessionSurface extends FakeSurface {
+      async recoverOrSpawn(request: SpawnRequest) {
+        const observation = await super.recoverOrSpawn(request)
+        return {
+          ...observation,
+          providerSessionId: request.intent.nodeId === "source" ? "session-1" : null
+        }
+      }
+    }
+    const source = {
+      ...agent("source"),
+      session: { mode: "fresh", from: null, saveAs: "shared-session" }
+    } satisfies AgentNode
+    const first = {
+      ...agent("first", ["source"]),
+      session: { mode: "resume", from: "shared-session", saveAs: null }
+    } satisfies AgentNode
+    const second = {
+      ...agent("second", ["first"]),
+      session: { mode: "resume", from: "shared-session", saveAs: null }
+    } satisfies AgentNode
+    const surface = new SessionSurface()
+    const started = await start(workflow([source, first, second]), surface)
+    const runDir = runDirectory(started.state.id)
+
+    const finish = async (nodeId: string) => {
+      const attempt = (await readRunState(runDir)).nodes[nodeId]?.attempts.at(-1)
+      if (attempt === undefined) {
+        throw new Error(`missing ${nodeId} attempt`)
+      }
+      await mkdir(path.dirname(attempt.resultPath), { recursive: true })
+      await writeFile(attempt.resultPath, '{"clean":true}\n')
+      await submitNodeDone(runDir, nodeId, attempt.token, "completed")
+      return reconcileRun(runDir, { surface })
+    }
+
+    await finish("source")
+    expect(surface.requests.at(-1)?.intent.nodeId).toBe("first")
+    expect(surface.requests.at(-1)?.placement.reusePane?.paneId).toBe("pane:source:a1")
+
+    const afterFirst = await finish("first")
+    expect(afterFirst.state.sessions["shared-session"]?.sourceNodeId).toBe("first")
+    expect(surface.requests.at(-1)?.intent.nodeId).toBe("second")
+    expect(surface.requests.at(-1)?.placement.reusePane?.paneId).toBe("pane:first:a1")
   })
 })

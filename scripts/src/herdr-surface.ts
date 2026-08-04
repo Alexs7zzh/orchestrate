@@ -1176,7 +1176,20 @@ export class HerdrSurface {
           ? await claudeLineageDirectory(state.id)
           : realpathSync.native(path.dirname(attempt.resultPath))
         : sourceRoot
-    const workspaceId = await this.nodeWorkspace(request, true)
+    let replacementPane: PaneReference | null = null
+    if (request.placement.reusePane !== null) {
+      try {
+        if (await this.paneExists(request.placement.reusePane.paneId)) {
+          replacementPane = request.placement.reusePane
+        }
+      } catch (error) {
+        throw new HerdrObservationError(
+          `Could not verify reusable pane "${request.placement.reusePane.paneId}".`,
+          error
+        )
+      }
+    }
+    const workspaceId = replacementPane?.workspaceId ?? (await this.nodeWorkspace(request, true))
     if (workspaceId === null) {
       throw new Error(`Could not resolve a workspace for node "${intent.nodeId}".`)
     }
@@ -1191,17 +1204,15 @@ export class HerdrSurface {
       ORCHESTRATE_RESULT_PATH: attempt.resultPath,
       ORCHESTRATE_SOURCE_ROOT: sourceRoot
     }
-    if (request.placement.reusePane !== null && request.placement.surface === "tab") {
-      await runHerdr(["tab", "close", request.placement.reusePane.tabId]).catch(() => undefined)
-    }
     const splitAnchor =
-      request.placement.surface === "split" &&
+      replacementPane ??
+      (request.placement.surface === "split" &&
       request.placement.anchorPane !== null &&
       request.placement.anchorPane.workspaceId === workspaceId
         ? request.placement.anchorPane
-        : null
-    let anchorIsLive = false
-    if (splitAnchor !== null) {
+        : null)
+    let anchorIsLive = replacementPane !== null
+    if (splitAnchor !== null && replacementPane === null) {
       try {
         anchorIsLive = await this.paneExists(splitAnchor.paneId)
       } catch (error) {
@@ -1221,12 +1232,20 @@ export class HerdrSurface {
       pane = await freshTab()
     } else {
       try {
-        pane = await createSplit(
+        const created = await createSplit(
           splitAnchor as PaneReference,
           providerCwd,
           environment,
-          request.placement.group
+          replacementPane?.group ?? request.placement.group
         )
+        pane =
+          replacementPane === null
+            ? created
+            : {
+                ...created,
+                group: replacementPane.group,
+                surface: replacementPane.surface
+              }
       } catch (error) {
         if (isPaneNotFound(error)) {
           pane = await freshTab()
@@ -1244,8 +1263,15 @@ export class HerdrSurface {
       providerSessionId: null,
       detail: null
     } satisfies SpawnReceipt)
-    if (request.placement.reusePane !== null && request.placement.surface === "split") {
-      await this.closePane(request.placement.reusePane.paneId).catch(() => undefined)
+    if (replacementPane !== null) {
+      try {
+        await this.closePane(replacementPane.paneId)
+      } catch (error) {
+        throw new HerdrObservationError(
+          `Could not retire reusable pane "${replacementPane.paneId}" before starting its replacement.`,
+          error
+        )
+      }
     }
     let promptMayHaveBeenAccepted = false
     let promptDeliveryConfirmed = false

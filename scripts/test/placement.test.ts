@@ -173,9 +173,10 @@ function pane(group: string, id: string, surface: "tab" | "split" = "split"): Pa
 function context(
   runId = "run-a",
   live: readonly LivePlacement[] = [],
-  retryPane: PaneReference | null = null
+  retryPane: PaneReference | null = null,
+  sessionPane: PaneReference | null = null
 ) {
-  return { runId, live, retryPane }
+  return { runId, live, retryPane, sessionPane }
 }
 
 describe("node glob matching", () => {
@@ -393,6 +394,17 @@ describe("placement slots", () => {
       anchorPane: previous,
       reusePane: previous
     })
+  })
+
+  test("reuses a resumed session pane instead of allocating another configured surface", () => {
+    const source = pane(placementGroupKey("run-a", "root", 1), "session-pane", "tab")
+    const resolved = resolvePlacement(
+      graph,
+      runtimeNode("child"),
+      preferences(rules),
+      context("run-a", [{ nodeId: "root", pane: source }], null, source)
+    )
+    expect(resolved.reusePane).toBe(source)
   })
 
   test("namespaces otherwise identical groups by run", () => {

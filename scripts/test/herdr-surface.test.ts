@@ -1022,9 +1022,34 @@ describe("herdr surface", () => {
       }
     })
     const log = await readFile(logPath, "utf8")
-    expect(log).toContain("pane split --pane anchor --direction down")
+    expect(log).toContain("pane split --pane old-slot --direction down")
     expect(log).toContain("--no-focus")
     expect(log).toContain("pane close old-slot")
+  })
+
+  test("replaces a resumed session in its existing tab instead of opening another tab", async () => {
+    const node = command()
+    const existing = {
+      workspaceId: "w1",
+      tabId: "t1",
+      paneId: "session-pane",
+      group: "session-group",
+      surface: "tab" as const
+    }
+    const observation = await new HerdrSurface().spawn({
+      workflow: workflow(node),
+      state: state(node.id),
+      intent: intent(node.id),
+      prompt: null,
+      placement: { ...placement(node.id), reusePane: existing }
+    })
+    const log = await readFile(logPath, "utf8")
+    expect(log).toContain("pane get session-pane")
+    expect(log).toContain("pane split --pane session-pane --direction down")
+    expect(log).toContain("pane close session-pane")
+    expect(log).not.toContain("tab create")
+    expect(log).not.toContain("tab close")
+    expect(observation.pane).toMatchObject({ group: "session-group", surface: "tab" })
   })
 
   test.each(["dedicated", "origin"] as const)(

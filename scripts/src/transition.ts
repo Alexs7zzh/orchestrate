@@ -834,18 +834,32 @@ export function transition(
         "node.completed",
         `Node "${node.id}" completed.`,
         (current) => {
-          const sessions =
-            template.session.saveAs !== null && event.providerSessionId !== null
-              ? {
-                  ...current.sessions,
+          const resumedAlias =
+            template.session.mode === "resume" && template.session.from !== null
+              ? template.session.from
+              : null
+          const resumedSession = resumedAlias === null ? undefined : current.sessions[resumedAlias]
+          const sessions = {
+            ...current.sessions,
+            ...(resumedAlias === null || resumedSession === undefined
+              ? {}
+              : {
+                  [resumedAlias]: {
+                    ...resumedSession,
+                    sourceNodeId: node.id
+                  }
+                }),
+            ...(template.session.saveAs === null || event.providerSessionId === null
+              ? {}
+              : {
                   [template.session.saveAs]: {
                     alias: template.session.saveAs,
                     provider: template.provider,
                     sessionId: event.providerSessionId,
                     sourceNodeId: node.id
                   }
-                }
-              : current.sessions
+                })
+          }
           const updated = replaceNode(current, {
             ...node,
             status: "completed",

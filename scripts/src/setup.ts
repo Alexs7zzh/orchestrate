@@ -182,11 +182,27 @@ async function removeOwnedLink(linkPath: string, root: string, steps: SetupStep[
   steps.push({ action: "unlink", target: linkPath, status: "done", detail: null })
 }
 
-async function writeAssets(stage: string): Promise<void> {
+const PLUGIN_EXECUTABLE_ASSIGNMENT = "ORCHESTRATE_EXECUTABLE= # ORCHESTRATE_SETUP_EXECUTABLE"
+
+function shellQuote(value: string): string {
+  return `'${value.replaceAll("'", `'"'"'`)}'`
+}
+
+async function writeAssets(stage: string, installedExecutable: string): Promise<void> {
   for (const [relative, content] of Object.entries(await bundledAssets())) {
     const destination = path.join(stage, relative)
     await mkdir(path.dirname(destination), { recursive: true, mode: 0o755 })
-    await writeFile(destination, content, {
+    const rendered =
+      relative === "herdr-plugin/bin/orchestrate-panel"
+        ? content.replace(
+            PLUGIN_EXECUTABLE_ASSIGNMENT,
+            `ORCHESTRATE_EXECUTABLE=${shellQuote(installedExecutable)} # ORCHESTRATE_SETUP_EXECUTABLE`
+          )
+        : content
+    if (relative === "herdr-plugin/bin/orchestrate-panel" && rendered === content) {
+      throw new Error("Herdr plugin executable template is missing.")
+    }
+    await writeFile(destination, rendered, {
       mode: relative.endsWith("orchestrate-panel") ? 0o755 : 0o644
     })
   }
@@ -577,7 +593,7 @@ export async function runSetup(options: {
     const stage = path.join(versions, `.stage-${name}-${randomUUID()}`)
     await mkdir(stage, { mode: 0o755 })
     try {
-      await writeAssets(stage)
+      await writeAssets(stage, path.join(destination, "bin", "orchestrate"))
       await stageExecutable(stage, options.invokedPath)
       await rename(stage, destination)
       createdDestination = true

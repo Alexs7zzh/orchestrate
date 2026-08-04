@@ -3,8 +3,13 @@
 set -u
 
 MODE="${1:-panel}"
+ORCHESTRATE_EXECUTABLE= # ORCHESTRATE_SETUP_EXECUTABLE
 
-if ! command -v orchestrate >/dev/null 2>&1; then
+if [ -z "$ORCHESTRATE_EXECUTABLE" ]; then
+  ORCHESTRATE_EXECUTABLE="$(command -v orchestrate 2>/dev/null || true)"
+fi
+
+if [ -z "$ORCHESTRATE_EXECUTABLE" ] || [ ! -x "$ORCHESTRATE_EXECUTABLE" ]; then
   echo "orchestrate-panel: no \`orchestrate\` on PATH." >&2
   echo "Install it, then run: orchestrate setup" >&2
   exit 1
@@ -12,9 +17,9 @@ fi
 
 pick_run() {
   if [ "$1" = all ]; then
-    orchestrate runs 2>/dev/null
+    "$ORCHESTRATE_EXECUTABLE" runs 2>/dev/null
   else
-    orchestrate runs "$1" 2>/dev/null
+    "$ORCHESTRATE_EXECUTABLE" runs "$1" 2>/dev/null
   fi | awk '
     length($1) == 23 &&
     substr($1, 1, 14) ~ /^[0-9]+$/ &&
@@ -31,7 +36,7 @@ case "$MODE" in
       echo "No orchestrate runs found."
       exit 0
     fi
-    exec orchestrate board "$RUN_ID"
+    exec "$ORCHESTRATE_EXECUTABLE" board "$RUN_ID"
     ;;
   pause)
     RUN_ID="$(pick_run --active)"
@@ -39,7 +44,7 @@ case "$MODE" in
       echo "orchestrate-panel: no active run to pause." >&2
       exit 1
     fi
-    exec orchestrate pause "$RUN_ID"
+    exec "$ORCHESTRATE_EXECUTABLE" pause "$RUN_ID"
     ;;
   resume)
     RUN_ID="$(pick_run --paused)"
@@ -47,10 +52,10 @@ case "$MODE" in
       echo "orchestrate-panel: no paused run to resume." >&2
       exit 1
     fi
-    exec orchestrate resume "$RUN_ID"
+    exec "$ORCHESTRATE_EXECUTABLE" resume "$RUN_ID"
     ;;
   herdr-event)
-    exec orchestrate herdr-event --json
+    exec "$ORCHESTRATE_EXECUTABLE" herdr-event --json
     ;;
   startup-attention)
     # After a herdr server restart or handoff, panes may have vanished in bulk.

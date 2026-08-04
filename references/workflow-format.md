@@ -70,6 +70,9 @@ first prompt. Nodes without a `saveAs` alias never depend on session reporting. 
 project-scoped by launch directory, so every Claude node participating in a lineage runs from one
 run-shared session directory beside the token-addressed submission directories. Fan-out must fork rather than resume the
 same source twice.
+When a resumed session's previous Herdr pane is still live, Orchestrate replaces the provider in
+that pane's existing UI slot instead of opening another configured tab or split. A missing pane
+falls back to the normal placement rules.
 
 Permissions deliberately separate two axes:
 

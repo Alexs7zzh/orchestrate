@@ -280,6 +280,14 @@ function spawnRequest(
   }
   const template = templateFor(workflow, state, runtimeNode.id)
   const previousPane = runtimeNode.attempts.at(-2)?.pane ?? null
+  const sessionPane =
+    template.type === "agent" &&
+    template.session.mode === "resume" &&
+    template.session.from !== null
+      ? (state.nodes[state.sessions[template.session.from]?.sourceNodeId ?? ""]?.attempts
+          .toReversed()
+          .find((candidate) => candidate.pane !== null)?.pane ?? null)
+      : null
   const live = Object.values(state.nodes).flatMap((candidate) => {
     const pane = candidate.attempts.at(-1)?.pane
     const keptAfterSuccess =
@@ -309,7 +317,8 @@ function spawnRequest(
     placement: resolvePlacement(workflow, runtimeNode, ui, {
       runId: state.id,
       live,
-      retryPane: previousPane
+      retryPane: previousPane,
+      sessionPane
     })
   }
 }

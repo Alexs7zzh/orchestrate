@@ -17,6 +17,7 @@ export interface PlacementContext {
   readonly runId: string
   readonly live: readonly LivePlacement[]
   readonly retryPane: PaneReference | null
+  readonly sessionPane: PaneReference | null
 }
 
 export interface PlacementResolution {
@@ -31,7 +32,7 @@ export interface PlacementResolution {
   readonly groupOrdinal: number
   /** An existing pane in the target tab, used as the split anchor. */
   readonly anchorPane: PaneReference | null
-  /** The previous attempt's pane when a retry must replace that exact slot. */
+  /** An existing pane whose UI slot should be replaced by this attempt. */
   readonly reusePane: PaneReference | null
 }
 
@@ -304,7 +305,7 @@ export function resolvePlacement(
       groupLabel: baseGroup,
       groupOrdinal: 1,
       anchorPane: paneForGroup(context.live, group),
-      reusePane: null
+      reusePane: context.sessionPane
     }
   }
 
@@ -322,7 +323,7 @@ export function resolvePlacement(
     groupLabel: groupLabel(baseGroup, target.ordinal),
     groupOrdinal: target.ordinal,
     anchorPane: target.anchor,
-    reusePane: null
+    reusePane: context.sessionPane
   }
 }
 
