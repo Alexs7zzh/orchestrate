@@ -209,6 +209,37 @@ esac
     expect(await readdir(path.join(share, "versions"))).toHaveLength(1)
   })
 
+  test("prune retains versions referenced by unsettled runs", async () => {
+    const share = path.join(home, ".local", "share", "orchestrate")
+    const runDir = path.join(
+      process.env.ORCHESTRATE_STATE_DIR as string,
+      "runs",
+      "20260804000000-aaaaaaaa"
+    )
+    setRuntimeBuildForTests("build-a")
+    await runSetup({ invokedPath: executable, remove: false, dryRun: false })
+    await mkdir(runDir, { recursive: true })
+    await writeFile(
+      path.join(runDir, "state.json"),
+      JSON.stringify({ status: "running", runtimeVersion: "build-a" })
+    )
+
+    setRuntimeBuildForTests("build-b")
+    await runSetup({ invokedPath: executable, remove: false, dryRun: false })
+    expect((await readdir(path.join(share, "versions"))).toSorted()).toEqual([
+      "build-a",
+      "build-b"
+    ])
+
+    await writeFile(
+      path.join(runDir, "state.json"),
+      JSON.stringify({ status: "stopped", runtimeVersion: "build-a" })
+    )
+    setRuntimeBuildForTests("build-c")
+    await runSetup({ invokedPath: executable, remove: false, dryRun: false })
+    expect(await readdir(path.join(share, "versions"))).toEqual(["build-c"])
+  })
+
   test("skips copied old staged wrappers and delegates setup to a newer formula build", async () => {
     const bundle = path.join(root, "build-b-orchestrate")
     const sourceBundle = path.resolve(import.meta.dir, "../orchestrate.mjs")

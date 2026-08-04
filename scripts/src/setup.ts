@@ -72,6 +72,39 @@ function buildDirectoryName(): string {
   return runtimeBuild().replaceAll(/[^A-Za-z0-9._+-]/g, "-")
 }
 
+function versionDirectoryNameFor(build: string): string {
+  return build.replaceAll(/[^A-Za-z0-9._+-]/g, "-")
+}
+
+// An unsettled run can only be reconciled by its own build, and its live agent
+// prompts embed node-done commands at that build's versioned path — pruning it
+// orphans the run mid-flight. Retain every version an unsettled run references.
+async function retainedVersionDirectories(installed: string): Promise<Set<string>> {
+  const retained = new Set([installed])
+  const entries = await readdir(runsRoot(), { withFileTypes: true }).catch(() => null)
+  for (const entry of entries ?? []) {
+    if (!entry.isDirectory()) {
+      continue
+    }
+    const build = await readFile(runStatePath(runDirectory(entry.name)), "utf8")
+      .then((raw) => {
+        const snapshot = JSON.parse(raw) as { status?: unknown; runtimeVersion?: unknown }
+        const settled =
+          snapshot.status === "completed" ||
+          snapshot.status === "failed" ||
+          snapshot.status === "stopped"
+        return !settled && typeof snapshot.runtimeVersion === "string"
+          ? snapshot.runtimeVersion
+          : null
+      })
+      .catch(() => null)
+    if (build !== null) {
+      retained.add(versionDirectoryNameFor(build))
+    }
+  }
+  return retained
+}
+
 async function runCommand(command: string, args: readonly string[]): Promise<void> {
   await runCommandOutput(command, args)
 }
@@ -659,11 +692,20 @@ export async function runSetup(options: {
     }
     throw error
   }
+  const retained = await retainedVersionDirectories(name)
+  const kept: string[] = []
   for (const entry of await readdir(versions, { withFileTypes: true })) {
-    if (entry.name !== name) {
+    if (retained.has(entry.name)) {
+      kept.push(entry.name)
+    } else {
       await rm(path.join(versions, entry.name), { recursive: true, force: true })
     }
   }
-  steps.push({ action: "prune", target: versions, status: "done", detail: `kept ${name}` })
+  steps.push({
+    action: "prune",
+    target: versions,
+    status: "done",
+    detail: `kept ${kept.toSorted().join(", ")}`
+  })
   return { remove: false, dryRun: false, build: runtimeBuild(), steps }
 }
