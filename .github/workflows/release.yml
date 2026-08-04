@@ -78,17 +78,18 @@ jobs:
           # payload is architecture-gated but OS-independent, so the bottle is
           # renamed to the "all" tag; the tarball content (and so its digest)
           # does not change with the rename.
-          FORMULA_DIR="$RUNNER_TEMP/bottle-formula"
-          mkdir -p "$FORMULA_DIR"
+          # Homebrew only installs formulae that live in a tap, so stage the
+          # rewritten formula in a throwaway local tap.
+          brew tap-new --no-git local/release
           sed "s|^  url .*|  url \"file://$GITHUB_WORKSPACE/release/orchestrate-macos-arm64.tar.gz\"|" \
-            release/orchestrate.rb > "$FORMULA_DIR/orchestrate.rb"
-          brew install --formula --build-from-source --ignore-dependencies "$FORMULA_DIR/orchestrate.rb"
+            release/orchestrate.rb > "$(brew --repository)/Library/Taps/local/homebrew-release/Formula/orchestrate.rb"
+          brew install --build-from-source --ignore-dependencies local/release/orchestrate
           brew bottle --json --no-rebuild \
             --root-url "https://github.com/$GITHUB_REPOSITORY/releases/download/$GITHUB_REF_NAME" \
-            orchestrate
-          TAG="$(jq -r '.orchestrate.bottle.tags | keys[0]' orchestrate--*.bottle.json)"
-          CELLAR="$(jq -r ".orchestrate.bottle.tags[\"$TAG\"].cellar" orchestrate--*.bottle.json)"
-          BOTTLE_SHA="$(jq -r ".orchestrate.bottle.tags[\"$TAG\"].sha256" orchestrate--*.bottle.json)"
+            local/release/orchestrate
+          TAG="$(jq -r '.["local/release/orchestrate"].bottle.tags | keys[0]' orchestrate--*.bottle.json)"
+          CELLAR="$(jq -r ".[\"local/release/orchestrate\"].bottle.tags[\"$TAG\"].cellar" orchestrate--*.bottle.json)"
+          BOTTLE_SHA="$(jq -r ".[\"local/release/orchestrate\"].bottle.tags[\"$TAG\"].sha256" orchestrate--*.bottle.json)"
           test "$CELLAR" = ":any_skip_relocation"
           mv orchestrate--*.bottle.tar.gz \
             "release/orchestrate--$ORCHESTRATE_RELEASE_VERSION.all.bottle.tar.gz"
