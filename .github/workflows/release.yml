@@ -91,12 +91,15 @@ jobs:
           CELLAR="$(jq -r ".[\"local/release/orchestrate\"].bottle.tags[\"$TAG\"].cellar" orchestrate--*.bottle.json)"
           BOTTLE_SHA="$(jq -r ".[\"local/release/orchestrate\"].bottle.tags[\"$TAG\"].sha256" orchestrate--*.bottle.json)"
           # Mirror brew's own relocatability judgement: a :-prefixed cellar is
-          # written verbatim; the default cellar path is expressed by omitting
-          # the cellar key (the bottle then applies to standard installs, and
-          # custom-prefix setups fall back to building from source).
+          # written verbatim. For a default-cellar bottle (jq reports null)
+          # the ARM64 cellar must be named explicitly — an "all" tag with no
+          # cellar key defaults to the Intel /usr/local/Cellar and would send
+          # every supported machine to a source build.
           case "$CELLAR" in
             :*) SHA_LINE="    sha256 cellar: $CELLAR, all: \"$BOTTLE_SHA\"" ;;
-            null | /opt/homebrew/Cellar) SHA_LINE="    sha256 all: \"$BOTTLE_SHA\"" ;;
+            null | /opt/homebrew/Cellar)
+              SHA_LINE="    sha256 cellar: \"/opt/homebrew/Cellar\", all: \"$BOTTLE_SHA\""
+              ;;
             *) echo "Unexpected bottle cellar: $CELLAR" >&2; exit 1 ;;
           esac
           mv orchestrate--*.bottle.tar.gz \
