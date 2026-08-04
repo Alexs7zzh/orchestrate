@@ -81,6 +81,45 @@ function workflow(nodes: readonly WorkflowSpec["nodes"][number][]): WorkflowSpec
 }
 
 describe("workflow contract", () => {
+  test("warns on hand-unrolled repeat rounds without rejecting the workflow", () => {
+    const unrolled = validateWorkflow(
+      workflow([
+        command("s1r1-review"),
+        command("s1r1-fix", { needs: ["s1r1-review"] }),
+        command("s1r2-review", { needs: ["s1r1-fix"] }),
+        command("s1r2-fix", { needs: ["s1r2-review"] })
+      ])
+    )
+    expect(unrolled.workflow).not.toBeNull()
+    expect(unrolled.digest).not.toBeNull()
+    const issue = unrolled.issues.find((candidate) => candidate.code === "unrolled-rounds")
+    expect(issue?.severity).toBe("warning")
+    expect(issue?.message).toContain("repeat")
+    expect(issue?.nodes?.toSorted()).toEqual(["s1r1-fix", "s1r1-review", "s1r2-fix", "s1r2-review"])
+
+    // One repeating stem alone reads as ordinary sequence naming, and repeat
+    // members themselves never trigger the warning.
+    expect(
+      validateWorkflow(
+        workflow([command("chapter1"), command("chapter2", { needs: ["chapter1"] })])
+      ).issues.some((candidate) => candidate.code === "unrolled-rounds")
+    ).toBe(false)
+    const declared = {
+      ...workflow([command("review"), command("fix", { needs: ["review"] })]),
+      repeats: [
+        {
+          id: "loop",
+          members: ["review", "fix"],
+          until: { type: "command-success" as const, node: "fix" },
+          maxRounds: 3
+        }
+      ]
+    }
+    expect(
+      validateWorkflow(declared).issues.some((candidate) => candidate.code === "unrolled-rounds")
+    ).toBe(false)
+  })
+
   test("keeps the documented JSON workflow example valid", async () => {
     const document = await readFile(
       new URL("../../references/examples.md", import.meta.url),

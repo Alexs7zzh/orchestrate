@@ -862,6 +862,27 @@ function validateSessions(
   }
 }
 
+function unrolledRoundGroups(workflow: WorkflowSpec): readonly (readonly string[])[] {
+  const members = new Set(workflow.repeats.flatMap((repeat) => repeat.members))
+  const groups = new Map<string, string[]>()
+  for (const node of workflow.nodes) {
+    if (members.has(node.id)) {
+      continue
+    }
+    const normalized = node.id
+      .split("-")
+      .map((segment) => segment.replace(/r(?:ound)?[0-9]+$/, "r#"))
+      .join("-")
+    if (normalized === node.id) {
+      continue
+    }
+    const bucket = groups.get(normalized) ?? []
+    bucket.push(node.id)
+    groups.set(normalized, bucket)
+  }
+  return [...groups.values()].filter((bucket) => bucket.length >= 2)
+}
+
 export function validateWorkflow(input: unknown): ValidationResult {
   const decoded = decodeWorkflow(input)
   if (Result.isFailure(decoded)) {
@@ -929,6 +950,17 @@ export function validateWorkflow(input: unknown): ValidationResult {
     addIssue(issues, "error", "cycle", `Dependency cycle: ${cycle.join(" -> ")}.`)
   }
   validateRepeats(workflow, issues, byId, ancestors)
+  const unrolled = unrolledRoundGroups(workflow)
+  if (unrolled.length >= 2) {
+    const sample = (unrolled[0] as readonly string[]).slice(0, 2)
+    addIssue(
+      issues,
+      "warning",
+      "unrolled-rounds",
+      `Nodes look like hand-unrolled repeat rounds (e.g. ${sample.map((id) => `"${id}"`).join(", ")}). Declare a repeat with members, maxRounds, and an until condition instead: rounds then instantiate on demand and the board renders them as one loop.`,
+      unrolled.flat()
+    )
+  }
   validateSessions(workflow, issues, ancestors)
   const overlaps = overlappingMutableNodes(workflow)
   if (overlaps.length > 0) {
