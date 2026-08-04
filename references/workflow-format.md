@@ -24,6 +24,11 @@ schema requires them.
 Every node declares `id`, `type`, `title`, `needs`, nullable `cwd`, `workspace`, `inputs`, `retry`,
 and `gate`. IDs are unique and dependencies must form a DAG.
 
+Naming convention: `parent--sub` (for example `api--test`) marks a sub-node of `api`. The default
+UI placement written by `ui wizard` keys on this: sub-nodes open as splits in their parent's tab
+while every other node opens its own tab, so name detail work `<stage>--<detail>` when the workflow
+has a backbone of stages.
+
 An input declares `from`, the prompt/result name `as`, `include` (`content` or `path`), and `round`
 (`current` or `previous`). Previous-round input is valid only inside one repeat and is absent in its
 first round.

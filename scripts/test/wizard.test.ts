@@ -1,15 +1,24 @@
 import { describe, expect, test } from "bun:test"
 
-import type { UiPreferenceLayer } from "../src/types.js"
+import type { NodeRunState, UiPreferenceLayer, WorkflowSpec } from "../src/types.js"
 
 import { EVENT_SEVERITIES } from "../src/notifications.js"
+import { nearestRootAncestor, placementBaseGroup } from "../src/placement.js"
 import {
   ANSI,
   DEMO_TIMELINE,
+  DEMO_WORKFLOW,
+  demoTabs,
+  NOTIFICATION_LEGEND,
   NOTIFICATION_PRESETS,
   parseWizardKey,
+  placementGroupingForLayout,
+  placementRulesForLayout,
+  renderDemoWorkflow,
   renderNotificationPreview,
+  renderBoardMockup,
   renderPlacementSketch,
+  renderTabMapping,
   runUiWizard,
   runWizardWithIo,
   wizardPlan,
@@ -27,12 +36,16 @@ const MATCHER = {
   id: "*"
 } as const
 
+const ROOT_MATCHER = { ...MATCHER, level: "root" } as const
+
 const DEFAULT_SELECTIONS: WizardSelections = {
   notifications: { attention: "herdr", milestone: "herdr", progress: "board" },
-  workspace: "dedicated",
-  surface: "tab",
+  workspace: "origin",
+  layout: "nested",
   board: "split-right"
 }
+
+const SUB_NODE_MATCHER = { ...MATCHER, id: "*--*" } as const
 
 /** The layer the pre-wizard cli.ts implementation wrote for equivalent answers. */
 function legacyWizardLayer(
@@ -102,11 +115,11 @@ function captureApply(): {
 describe("notification presets", () => {
   test("map to the exact notification records", () => {
     expect(NOTIFICATION_PRESETS.map((preset) => preset.label)).toStrictEqual([
-      "Attention + milestones (default)",
-      "Attention only",
-      "Everything",
-      "Board only (silent)",
-      "Custom…"
+      "Needs you + finishes (default) — routine stays on the board",
+      "Needs you only — finishes land on the board, routine is silent",
+      "Every event — starts, finishes, gates, everything",
+      "Board only — never notify; watch the board",
+      "Custom… — pick per event group"
     ])
     expect(NOTIFICATION_PRESETS[0]?.channels).toStrictEqual({
       attention: "herdr",
@@ -135,7 +148,19 @@ describe("notification presets", () => {
     const severities = new Set(DEMO_TIMELINE.map((event) => EVENT_SEVERITIES[event.type]))
     expect([...severities].toSorted()).toStrictEqual(["attention", "milestone", "progress"])
   })
+
+  test("demo timeline references only demo workflow nodes and the demo run", () => {
+    const nodeIds = new Set(DEMO_WORKFLOW.map((node) => node.id))
+    for (const event of DEMO_TIMELINE) {
+      expect(nodeIds.has(event.detail) || event.detail === "release-review").toBe(true)
+    }
+  })
 })
+
+/** Preview body without the header (first line) and channel legend (last line). */
+function eventLines(preview: string): readonly string[] {
+  return preview.split("\n").slice(1, -1)
+}
 
 describe("renderNotificationPreview", () => {
   test("styles each demo event by its routed channel, per preset", () => {
@@ -143,7 +168,7 @@ describe("renderNotificationPreview", () => {
       if (preset.channels === null) {
         continue
       }
-      const lines = renderNotificationPreview(preset.channels).split("\n").slice(1)
+      const lines = eventLines(renderNotificationPreview(preset.channels))
       expect(lines).toHaveLength(DEMO_TIMELINE.length)
       DEMO_TIMELINE.forEach((event, index) => {
         const channel = preset.channels?.[EVENT_SEVERITIES[event.type]]
@@ -162,91 +187,227 @@ describe("renderNotificationPreview", () => {
     }
   })
 
-  test("bolds everything for the Everything preset and nothing for Board only", () => {
-    const everything = renderNotificationPreview({
+  test("ends with the dim channel legend", () => {
+    const preview = renderNotificationPreview({
       attention: "herdr",
       milestone: "herdr",
-      progress: "herdr"
-    })
-    expect(everything.split("🔔")).toHaveLength(DEMO_TIMELINE.length + 1)
-    const boardOnly = renderNotificationPreview({
-      attention: "board",
-      milestone: "board",
       progress: "board"
     })
+    expect(preview.split("\n").at(-1)).toBe(`  ${ANSI.dim}${NOTIFICATION_LEGEND}${ANSI.reset}`)
+  })
+
+  test("bolds everything for the Everything preset and nothing for Status board only", () => {
+    const everything = eventLines(
+      renderNotificationPreview({ attention: "herdr", milestone: "herdr", progress: "herdr" })
+    ).join("\n")
+    expect(everything.split("🔔")).toHaveLength(DEMO_TIMELINE.length + 1)
+    const boardOnly = eventLines(
+      renderNotificationPreview({ attention: "board", milestone: "board", progress: "board" })
+    ).join("\n")
     expect(boardOnly).not.toContain("🔔")
     expect(boardOnly).not.toContain(ANSI.bold)
   })
 })
 
-describe("renderPlacementSketch", () => {
-  const BASE: PlacementChoices = { workspace: "dedicated", surface: "tab", board: "split-right" }
+describe("renderDemoWorkflow", () => {
+  test("draws every demo node without any marking", () => {
+    const diagram = renderDemoWorkflow()
+    for (const node of DEMO_WORKFLOW) {
+      expect(diagram).toContain(node.id)
+    }
+    expect(diagram).not.toContain(ANSI.bold)
+    expect(diagram).not.toContain(ANSI.inverse)
+  })
+})
 
-  test("keeps a compact fixed geometry", () => {
-    for (const active of ["workspace", "surface", "board"] as const) {
-      const lines = stripAnsi(renderPlacementSketch(BASE, active)).split("\n")
-      expect(lines).toHaveLength(10)
-      for (const line of lines) {
-        expect(line).toHaveLength(56)
+describe("demoTabs and renderTabMapping", () => {
+  test("nested groups sub-nodes under their parent's tab", () => {
+    expect(demoTabs("nested")).toStrictEqual([
+      { label: "plan", panes: ["plan"] },
+      { label: "ui", panes: ["ui", "ui--test"] },
+      { label: "api", panes: ["api", "api--test", "api--bench"] },
+      { label: "docs", panes: ["docs", "docs--lint"] },
+      { label: "merge", panes: ["merge"] },
+      { label: "report", panes: ["report"] }
+    ])
+    const mapping = stripAnsi(renderTabMapping("nested"))
+    expect(mapping).toContain(`tab "api"`)
+    expect(mapping).toContain("api + splits: api--test, api--bench")
+    expect(mapping).toContain(`tab "merge"`)
+    expect(mapping).toContain(`tab "report"`)
+  })
+
+  test("nested tabs match the engine's id-prefix grouping", () => {
+    const workflow = { nodes: DEMO_WORKFLOW } as unknown as WorkflowSpec
+    const grouping = { by: "id-prefix", separator: "--" } as const
+    for (const tab of demoTabs("nested")) {
+      for (const pane of tab.panes) {
+        const runtimeNode = { templateId: pane } as unknown as NodeRunState
+        expect(placementBaseGroup(workflow, runtimeNode, grouping)).toBe(tab.label)
       }
     }
   })
 
-  test("marks the dedicated run entry in the workspaces rail", () => {
+  test("grouped packs everything under the single entry node, spilling by capacity", () => {
+    const workflow = { nodes: DEMO_WORKFLOW } as unknown as WorkflowSpec
+    for (const node of DEMO_WORKFLOW) {
+      expect(nearestRootAncestor(workflow, node.id)).toBe("plan")
+    }
+    const tabs = demoTabs("grouped")
+    expect(tabs.map((tab) => tab.label)).toStrictEqual(["plan", "plan 2"])
+    expect(tabs.flatMap((tab) => tab.panes)).toStrictEqual(DEMO_WORKFLOW.map((node) => node.id))
+    expect(tabs[0]?.panes).toHaveLength(5)
+    const mapping = stripAnsi(renderTabMapping("grouped"))
+    expect(mapping).toContain(`tab "plan"`)
+    expect(mapping).toContain(`tab "plan 2"`)
+    expect(mapping).toContain("filled in run order; max 4 splits per tab")
+  })
+
+  test("per-node lists one tab for every node", () => {
+    const mapping = stripAnsi(renderTabMapping("per-node"))
+    for (const node of DEMO_WORKFLOW) {
+      expect(mapping).toContain(node.id)
+    }
+    expect(mapping).toContain("10 tabs — one per node:")
+    expect(mapping).not.toContain("splits:")
+  })
+})
+
+describe("renderBoardMockup", () => {
+  test("shows the demo run with real board glyphs at a fixed width", () => {
+    const mockup = renderBoardMockup()
+    expect(mockup).toContain("board · release-review")
+    expect(mockup).toContain("✓ plan")
+    expect(mockup).toContain("● ui--test")
+    expect(mockup).toContain("◆ merge")
+    expect(mockup).toContain("awaiting approval")
+    const lines = mockup.split("\n")
+    for (const line of lines) {
+      expect(line).toHaveLength(lines[0]?.length ?? 0)
+    }
+  })
+})
+
+describe("renderPlacementSketch", () => {
+  const BASE: PlacementChoices = { workspace: "origin", layout: "grouped", board: "split-right" }
+
+  test("keeps a compact fixed geometry across every choice combination", () => {
+    for (const active of ["workspace", "board"] as const) {
+      for (const board of ["split-right", "dedicated-workspace", "current-workspace"] as const) {
+        for (const workspace of ["dedicated", "origin"] as const) {
+          const sketch = renderPlacementSketch({ workspace, layout: "grouped", board }, active)
+          const lines = stripAnsi(sketch).split("\n")
+          expect(lines).toHaveLength(10)
+          for (const line of lines) {
+            expect(line).toHaveLength(56)
+          }
+        }
+      }
+    }
+  })
+
+  test("marks the current workspace rail entry when the run stays put", () => {
     const sketch = renderPlacementSketch(BASE, "workspace")
-    expect(sketch).toContain(`${ANSI.inverse}run-42${ANSI.reset}`)
-    expect(sketch).not.toContain(`${ANSI.inverse}[alpha-1]`)
+    expect(sketch).toContain(`${ANSI.inverse}current${ANSI.reset}`)
+    expect(sketch).not.toContain("release-…")
+    expect(stripAnsi(sketch)).toContain("[main] [run tabs…]")
   })
 
-  test("marks the pane grid when runs stay in the origin workspace", () => {
-    const sketch = renderPlacementSketch({ ...BASE, workspace: "origin" }, "workspace")
-    expect(sketch).not.toContain("run-42")
-    expect(sketch).toContain(`${ANSI.inverse}┌${"─".repeat(18)}┐${ANSI.reset}`)
+  test("marks the run workspace entry and moves run tabs out of the strip", () => {
+    const sketch = renderPlacementSketch({ ...BASE, workspace: "dedicated" }, "workspace")
+    expect(sketch).toContain(`${ANSI.inverse}release-…${ANSI.reset}`)
+    expect(sketch).not.toContain(`${ANSI.inverse}current`)
+    expect(stripAnsi(sketch)).not.toContain("[run tabs…]")
+    expect(stripAnsi(sketch)).toContain("run tabs open in release-…")
   })
 
-  test("marks the new tab for the tab surface", () => {
-    const sketch = renderPlacementSketch(BASE, "surface")
-    expect(sketch).toContain(`${ANSI.inverse}[alpha-1]${ANSI.reset}`)
-    expect(sketch).not.toContain("beta (split)")
-    expect(sketch).not.toContain("max 4 splits per tab")
+  test("split-right draws the board beside the launch pane and marks it", () => {
+    const sketch = renderPlacementSketch(BASE, "board")
+    expect(stripAnsi(sketch)).toContain(" you")
+    expect(sketch).toContain(`${ANSI.inverse} board${ANSI.reset}`)
+    expect(stripAnsi(sketch)).not.toContain("[board]")
   })
 
-  test("marks the split pane and shows the split cap caption", () => {
-    const sketch = renderPlacementSketch({ ...BASE, surface: "split" }, "surface")
-    expect(sketch).toContain(`${ANSI.inverse} beta (split)`)
-    expect(sketch).toContain("max 4 splits per tab")
-    expect(sketch).not.toContain("[alpha-1]")
+  test("current-workspace board is a marked tab, not a split", () => {
+    const sketch = renderPlacementSketch({ ...BASE, board: "current-workspace" }, "board")
+    expect(sketch).toContain(`${ANSI.inverse}[board]${ANSI.reset}`)
+    expect(stripAnsi(sketch)).not.toContain(" board ")
   })
 
-  test("marks the board region for each board choice", () => {
-    const splitRight = renderPlacementSketch(BASE, "board")
-    expect(splitRight).toContain(`${ANSI.inverse} board`)
-
-    const rail = renderPlacementSketch({ ...BASE, board: "dedicated-workspace" }, "board")
-    expect(rail).toContain(`${ANSI.inverse}board${ANSI.reset}`)
-    expect(rail).not.toContain("[board]")
-
-    const tab = renderPlacementSketch({ ...BASE, board: "current-workspace" }, "board")
-    expect(tab).toContain(`${ANSI.inverse}[board]${ANSI.reset}`)
+  test("dedicated board marks the run workspace and explains itself", () => {
+    const sketch = renderPlacementSketch({ ...BASE, board: "dedicated-workspace" }, "board")
+    expect(sketch).toContain(`${ANSI.inverse}release-…${ANSI.reset}`)
+    expect(stripAnsi(sketch)).toContain("the board tab lives in release-…")
+    expect(stripAnsi(sketch)).not.toContain("[board]")
   })
 
-  test("leaves inactive regions unmarked while reflecting all choices", () => {
+  test("leaves the other question's region unmarked", () => {
     const sketch = renderPlacementSketch(
-      { workspace: "dedicated", surface: "tab", board: "current-workspace" },
-      "surface"
+      { workspace: "dedicated", layout: "grouped", board: "current-workspace" },
+      "board"
     )
-    expect(sketch).toContain("run-42")
-    expect(sketch).toContain("[board]")
-    expect(sketch).not.toContain(`${ANSI.inverse}run-42`)
-    expect(sketch).not.toContain(`${ANSI.inverse}[board]`)
-    expect(sketch).toContain(`${ANSI.inverse}[alpha-1]${ANSI.reset}`)
+    expect(sketch).toContain("release-…")
+    expect(sketch).not.toContain(`${ANSI.inverse}release-…`)
+    expect(sketch).toContain(`${ANSI.inverse}[board]${ANSI.reset}`)
+  })
+
+  test("dedicated board plus dedicated run share one caption", () => {
+    const sketch = renderPlacementSketch(
+      { workspace: "dedicated", layout: "grouped", board: "dedicated-workspace" },
+      "workspace"
+    )
+    expect(stripAnsi(sketch)).toContain("board + run tabs live in release-…")
+  })
+})
+
+describe("placementRulesForLayout", () => {
+  test("nested splits sub-nodes and opens a tab for everything else", () => {
+    expect(placementRulesForLayout("nested")).toStrictEqual([
+      { match: SUB_NODE_MATCHER, surface: "split" },
+      { match: MATCHER, surface: "tab" }
+    ])
+    expect(placementGroupingForLayout("nested")).toStrictEqual({
+      by: "id-prefix",
+      separator: "--"
+    })
+  })
+
+  test("grouped opens a tab per entry node and splits descendants into it", () => {
+    expect(placementRulesForLayout("grouped")).toStrictEqual([
+      { match: ROOT_MATCHER, surface: "tab" },
+      { match: MATCHER, surface: "split" }
+    ])
+    expect(placementGroupingForLayout("grouped")).toStrictEqual({ by: "root-ancestor" })
+  })
+
+  test("per-node opens a tab for every node", () => {
+    expect(placementRulesForLayout("per-node")).toStrictEqual([{ match: MATCHER, surface: "tab" }])
+    expect(placementGroupingForLayout("per-node")).toStrictEqual({ by: "root-ancestor" })
   })
 })
 
 describe("wizardPlan", () => {
-  test("matches the layer the previous cli wizard wrote for equivalent answers", () => {
+  test("per-node matches the layer the previous cli wizard wrote for tab answers", () => {
+    const plan = wizardPlan({ ...DEFAULT_SELECTIONS, layout: "per-node" }, null)
+    expect(plan.layer).toStrictEqual(legacyWizardLayer("split-right", "tab", "origin", "herdr"))
+  })
+
+  test("nested writes sub-node-split rules with id-prefix grouping", () => {
     const plan = wizardPlan(DEFAULT_SELECTIONS, null)
-    expect(plan.layer).toStrictEqual(legacyWizardLayer("split-right", "tab", "dedicated", "herdr"))
+    expect(plan.layer.placement?.rules).toStrictEqual([
+      { match: SUB_NODE_MATCHER, surface: "split" },
+      { match: MATCHER, surface: "tab" }
+    ])
+    expect(plan.layer.placement?.grouping).toStrictEqual({ by: "id-prefix", separator: "--" })
+  })
+
+  test("grouped writes root-tab plus descendant-split rules with root grouping", () => {
+    const plan = wizardPlan({ ...DEFAULT_SELECTIONS, layout: "grouped" }, null)
+    expect(plan.layer.placement?.rules).toStrictEqual([
+      { match: ROOT_MATCHER, surface: "tab" },
+      { match: MATCHER, surface: "split" }
+    ])
+    expect(plan.layer.placement?.grouping).toStrictEqual({ by: "root-ancestor" })
   })
 
   test("keeps focus, completed panes, and continuation at the shipped defaults", () => {
@@ -254,7 +415,7 @@ describe("wizardPlan", () => {
       {
         notifications: { attention: "board", milestone: "silent", progress: "silent" },
         workspace: "origin",
-        surface: "split",
+        layout: "grouped",
         board: "current-workspace"
       },
       null
@@ -269,7 +430,6 @@ describe("wizardPlan", () => {
     })
     expect(plan.layer.board).toBe("current-workspace")
     expect(plan.layer.placement?.workspace).toBe("origin")
-    expect(plan.layer.placement?.rules).toStrictEqual([{ match: MATCHER, surface: "split" }])
     expect(plan.layer.notifications).toStrictEqual({
       attention: "board",
       milestone: "silent",
@@ -277,19 +437,20 @@ describe("wizardPlan", () => {
     })
   })
 
-  test("emits the exact ui set commands", () => {
+  test("emits the exact ui set commands in screen order", () => {
     const plan = wizardPlan(DEFAULT_SELECTIONS, null)
     expect(plan.commands).toStrictEqual([
-      `orchestrate ui set notifications '{"attention":"herdr","milestone":"herdr","progress":"board"}'`,
-      `orchestrate ui set placement.workspace '"dedicated"'`,
-      `orchestrate ui set placement.rules '[{"match":{"type":"any","provider":"any","level":"any","origin":"any","id":"*"},"surface":"tab"}]'`,
-      `orchestrate ui set board '"split-right"'`
+      `orchestrate ui set placement.workspace '"origin"'`,
+      `orchestrate ui set placement.rules '[{"match":{"type":"any","provider":"any","level":"any","origin":"any","id":"*--*"},"surface":"split"},{"match":{"type":"any","provider":"any","level":"any","origin":"any","id":"*"},"surface":"tab"}]'`,
+      `orchestrate ui set placement.grouping '{"by":"id-prefix","separator":"--"}'`,
+      `orchestrate ui set board '"split-right"'`,
+      `orchestrate ui set notifications '{"attention":"herdr","milestone":"herdr","progress":"board"}'`
     ])
   })
 
   test("appends --project to every command for project layers", () => {
     const plan = wizardPlan(DEFAULT_SELECTIONS, "/tmp/demo-project")
-    expect(plan.commands).toHaveLength(4)
+    expect(plan.commands).toHaveLength(5)
     for (const command of plan.commands) {
       expect(command.endsWith(" --project /tmp/demo-project")).toBe(true)
     }
@@ -304,26 +465,86 @@ describe("runWizardWithIo", () => {
     expect(calls).toHaveLength(1)
     expect(calls[0]?.project).toBe("/tmp/demo-project")
     expect(calls[0]?.layer).toStrictEqual(wizardPlan(DEFAULT_SELECTIONS, "/tmp/demo-project").layer)
-    expect(frames[0]).toContain("notifications (1/3)")
-    expect(frames.some((frame) => frame.includes("placement (2/3)"))).toBe(true)
-    expect(frames.some((frame) => frame.includes("confirm (3/3)"))).toBe(true)
+    expect(frames[0]).toContain("board (1/5)")
+    expect(frames.some((frame) => frame.includes("workspace (2/5)"))).toBe(true)
+    expect(frames.some((frame) => frame.includes("tabs (3/5)"))).toBe(true)
+    expect(frames.some((frame) => frame.includes("notifications (4/5)"))).toBe(true)
+    expect(frames.some((frame) => frame.includes("confirm (5/5)"))).toBe(true)
     expect(prints.join("")).toContain(
       `orchestrate ui set board '"split-right"' --project /tmp/demo-project`
     )
+  })
+
+  test("the board question comes first, introduced by the board itself", async () => {
+    const { io, frames } = scriptedIo(["escape"])
+    await runWizardWithIo(null, io, captureApply().apply)
+    const first = frames[0] ?? ""
+    expect(first).toContain("Where do you want to monitor the run?")
+    expect(first).toContain("board · release-review")
+    expect(first).toContain("┌ herdr")
+    expect(first).not.toContain("Demo workflow:")
+  })
+
+  test("the workspace question shows the sketch but not the workflow structure", async () => {
+    const { io, frames } = scriptedIo(["enter", "escape"])
+    await runWizardWithIo(null, io, captureApply().apply)
+    const second = frames[1] ?? ""
+    expect(second).toContain("Where should the workflow itself run?")
+    expect(second).toContain("┌ herdr")
+    expect(second).not.toContain("Demo workflow:")
+    expect(second).not.toContain("board · release-review")
+  })
+
+  test("the tab question shows the workflow and its tab mapping, not the sketch", async () => {
+    const { io, frames } = scriptedIo(["enter", "enter", "down", "down", "escape"])
+    await runWizardWithIo(null, io, captureApply().apply)
+    const nestedFrame = frames[2] ?? ""
+    const groupedFrame = frames[3] ?? ""
+    const perNodeFrame = frames[4] ?? ""
+    expect(nestedFrame).toContain("What goes into one tab?")
+    expect(nestedFrame).toContain("Demo workflow:")
+    expect(nestedFrame).not.toContain("┌ herdr")
+    expect(stripAnsi(nestedFrame)).toContain("api + splits: api--test, api--bench")
+    expect(stripAnsi(groupedFrame)).toContain(`tab "plan 2"`)
+    expect(stripAnsi(perNodeFrame)).toContain("10 tabs — one per node:")
+    expect(stripAnsi(perNodeFrame)).not.toContain("splits:")
+  })
+
+  test("a dedicated board pre-selects the dedicated run workspace", async () => {
+    const { io, frames, apply, calls } = {
+      ...scriptedIo([
+        "down",
+        "down",
+        "enter", // board: a tab in the run's own workspace
+        "enter", // workspace: pre-highlighted "a workspace per run"
+        "enter", // layout: nested
+        "enter", // notifications: default preset
+        "enter" // Apply
+      ]),
+      ...captureApply()
+    }
+    await runWizardWithIo(null, io, apply)
+    expect(calls).toHaveLength(1)
+    expect(calls[0]?.layer.board).toBe("dedicated-workspace")
+    expect(calls[0]?.layer.placement?.workspace).toBe("dedicated")
+    const workspaceFrame = frames.find((frame) =>
+      frame.includes("Where should the workflow itself run?")
+    )
+    expect(workspaceFrame).toContain("already gives each run its own workspace")
   })
 
   test("arrow-key navigation reaches non-default answers", async () => {
     const { io, apply, calls } = {
       ...scriptedIo([
         "down",
-        "enter", // Attention only
+        "enter", // board: a tab in your current workspace
         "down",
-        "enter", // workspace: origin
-        "down",
-        "enter", // surface: split
+        "enter", // workspace: dedicated
         "down",
         "down",
-        "enter", // board: current-workspace
+        "enter", // layout: per-node
+        "down",
+        "enter", // Needs you only
         "enter" // Apply
       ]),
       ...captureApply()
@@ -334,8 +555,8 @@ describe("runWizardWithIo", () => {
       wizardPlan(
         {
           notifications: { attention: "herdr", milestone: "board", progress: "silent" },
-          workspace: "origin",
-          surface: "split",
+          workspace: "dedicated",
+          layout: "per-node",
           board: "current-workspace"
         },
         null
@@ -344,7 +565,10 @@ describe("runWizardWithIo", () => {
   })
 
   test("custom preset drills into per-severity channel choices", async () => {
-    const { io } = scriptedIo([
+    const { io, frames } = scriptedIo([
+      "enter", // board: split-right
+      "enter", // workspace: origin
+      "enter", // layout: grouped
       "down",
       "down",
       "down",
@@ -355,9 +579,6 @@ describe("runWizardWithIo", () => {
       "enter", // milestone: herdr
       "down",
       "enter", // progress: board -> silent
-      "enter", // workspace: dedicated
-      "enter", // surface: tab
-      "enter", // board: split-right
       "enter" // Apply
     ])
     const { calls, apply } = captureApply()
@@ -368,6 +589,10 @@ describe("runWizardWithIo", () => {
       milestone: "herdr",
       progress: "silent"
     })
+    const attentionFrame = frames.find((frame) =>
+      frame.includes("Where should attention events go?")
+    )
+    expect(attentionFrame).toContain("an approval gate opened")
   })
 
   test("escape exits without writing anything", async () => {
@@ -378,7 +603,7 @@ describe("runWizardWithIo", () => {
     expect(prints.join("")).toContain("no preferences were written")
   })
 
-  test("escape mid-placement exits without writing anything", async () => {
+  test("escape mid-flow exits without writing anything", async () => {
     const { io } = scriptedIo(["enter", "enter", "down", "escape"])
     const { calls, apply } = captureApply()
     await runWizardWithIo(null, io, apply)
@@ -401,6 +626,21 @@ describe("runWizardWithIo", () => {
     const project = scriptedIo(["enter", "enter", "enter", "enter", "escape"])
     await runWizardWithIo("/tmp/demo-project", project.io, captureApply().apply)
     expect(project.frames.at(-1)).toContain("Target: --project /tmp/demo-project")
+  })
+
+  test("selected and unselected options share the same text column", async () => {
+    const { io, frames } = scriptedIo(["enter", "escape"])
+    await runWizardWithIo(null, io, captureApply().apply)
+    const optionLines = (frames[1] ?? "")
+      .split("\n")
+      .filter(
+        (line) =>
+          stripAnsi(line).includes("workspace per run") ||
+          stripAnsi(line).includes("current workspace (default)")
+      )
+    expect(optionLines).toHaveLength(2)
+    const columns = optionLines.map((line) => stripAnsi(line).search(/\S/) + 1)
+    expect(new Set(columns).size).toBe(1)
   })
 })
 

@@ -18,7 +18,7 @@
     "test": "bun run build && bun run build:compile && bun run test:unit && bun run test:contract:built",
     "test:contract": "bun run build && bun run build:compile && bun run test:contract:built",
     "test:contract:built": "bun test test/cli-contract.test.ts test/packaged-contract.test.ts test/release-contract.test.ts",
-    "test:unit": "bun test test/workflow-contract.test.ts test/preferences-contract.test.ts test/state-event-contract.test.ts test/state-store.test.ts test/herdr-surface.test.ts test/prompt.test.ts test/transition.test.ts test/crank.test.ts test/placement.test.ts test/board-model.test.ts test/board.test.ts test/notifications.test.ts test/setup.test.ts",
+    "test:unit": "bun test test/workflow-contract.test.ts test/preferences-contract.test.ts test/state-event-contract.test.ts test/state-store.test.ts test/herdr-surface.test.ts test/prompt.test.ts test/transition.test.ts test/crank.test.ts test/placement.test.ts test/board-model.test.ts test/board.test.ts test/notifications.test.ts test/setup.test.ts test/wizard.test.ts",
     "verify": "bun run format:check && bun run lint && bun run check && bun run check:production-dependencies && bun run test"
   },
   "dependencies": {

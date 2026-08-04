@@ -30,22 +30,62 @@ export interface NotificationPresetOption {
 
 export const NOTIFICATION_PRESETS: readonly NotificationPresetOption[] = [
   {
-    label: "Attention + milestones (default)",
+    label: "Needs you + finishes (default) — routine stays on the board",
     channels: { attention: "herdr", milestone: "herdr", progress: "board" }
   },
   {
-    label: "Attention only",
+    label: "Needs you only — finishes land on the board, routine is silent",
     channels: { attention: "herdr", milestone: "board", progress: "silent" }
   },
   {
-    label: "Everything",
+    label: "Every event — starts, finishes, gates, everything",
     channels: { attention: "herdr", milestone: "herdr", progress: "herdr" }
   },
   {
-    label: "Board only (silent)",
+    label: "Board only — never notify; watch the board",
     channels: { attention: "board", milestone: "board", progress: "board" }
   },
-  { label: "Custom…", channels: null }
+  { label: "Custom… — pick per event group", channels: null }
+]
+
+/**
+ * Plain-language description of each severity group, in terms of the events
+ * it contains, so nobody has to reverse-engineer "attention" from the
+ * preview.
+ */
+export const SEVERITY_EXPLAINERS: Readonly<Record<EventSeverity, string>> = {
+  attention:
+    "The run needs you: an approval gate opened, the run failed, or a repeat loop hit its round limit.",
+  milestone:
+    "Something finished: a node completed or failed; the run completed, paused, or stopped.",
+  progress: "Routine motion: nodes starting, gates approved, repeat rounds advancing."
+}
+
+/**
+ * One demo run threads through every wizard screen: the release-review
+ * workflow below is placed on the layout screen and its events drive the
+ * notification preview.
+ */
+export interface DemoNode {
+  readonly id: string
+  readonly needs: readonly string[]
+}
+
+// Backbone nodes (plan, ui, api, docs, merge, report) carry plain ids; detail
+// nodes use the "parent--sub" naming convention the nested layout keys on.
+// Declaration order doubles as the run-order approximation the grouped
+// mapping shows.
+export const DEMO_WORKFLOW: readonly DemoNode[] = [
+  { id: "plan", needs: [] },
+  { id: "ui", needs: ["plan"] },
+  { id: "ui--test", needs: ["ui"] },
+  { id: "api", needs: ["plan"] },
+  { id: "api--test", needs: ["api"] },
+  { id: "api--bench", needs: ["api"] },
+  { id: "docs", needs: ["plan"] },
+  { id: "docs--lint", needs: ["docs"] },
+  { id: "merge", needs: ["ui--test", "api--test", "api--bench", "docs--lint"] },
+  { id: "report", needs: ["merge"] }
 ]
 
 export interface DemoEvent {
@@ -55,14 +95,16 @@ export interface DemoEvent {
 
 export const DEMO_TIMELINE: readonly DemoEvent[] = [
   { type: "run.started", detail: "release-review" },
-  { type: "node.started", detail: "survey" },
-  { type: "node.completed", detail: "survey" },
-  { type: "gate.opened", detail: "synthesis" },
-  { type: "node.started", detail: "alpha-1" },
-  { type: "node.failed", detail: "beta" },
-  { type: "repeat.max-rounds", detail: "review" },
+  { type: "node.started", detail: "plan" },
+  { type: "node.completed", detail: "ui--test" },
+  { type: "gate.opened", detail: "merge" },
+  { type: "node.started", detail: "api--bench" },
+  { type: "node.failed", detail: "docs--lint" },
+  { type: "repeat.max-rounds", detail: "report" },
   { type: "run.completed", detail: "release-review" }
 ]
+
+export const NOTIFICATION_LEGEND = "🔔 desktop notification   ▤ status board   · journal only"
 
 export function renderNotificationPreview(selection: NotificationSelection): string {
   const lines = DEMO_TIMELINE.map((event) => {
@@ -76,16 +118,140 @@ export function renderNotificationPreview(selection: NotificationSelection): str
     }
     return `  ${ANSI.dim}· ${label}${ANSI.reset}`
   })
-  return ["Preview — demo run:", ...lines].join("\n")
+  return [
+    "Preview — the demo run from the layout step:",
+    ...lines,
+    `  ${ANSI.dim}${NOTIFICATION_LEGEND}${ANSI.reset}`
+  ].join("\n")
 }
+
+/**
+ * Node layout maps to placement rules plus a grouping strategy:
+ * - "nested": sub-nodes (ids named "parent--sub") split into their parent's
+ *   tab via id-prefix grouping on "--"; every other node opens its own tab.
+ *   Repeat-round instances ("review--r2") tuck in the same way.
+ * - "grouped": a tab per entry node; every descendant splits into it
+ *   (root-ancestor grouping makes their pane groups coincide).
+ * - "per-node": a tab for every node.
+ */
+export type NodeLayout = "nested" | "grouped" | "per-node"
 
 export interface PlacementChoices {
   readonly workspace: UiPreferences["placement"]["workspace"]
-  readonly surface: PlacementRule["surface"]
+  readonly layout: NodeLayout
   readonly board: UiPreferences["board"]
 }
 
-export type PlacementQuestion = "workspace" | "surface" | "board"
+export type PlacementQuestion = "workspace" | "layout" | "board"
+
+export interface DemoTab {
+  readonly label: string
+  readonly panes: readonly string[]
+}
+
+const SUB_NODE_SEPARATOR = "--"
+const MAX_SPLITS_PER_TAB = 4
+
+/**
+ * The tabs the demo workflow produces under each layout. Wizard tests
+ * cross-check these against the real placement engine (id-prefix grouping for
+ * nested, root-ancestor grouping for grouped).
+ */
+export function demoTabs(layout: NodeLayout): readonly DemoTab[] {
+  if (layout === "per-node") {
+    return DEMO_WORKFLOW.map((node) => ({ label: node.id, panes: [node.id] }))
+  }
+  if (layout === "nested") {
+    const byPrefix = new Map<string, string[]>()
+    for (const node of DEMO_WORKFLOW) {
+      const separatorIndex = node.id.indexOf(SUB_NODE_SEPARATOR)
+      const prefix = separatorIndex === -1 ? node.id : node.id.slice(0, separatorIndex)
+      const panes = byPrefix.get(prefix) ?? []
+      panes.push(node.id)
+      byPrefix.set(prefix, panes)
+    }
+    return [...byPrefix.entries()].map(([label, panes]) => ({ label, panes }))
+  }
+  // Grouped: the demo has one entry node, so everything packs into its tab
+  // family, spilling over once each tab is full.
+  const [root, ...rest] = DEMO_WORKFLOW.map((node) => node.id)
+  const tabs: DemoTab[] = [
+    { label: root ?? "", panes: [root ?? "", ...rest.slice(0, MAX_SPLITS_PER_TAB)] }
+  ]
+  // Overflow tabs seat one extra pane: their first member opens the tab
+  // itself and does not count against the split cap.
+  for (let index = MAX_SPLITS_PER_TAB, ordinal = 2; index < rest.length; ordinal += 1) {
+    tabs.push({ label: `${root} ${ordinal}`, panes: rest.slice(index, index + 5) })
+    index += MAX_SPLITS_PER_TAB + 1
+  }
+  return tabs
+}
+
+/** Plain ASCII sketch of the demo DAG, shown only where structure matters. */
+export function renderDemoWorkflow(): string {
+  return [
+    "Demo workflow:",
+    "  plan ─┬─ ui ─── ui--test ────┬─ merge ─ report",
+    "        ├─ api ─┬─ api--test ──┤",
+    "        │       └─ api--bench ─┤",
+    "        └─ docs ── docs--lint ─┘"
+  ].join("\n")
+}
+
+/**
+ * The node-to-tab mapping the highlighted layout answer produces, spelled out
+ * for every node so nothing is left to infer.
+ */
+export function renderTabMapping(layout: NodeLayout): string {
+  const tabs = demoTabs(layout)
+  if (layout === "per-node") {
+    const names = tabs.map((tab) => tab.label)
+    return [
+      "Its tabs, with this choice:",
+      `  ${ANSI.bold}${tabs.length} tabs${ANSI.reset} — one per node:`,
+      `  ${names.slice(0, 5).join(" · ")}`,
+      `  ${names.slice(5).join(" · ")}`
+    ].join("\n")
+  }
+  const labelWidth = Math.max(...tabs.map((tab) => tab.label.length)) + 6
+  const lines = tabs.map(({ label, panes }) => {
+    const [first, ...splits] = panes
+    const title = `tab "${label}"`
+    const padding = " ".repeat(Math.max(1, labelWidth - title.length + 2))
+    const body = splits.length === 0 ? first : `${first} + splits: ${splits.join(", ")}`
+    return `  ${ANSI.bold}${title}${ANSI.reset}${padding}${body}`
+  })
+  const caption =
+    layout === "grouped"
+      ? [`  ${ANSI.dim}filled in run order; max 4 splits per tab${ANSI.reset}`]
+      : []
+  return ["Its tabs, with this choice:", ...lines, ...caption].join("\n")
+}
+
+const BOARD_MOCKUP_ROWS: readonly (readonly [string, string])[] = [
+  ["✓ plan", "completed"],
+  ["● ui--test", "running"],
+  ["◆ merge", "awaiting approval"],
+  ["○ report", "pending   (+6 more)"]
+]
+
+/**
+ * A miniature of the status board TUI itself (real status glyphs, demo run),
+ * so the board question introduces the thing before asking where to put it.
+ */
+export function renderBoardMockup(): string {
+  const interior = 38
+  const header = " board · release-review "
+  const rows = BOARD_MOCKUP_ROWS.map(([node, status]) => {
+    const body = ` ${node.padEnd(11)} ${status}`
+    return `  │${body}${" ".repeat(Math.max(0, interior - body.length))}│`
+  })
+  return [
+    `  ┌${header}${"─".repeat(Math.max(0, interior - header.length))}┐`,
+    ...rows,
+    `  └${"─".repeat(interior)}┘`
+  ].join("\n")
+}
 
 interface SketchPart {
   readonly text: string
@@ -120,70 +286,87 @@ function boxRow(interior: readonly SketchPart[], width: number): readonly Sketch
   ]
 }
 
-/**
- * Compact sketch of herdr: workspaces rail on the left, tab strip on top,
- * pane grid inside. The inverse-video marker sits on the region affected by
- * the currently highlighted answer to `active`.
- */
-export function renderPlacementSketch(
-  choices: PlacementChoices,
-  active: PlacementQuestion
-): string {
-  const hasBoardBox = choices.board === "split-right"
-  const leftInterior = hasBoardBox ? 18 : 37
-  const rightInterior = 16
-  const markRun = active === "workspace" && choices.workspace === "dedicated"
-  const markGrid = active === "workspace" && choices.workspace === "origin"
-  const markTab = active === "surface" && choices.surface === "tab"
-  const markSplit = active === "surface" && choices.surface === "split"
-  const markBoardBox = active === "board" && choices.board === "split-right"
-  const markBoardRail = active === "board" && choices.board === "dedicated-workspace"
-  const markBoardTab = active === "board" && choices.board === "current-workspace"
+function dashes(count: number): string {
+  return "─".repeat(count)
+}
 
-  const railEntries: SketchPart[][] = [[{ text: "home" }]]
-  if (choices.workspace === "dedicated") {
-    railEntries.push([{ text: "run-42", marked: markRun }])
-  }
-  if (choices.board === "dedicated-workspace") {
-    railEntries.push([{ text: "board", marked: markBoardRail }])
+function cellRow(cells: readonly SketchPart[], widths: readonly number[]): readonly SketchPart[] {
+  const parts: SketchPart[] = [{ text: "│" }]
+  cells.forEach((cell, index) => {
+    const width = widths[index] ?? 0
+    parts.push(cell, { text: " ".repeat(Math.max(0, width - cell.text.length)) }, { text: "│" })
+  })
+  return parts
+}
+
+/** The two placement questions whose answers the herdr sketch can show. */
+export type SketchQuestion = "workspace" | "board"
+
+/**
+ * Compact sketch of herdr from where the user sits: the workspaces rail, the
+ * current workspace's tab strip, and the [main] tab holding the pane the run
+ * is launched from ("you"). The board and the run's tabs are drawn only where
+ * the current answers would truly put them, and the inverse-video marker sits
+ * on the region the highlighted answer to `active` controls.
+ */
+export function renderPlacementSketch(choices: PlacementChoices, active: SketchQuestion): string {
+  const markCurrent = active === "workspace" && choices.workspace === "origin"
+  const markRunWorkspace = active === "workspace" && choices.workspace === "dedicated"
+  const markBoardSplit = active === "board" && choices.board === "split-right"
+  const markBoardTab = active === "board" && choices.board === "current-workspace"
+  const markBoardWorkspace = active === "board" && choices.board === "dedicated-workspace"
+
+  // A dedicated board opens as a tab in the run workspace, so that workspace
+  // exists in the rail whenever either answer calls for it.
+  const runWorkspaceVisible =
+    choices.workspace === "dedicated" || choices.board === "dedicated-workspace"
+  const railEntries: SketchPart[][] = [[{ text: "current", marked: markCurrent }]]
+  if (runWorkspaceVisible) {
+    railEntries.push([{ text: "release-…", marked: markRunWorkspace || markBoardWorkspace }])
   }
   while (railEntries.length < 6) {
     railEntries.push([{ text: "" }])
   }
 
   const tabs: SketchPart[] = [{ text: "tabs: " }, { text: "[main]" }]
-  if (choices.surface === "tab") {
-    tabs.push({ text: " " }, { text: "[alpha-1]", marked: markTab })
+  if (choices.workspace === "origin") {
+    tabs.push({ text: " [run tabs…]" })
   }
   if (choices.board === "current-workspace") {
     tabs.push({ text: " " }, { text: "[board]", marked: markBoardTab })
   }
 
-  const leftTop: SketchPart = { text: `┌${"─".repeat(leftInterior)}┐`, marked: markGrid }
-  const leftBottom: SketchPart = { text: `└${"─".repeat(leftInterior)}┘` }
-  const leftRows: (readonly SketchPart[])[] = [
-    [leftTop],
-    boxRow([{ text: " alpha-1" }], leftInterior),
-    choices.surface === "split"
-      ? [{ text: `├${"─".repeat(leftInterior)}┤` }]
-      : boxRow([], leftInterior),
-    choices.surface === "split"
-      ? boxRow([{ text: " beta (split)", marked: markSplit }], leftInterior)
-      : boxRow([], leftInterior),
-    [leftBottom]
-  ]
-  const rightRows: (readonly SketchPart[])[] = [
-    [{ text: `┌${"─".repeat(rightInterior)}┐` }],
-    boxRow([{ text: " board", marked: markBoardBox }], rightInterior),
-    boxRow([], rightInterior),
-    boxRow([], rightInterior),
-    [{ text: `└${"─".repeat(rightInterior)}┘` }]
-  ]
-  const gridRows = leftRows.map((leftRow, index) =>
-    hasBoardBox ? leftRow.concat([{ text: " " }], rightRows[index] ?? []) : leftRow
-  )
-  const caption: SketchPart[] =
-    choices.surface === "split" ? [{ text: " max 4 splits per tab" }] : [{ text: "" }]
+  // The grid is the [main] tab: your pane, plus the board split when chosen.
+  const hasBoardSplit = choices.board === "split-right"
+  const leftInterior = hasBoardSplit ? 22 : 37
+  const rightInterior = 14
+  const gridRows: (readonly SketchPart[])[] = hasBoardSplit
+    ? [
+        [{ text: `┌${dashes(leftInterior)}┬${dashes(rightInterior)}┐` }],
+        cellRow(
+          [{ text: " you" }, { text: " board", marked: markBoardSplit }],
+          [leftInterior, rightInterior]
+        ),
+        cellRow([{ text: "" }, { text: "" }], [leftInterior, rightInterior]),
+        cellRow([{ text: "" }, { text: "" }], [leftInterior, rightInterior]),
+        [{ text: `└${dashes(leftInterior)}┴${dashes(rightInterior)}┘` }]
+      ]
+    : [
+        [{ text: `┌${dashes(leftInterior)}┐` }],
+        boxRow([{ text: " you" }], leftInterior),
+        boxRow([], leftInterior),
+        boxRow([], leftInterior),
+        [{ text: `└${dashes(leftInterior)}┘` }]
+      ]
+  const captionText =
+    choices.board === "dedicated-workspace" && choices.workspace === "dedicated"
+      ? " board + run tabs live in release-…"
+      : choices.board === "dedicated-workspace"
+        ? " the board tab lives in release-…"
+        : choices.workspace === "dedicated"
+          ? " run tabs open in release-…"
+          : ""
+  const caption: SketchPart[] = [{ text: captionText }]
 
   const lines = [
     `┌ herdr ${"─".repeat(47)}┐`,
@@ -213,8 +396,49 @@ const WIZARD_MATCHER: NodeMatcher = {
   id: "*"
 }
 
+const ROOT_MATCHER: NodeMatcher = {
+  type: "any",
+  provider: "any",
+  level: "root",
+  origin: "any",
+  id: "*"
+}
+
+const SUB_NODE_MATCHER: NodeMatcher = {
+  type: "any",
+  provider: "any",
+  level: "any",
+  origin: "any",
+  id: `*${SUB_NODE_SEPARATOR}*`
+}
+
+export function placementRulesForLayout(layout: NodeLayout): readonly PlacementRule[] {
+  if (layout === "nested") {
+    return [
+      { match: SUB_NODE_MATCHER, surface: "split" },
+      { match: WIZARD_MATCHER, surface: "tab" }
+    ]
+  }
+  if (layout === "grouped") {
+    return [
+      { match: ROOT_MATCHER, surface: "tab" },
+      { match: WIZARD_MATCHER, surface: "split" }
+    ]
+  }
+  return [{ match: WIZARD_MATCHER, surface: "tab" }]
+}
+
+export function placementGroupingForLayout(
+  layout: NodeLayout
+): UiPreferences["placement"]["grouping"] {
+  return layout === "nested"
+    ? { by: "id-prefix", separator: SUB_NODE_SEPARATOR }
+    : { by: "root-ancestor" }
+}
+
 export function wizardPlan(selections: WizardSelections, project: string | null): WizardPlan {
-  const rules: readonly PlacementRule[] = [{ match: WIZARD_MATCHER, surface: selections.surface }]
+  const rules = placementRulesForLayout(selections.layout)
+  const grouping = placementGroupingForLayout(selections.layout)
   const notifications: NotificationSelection = {
     attention: selections.notifications.attention,
     milestone: selections.notifications.milestone,
@@ -225,7 +449,7 @@ export function wizardPlan(selections: WizardSelections, project: string | null)
     placement: {
       workspace: selections.workspace,
       rules,
-      grouping: { by: "root-ancestor" },
+      grouping,
       maxSplitsPerTab: 4
     },
     completedPanes: {
@@ -238,10 +462,11 @@ export function wizardPlan(selections: WizardSelections, project: string | null)
   }
   const suffix = project === null ? "" : ` --project ${project}`
   const commands = [
-    `orchestrate ui set notifications '${JSON.stringify(notifications)}'${suffix}`,
     `orchestrate ui set placement.workspace '${JSON.stringify(selections.workspace)}'${suffix}`,
     `orchestrate ui set placement.rules '${JSON.stringify(rules)}'${suffix}`,
-    `orchestrate ui set board '${JSON.stringify(selections.board)}'${suffix}`
+    `orchestrate ui set placement.grouping '${JSON.stringify(grouping)}'${suffix}`,
+    `orchestrate ui set board '${JSON.stringify(selections.board)}'${suffix}`,
+    `orchestrate ui set notifications '${JSON.stringify(notifications)}'${suffix}`
   ]
   return { layer, commands }
 }
@@ -279,7 +504,7 @@ const CANCELLED_MESSAGE = "Wizard cancelled; no preferences were written.\n"
 
 function selectorLines(options: readonly string[], highlighted: number): readonly string[] {
   return options.map((option, index) =>
-    index === highlighted ? `  ${ANSI.inverse} ${option} ${ANSI.reset}` : `    ${option}`
+    index === highlighted ? `   ${ANSI.inverse} ${option} ${ANSI.reset}` : `    ${option}`
   )
 }
 
@@ -326,7 +551,7 @@ function renderNotificationScreen(highlighted: number): string {
   const preview =
     NOTIFICATION_PRESETS[highlighted]?.channels ?? DEFAULT_UI_PREFERENCES.notifications
   return [
-    `${ANSI.bold}Orchestrate setup · notifications (1/3)${ANSI.reset}`,
+    `${ANSI.bold}Orchestrate setup · notifications (4/5)${ANSI.reset}`,
     "",
     "How should run events reach you?",
     "",
@@ -343,7 +568,7 @@ function renderNotificationScreen(highlighted: number): string {
 
 const CHANNEL_LABELS = [
   "herdr — desktop notification",
-  "board — listed on the run board only",
+  "board — a row on the status board only",
   "silent — recorded in the journal only"
 ] as const
 
@@ -354,9 +579,10 @@ function renderCustomScreen(
 ): string {
   const candidate = withChannel(working, severity, CHANNELS[highlighted] ?? "herdr")
   return [
-    `${ANSI.bold}Orchestrate setup · notifications (1/3) · custom${ANSI.reset}`,
+    `${ANSI.bold}Orchestrate setup · notifications (4/5) · custom${ANSI.reset}`,
     "",
-    `Where do ${severity} events go?`,
+    `Where should ${severity} events go?`,
+    `${ANSI.dim}${SEVERITY_EXPLAINERS[severity]}${ANSI.reset}`,
     "",
     ...selectorLines(CHANNEL_LABELS, highlighted),
     "",
@@ -369,18 +595,32 @@ function renderCustomScreen(
 function renderPlacementScreen(
   question: PlacementQuestion,
   title: string,
+  explainer: string | null,
   options: readonly string[],
   highlighted: number,
   choices: PlacementChoices
 ): string {
+  // Each question shows only what it needs: the board question introduces the
+  // board itself, the tab question is the only one where workflow structure
+  // matters, and the two location questions share the herdr sketch.
+  const intro = question === "board" ? [renderBoardMockup(), ""] : []
+  const visuals =
+    question === "layout"
+      ? [renderDemoWorkflow(), "", renderTabMapping(choices.layout)]
+      : [renderPlacementSketch(choices, question)]
+  const step = { board: "board (1/5)", workspace: "workspace (2/5)", layout: "tabs (3/5)" }[
+    question
+  ]
   return [
-    `${ANSI.bold}Orchestrate setup · placement (2/3)${ANSI.reset}`,
+    `${ANSI.bold}Orchestrate setup · ${step}${ANSI.reset}`,
     "",
     title,
+    ...(explainer === null ? [] : [`${ANSI.dim}${explainer}${ANSI.reset}`]),
     "",
+    ...intro,
     ...selectorLines(options, highlighted),
     "",
-    renderPlacementSketch(choices, question),
+    ...visuals,
     "",
     HINT
   ].join("\n")
@@ -393,7 +633,7 @@ function renderConfirmScreen(
 ): string {
   const target = project === null ? "global preferences" : `--project ${project}`
   return [
-    `${ANSI.bold}Orchestrate setup · confirm (3/3)${ANSI.reset}`,
+    `${ANSI.bold}Orchestrate setup · confirm (5/5)${ANSI.reset}`,
     "",
     `Target: ${target}`,
     "",
@@ -405,29 +645,46 @@ function renderConfirmScreen(
   ].join("\n")
 }
 
-const WORKSPACE_OPTIONS = [
-  { label: "dedicated — runs live in their own run-<id> workspace", value: "dedicated" },
-  { label: "origin — run panes open inside the current workspace", value: "origin" }
-] as const
-
-const SURFACE_OPTIONS = [
-  { label: "tab — each node opens a new tab", value: "tab" },
-  { label: "split — nodes split the current tab (max 4 splits per tab)", value: "split" }
-] as const
-
 const BOARD_OPTIONS = [
-  { label: "split-right — board pane on the right of the grid", value: "split-right" },
-  { label: "dedicated-workspace — board in its own workspace", value: "dedicated-workspace" },
-  { label: "current-workspace — board tab in the current workspace", value: "current-workspace" }
+  {
+    label: "Next to you (default) — splits right of the pane you launch from",
+    value: "split-right"
+  },
+  { label: "A tab in your current workspace", value: "current-workspace" },
+  { label: "A tab in the run's own workspace", value: "dedicated-workspace" }
+] as const
+
+const WORKSPACE_OPTIONS = [
+  {
+    label: "Your current workspace (default) — run tabs open beside your own",
+    value: "origin"
+  },
+  {
+    label: "A workspace per run — keeps your current workspace untouched",
+    value: "dedicated"
+  }
+] as const
+
+const LAYOUT_OPTIONS = [
+  {
+    label: `A node with its sub-nodes (default) — "api--test" tucks into the "api" tab`,
+    value: "nested"
+  },
+  {
+    label: "All related nodes — descendants of one entry node, 4 splits per tab",
+    value: "grouped"
+  },
+  { label: "A single node — every node opens its own tab", value: "per-node" }
 ] as const
 
 async function askPlacement<T extends PlacementChoices[keyof PlacementChoices]>(
   io: WizardIo,
   question: PlacementQuestion,
   title: string,
+  explainer: string | null,
   options: readonly { readonly label: string; readonly value: T }[],
-  choices: PlacementChoices,
-  merge: (value: T) => PlacementChoices
+  merge: (value: T) => PlacementChoices,
+  initial = 0
 ): Promise<PlacementChoices | null> {
   const fallback = (options[0] as { readonly value: T }).value
   const picked = await select(
@@ -436,11 +693,13 @@ async function askPlacement<T extends PlacementChoices[keyof PlacementChoices]>(
       renderPlacementScreen(
         question,
         title,
+        explainer,
         options.map((option) => option.label),
         highlighted,
         merge(options[highlighted]?.value ?? fallback)
       ),
-    options.length
+    options.length,
+    initial
   )
   if (picked === null) {
     return null
@@ -453,7 +712,62 @@ export async function runWizardWithIo(
   io: WizardIo,
   apply: ApplyUiLayer = replaceUiPreferenceLayer
 ): Promise<void> {
-  // Screen 1 — notifications.
+  // Screen 1 — layout: three questions in the order a run reaches the user:
+  // the board (the first thing they see), then where the run's panes live,
+  // then how nodes share tabs. It runs before the notifications step so the
+  // board exists on screen before events route to it.
+  let choices: PlacementChoices = {
+    workspace: "origin",
+    layout: "nested",
+    board: DEFAULT_UI_PREFERENCES.board
+  }
+  const afterBoard = await askPlacement(
+    io,
+    "board",
+    "Where do you want to monitor the run?",
+    "When a run starts, orchestrate opens its status board — a live view of every node:",
+    BOARD_OPTIONS,
+    (value) => ({ ...choices, board: value })
+  )
+  if (afterBoard === null) {
+    io.print(CANCELLED_MESSAGE)
+    return
+  }
+  choices = afterBoard
+  // A dedicated board already lives in a run workspace, so lead with that
+  // answer here (still overridable).
+  const boardInRunWorkspace = choices.board === "dedicated-workspace"
+  const afterWorkspace = await askPlacement(
+    io,
+    "workspace",
+    "Where should the workflow itself run?",
+    boardInRunWorkspace
+      ? "Each node opens in its own herdr pane. Your board choice already gives each run its own workspace."
+      : "Each node opens in its own herdr pane, grouped into tabs.",
+    WORKSPACE_OPTIONS,
+    (value) => ({ ...choices, workspace: value }),
+    boardInRunWorkspace ? 1 : 0
+  )
+  if (afterWorkspace === null) {
+    io.print(CANCELLED_MESSAGE)
+    return
+  }
+  choices = afterWorkspace
+  const afterLayout = await askPlacement(
+    io,
+    "layout",
+    "What goes into one tab?",
+    `A sub-node is named "parent--sub"; an entry node has no "needs".`,
+    LAYOUT_OPTIONS,
+    (value) => ({ ...choices, layout: value })
+  )
+  if (afterLayout === null) {
+    io.print(CANCELLED_MESSAGE)
+    return
+  }
+  choices = afterLayout
+
+  // Screen 2 — notifications.
   const presetIndex = await select(io, renderNotificationScreen, NOTIFICATION_PRESETS.length)
   if (presetIndex === null) {
     io.print(CANCELLED_MESSAGE)
@@ -478,52 +792,6 @@ export async function runWizardWithIo(
     }
     notifications = working
   }
-
-  // Screen 2 — placement, three sequential questions over one sketch.
-  let choices: PlacementChoices = {
-    workspace: DEFAULT_UI_PREFERENCES.placement.workspace,
-    surface: "tab",
-    board: DEFAULT_UI_PREFERENCES.board
-  }
-  const afterWorkspace = await askPlacement(
-    io,
-    "workspace",
-    "Where do workflow runs live?",
-    WORKSPACE_OPTIONS,
-    choices,
-    (value) => ({ ...choices, workspace: value })
-  )
-  if (afterWorkspace === null) {
-    io.print(CANCELLED_MESSAGE)
-    return
-  }
-  choices = afterWorkspace
-  const afterSurface = await askPlacement(
-    io,
-    "surface",
-    "Where do nodes open?",
-    SURFACE_OPTIONS,
-    choices,
-    (value) => ({ ...choices, surface: value })
-  )
-  if (afterSurface === null) {
-    io.print(CANCELLED_MESSAGE)
-    return
-  }
-  choices = afterSurface
-  const afterBoard = await askPlacement(
-    io,
-    "board",
-    "Where does the board open?",
-    BOARD_OPTIONS,
-    choices,
-    (value) => ({ ...choices, board: value })
-  )
-  if (afterBoard === null) {
-    io.print(CANCELLED_MESSAGE)
-    return
-  }
-  choices = afterBoard
 
   // Screen 3 — confirm and apply.
   const plan = wizardPlan({ ...choices, notifications }, project)

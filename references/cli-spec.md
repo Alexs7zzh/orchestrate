@@ -43,7 +43,7 @@ with an explicit noninteractive error.
 | `ui show`    | `ui show [--origin] [--project <cwd>] [--json]`                                         | Show merged UI choices and optional origins.                                                          |
 | `ui set`     | `ui set <path> <json-value> [--project <cwd>] [--json]`                                 | Set one validated UI choice.                                                                          |
 | `ui edit`    | `ui edit [--project <cwd>] [--json]`                                                    | Edit one layer with `$EDITOR`.                                                                        |
-| `ui wizard`  | `ui wizard [--project <cwd>] [--json]`                                                  | Choose workspace, node surface, board placement, and notification routing.                            |
+| `ui wizard`  | `ui wizard [--project <cwd>] [--json]`                                                  | Choose run workspace, node layout, board placement, and notification routing.                         |
 | `ui restore` | `ui restore <run> [--json]`                                                             | Reopen the board, reconcile panes, and apply retry policy.                                            |
 | `clean`      | `clean <run> [--dry-run] [--json]`                                                      | Close panes, remove opted-in worktrees, and delete run files.                                         |
 | `clean`      | `clean --settled [--dry-run] [--json]`                                                  | Clean every settled run.                                                                              |
