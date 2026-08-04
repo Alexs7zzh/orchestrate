@@ -35,7 +35,10 @@ distributed platform, and no npm package is used. Update with `brew upgrade orch
 interactive command migrates the staged installation to the new build automatically. Migration
 waits while any run is unsettled and never runs from node completion or plugin event handling,
 shell completion, `doctor`, or non-interactive invocations — the unqualified `orchestrate setup`
-remains the explicit path. The
+remains the explicit path. The newest installation wins in both directions: an older binary never
+overwrites a newer locally staged build (a Homebrew keg's install receipt is its installation
+clock), and when the staged CLI runs first on `PATH` it adopts a newer formula found later on
+`PATH` by delegating to that formula's own setup. The
 staged wrapper delegates setup to the distinct formula executable later on `PATH`, preventing the
 prior staged build from replacing a newer formula build. Before uninstalling the formula, run
 `orchestrate setup --remove` to unlink the skill and plugin.

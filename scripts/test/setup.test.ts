@@ -10,6 +10,8 @@ import {
   readlink,
   readdir,
   rm,
+  symlink,
+  utimes,
   writeFile
 } from "node:fs/promises"
 import os from "node:os"
@@ -303,6 +305,7 @@ esac
   test("migrates a stale staged installation and is idempotent", async () => {
     setRuntimeBuildForTests("build-a")
     await runSetup({ invokedPath: executable, remove: false, dryRun: false })
+    await utimes(executable, new Date(), new Date(Date.now() + 60_000))
 
     setRuntimeBuildForTests("build-b")
     expect(await migrateStagedInstallation(executable)).toEqual({
@@ -313,13 +316,93 @@ esac
     expect(await installedBuild()).toBe("build-b")
     expect(await migrateStagedInstallation(executable)).toEqual({
       migrated: false,
-      reason: "already current"
+      reason: "no other installation"
+    })
+  })
+
+  test("defers to a newer staged installation instead of downgrading", async () => {
+    setRuntimeBuildForTests("build-a")
+    await runSetup({ invokedPath: executable, remove: false, dryRun: false })
+    await utimes(executable, new Date(), new Date(Date.now() - 60_000))
+
+    setRuntimeBuildForTests("build-b")
+    expect(await migrateStagedInstallation(executable)).toEqual({
+      migrated: false,
+      reason: "the staged installation is newer"
+    })
+    expect(await installedBuild()).toBe("build-a")
+  })
+
+  test("adopts a newer installation found on PATH using its install receipt clock", async () => {
+    setRuntimeBuildForTests("build-a")
+    await runSetup({ invokedPath: executable, remove: false, dryRun: false })
+    const stagedBinary = path.join(
+      home,
+      ".local",
+      "share",
+      "orchestrate",
+      "current",
+      "bin",
+      "orchestrate-bin"
+    )
+    const adoptLog = path.join(root, "adopt.log")
+    const keg = path.join(root, "keg")
+    const kegBinary = path.join(keg, "libexec", "bin", "orchestrate")
+    await mkdir(path.dirname(kegBinary), { recursive: true })
+    await writeFile(
+      kegBinary,
+      `#!/bin/sh
+printf '%s\\n' "$*" >> ${JSON.stringify(adoptLog)}
+case "$1" in
+  --version) printf '%s\\n' "@local/orchestrate-runtime@9.9.9+abcdef1234567890" ;;
+  setup) printf '{}\\n' ;;
+esac
+`
+    )
+    await chmod(kegBinary, 0o755)
+    const receipt = path.join(keg, "INSTALL_RECEIPT.json")
+    await writeFile(receipt, "{}\n")
+    const kegBin = path.join(root, "keg-bin")
+    await mkdir(kegBin)
+    await symlink(kegBinary, path.join(kegBin, "orchestrate"))
+    process.env.PATH = `${kegBin}:${bin}`
+
+    // The poured binary predates the stage, but the receipt is the install
+    // clock and is newer.
+    await utimes(kegBinary, new Date(), new Date(Date.now() - 120_000))
+    await utimes(receipt, new Date(), new Date(Date.now() + 60_000))
+    expect(await migrateStagedInstallation(stagedBinary)).toEqual({
+      migrated: true,
+      from: "build-a",
+      to: "@local/orchestrate-runtime@9.9.9+abcdef1234567890"
+    })
+    expect(await readFile(adoptLog, "utf8")).toContain("setup --no-wizard --json")
+
+    await utimes(receipt, new Date(), new Date(Date.now() - 60_000))
+    expect(await migrateStagedInstallation(stagedBinary)).toEqual({
+      migrated: false,
+      reason: "staged installation is newest"
+    })
+
+    const wrapperBin = path.join(root, "wrapper-bin")
+    await mkdir(wrapperBin)
+    await copyFile(
+      path.join(home, ".local", "share", "orchestrate", "current", "bin", "orchestrate"),
+      path.join(wrapperBin, "orchestrate")
+    )
+    await chmod(path.join(wrapperBin, "orchestrate"), 0o755)
+    await utimes(path.join(wrapperBin, "orchestrate"), new Date(), new Date(Date.now() + 60_000))
+    process.env.PATH = `${wrapperBin}:${bin}`
+    expect(await migrateStagedInstallation(stagedBinary)).toEqual({
+      migrated: false,
+      reason: "no other installation"
     })
   })
 
   test("defers migration while any run is unsettled or unreadable", async () => {
     setRuntimeBuildForTests("build-a")
     await runSetup({ invokedPath: executable, remove: false, dryRun: false })
+    await utimes(executable, new Date(), new Date(Date.now() + 60_000))
     setRuntimeBuildForTests("build-b")
     const runDir = path.join(home, ".local", "state", "orchestrate", "runs", "20260804-aaaaaaaa")
     await mkdir(runDir, { recursive: true })

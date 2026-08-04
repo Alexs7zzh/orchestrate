@@ -9,8 +9,10 @@ import {
   readFile,
   readlink,
   readdir,
+  realpath,
   rename,
   rm,
+  stat,
   symlink,
   writeFile
 } from "node:fs/promises"
@@ -380,6 +382,108 @@ async function allRunsSettled(): Promise<boolean> {
   return true
 }
 
+const RUNTIME_BUILD_PREFIX = "@local/orchestrate-runtime@"
+
+async function installationTimestamp(executablePath: string): Promise<number | null> {
+  const resolved = await realpath(executablePath).catch(() => executablePath)
+  // A Homebrew keg carries CI build mtimes in its poured files; the install
+  // receipt is written at install time and is the honest installation clock.
+  let directory = path.dirname(resolved)
+  for (let depth = 0; depth < 4; depth += 1) {
+    const receipt = await stat(path.join(directory, "INSTALL_RECEIPT.json")).catch(() => null)
+    if (receipt !== null) {
+      return receipt.mtimeMs
+    }
+    const parent = path.dirname(directory)
+    if (parent === directory) {
+      break
+    }
+    directory = parent
+  }
+  const info = await stat(resolved).catch(() => null)
+  return info?.mtimeMs ?? null
+}
+
+async function stagedTimestamp(): Promise<number | null> {
+  const info = await stat(path.join(stableCurrent(), "build.json")).catch(() => null)
+  return info?.mtimeMs ?? null
+}
+
+async function isStagedWrapperCopy(executablePath: string): Promise<boolean> {
+  const info = await stat(executablePath).catch(() => null)
+  if (info === null || info.size > 8_192) {
+    return false
+  }
+  const content = await readFile(executablePath, "utf8").catch(() => null)
+  return content !== null && content.includes("export ORCHESTRATE_BIN=")
+}
+
+function underAnyRoot(candidate: string, roots: readonly string[]): boolean {
+  return roots.some((root) => candidate === root || candidate.startsWith(`${root}${path.sep}`))
+}
+
+// realpath can rewrite ancestors (macOS /var -> /private/var), so staged-path
+// checks compare against the share root in both spellings.
+async function shareRoots(): Promise<readonly string[]> {
+  const root = shareRoot()
+  const resolved = await realpath(root).catch(() => root)
+  return resolved === root ? [root] : [root, resolved]
+}
+
+async function distinctPathExecutable(invokedReal: string): Promise<string | null> {
+  const roots = await shareRoots()
+  for (const directory of (process.env.PATH ?? "").split(path.delimiter)) {
+    if (directory.length === 0) {
+      continue
+    }
+    const candidate = path.join(directory, "orchestrate")
+    const executable = await access(candidate, 1).then(
+      () => true,
+      () => false
+    )
+    if (!executable) {
+      continue
+    }
+    const resolved = await realpath(candidate).catch(() => null)
+    if (resolved === null || resolved === invokedReal) {
+      continue
+    }
+    if (underAnyRoot(resolved, roots)) {
+      continue
+    }
+    if (await isStagedWrapperCopy(resolved)) {
+      continue
+    }
+    return resolved
+  }
+  return null
+}
+
+async function adoptNewerInstallation(invokedReal: string): Promise<StagedMigration> {
+  const stagedAt = await stagedTimestamp()
+  if (stagedAt === null) {
+    return { migrated: false, reason: "not installed" }
+  }
+  const candidate = await distinctPathExecutable(invokedReal)
+  if (candidate === null) {
+    return { migrated: false, reason: "no other installation" }
+  }
+  const candidateAt = await installationTimestamp(candidate)
+  if (candidateAt === null || candidateAt <= stagedAt) {
+    return { migrated: false, reason: "staged installation is newest" }
+  }
+  const version = (await runCommandOutput(candidate, ["--version"]).catch(() => "")).trim()
+  if (!version.startsWith(RUNTIME_BUILD_PREFIX) || version === runtimeBuild()) {
+    return { migrated: false, reason: "no newer installation" }
+  }
+  if (!(await allRunsSettled())) {
+    return { migrated: false, reason: "unsettled runs" }
+  }
+  // The newer executable stages itself so its build metadata is authentic.
+  await runCommandOutput(candidate, ["setup", "--no-wizard", "--json"])
+  return { migrated: true, from: runtimeBuild(), to: version }
+}
+
 export async function migrateStagedInstallation(invokedPath: string): Promise<StagedMigration> {
   const current = runtimeBuild()
   if (current.endsWith("+development")) {
@@ -389,18 +493,28 @@ export async function migrateStagedInstallation(invokedPath: string): Promise<St
   if (staged === null) {
     return { migrated: false, reason: "not installed" }
   }
-  if (staged === current) {
-    return { migrated: false, reason: "already current" }
-  }
   const requested = path.resolve(invokedPath)
   const invoked =
     (await lstat(requested).then(
       () => requested,
       () => null
     )) ?? process.execPath
-  const root = shareRoot()
-  if (invoked === root || invoked.startsWith(`${root}${path.sep}`)) {
+  const invokedReal = await realpath(invoked).catch(() => invoked)
+  if (staged === current) {
+    // The stage matches this binary; a newer installation elsewhere on PATH
+    // may still supersede both.
+    return adoptNewerInstallation(invokedReal)
+  }
+  if (underAnyRoot(invokedReal, await shareRoots())) {
     return { migrated: false, reason: "invoked the staged build" }
+  }
+  // The newest installation wins in both directions: an older binary never
+  // replaces a newer stage, so a fresh local install survives running a
+  // leftover formula build and vice versa.
+  const invokedAt = await installationTimestamp(invokedReal)
+  const stagedAt = await stagedTimestamp()
+  if (invokedAt !== null && stagedAt !== null && invokedAt <= stagedAt) {
+    return { migrated: false, reason: "the staged installation is newer" }
   }
   if (!(await allRunsSettled())) {
     return { migrated: false, reason: "unsettled runs" }
