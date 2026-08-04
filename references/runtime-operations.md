@@ -73,7 +73,9 @@ tree. The run is dormant until a later explicit reconcile consumes them. `status
 `events --follow` observe filesystem changes but do not schedule work.
 
 Agent launch creates one implicit channel rooted at the exact token-addressed attempt submission
-directory. Codex expresses that allowance as a launcher-owned permission profile. Claude runs from
+directory. Codex expresses that allowance as a launcher-owned permission profile. Claude expresses
+it as a launcher-owned settings file inside the attempt transport directory — provider
+configuration never rides the typed launch line, whose PTY input buffer is capped — and runs from
 that exact directory under `dontAsk`, `--safe-mode`, sandboxed Bash only, exact completion rules,
 and a required native sandbox with unsandboxed fallback disabled; only canonical declared source
 prefixes are added as sandbox writes. Provider panes receive no write

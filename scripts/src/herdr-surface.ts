@@ -564,18 +564,17 @@ function codexArguments(
   return args
 }
 
-function claudeArguments(
+function claudeSettingsDocument(
   node: Extract<AgentNode, { readonly provider: "claude" }>,
-  source: string | null,
   state: RunState,
   intent: SpawnIntent,
   submissionDirectory: string,
   sourceRoot: string
-) {
+): string {
   const writeRoots = providerWriteRoots(node, sourceRoot)
   const protectedPaths = orchestrateAuthorityPaths()
   const protectedWritePaths = protectedPaths.filter((candidate) => candidate !== submissionsRoot())
-  const settings = JSON.stringify({
+  return JSON.stringify({
     permissions: {
       allow: [
         claudeNodeDoneRule(state, intent, "completed"),
@@ -597,18 +596,24 @@ function claudeArguments(
       }
     }
   })
+}
+
+// The launch command is typed into a PTY whose canonical-mode input buffer
+// caps a line at 1024 bytes, so all provider configuration must live in
+// files; only short flags may appear on the command line itself.
+function claudeArguments(
+  node: Extract<AgentNode, { readonly provider: "claude" }>,
+  source: string | null,
+  settingsPath: string
+) {
   const args: string[] = [
     "--safe-mode",
     "--settings",
-    settings,
+    settingsPath,
     "--permission-mode",
     "dontAsk",
     "--tools",
-    "Bash",
-    "--allowedTools",
-    claudeNodeDoneRule(state, intent, "completed"),
-    claudeNodeDoneRule(state, intent, "completed", true),
-    claudeNodeDoneRule(state, intent, "failed")
+    "Bash"
   ]
   if (node.model !== "provider-default") {
     args.push("--model", node.model)
@@ -637,8 +642,13 @@ async function prepareProviderLaunch(
   const source = sourceSession(node, state)
   const transportDirectory = path.dirname(attemptFor(state, intent).resultPath)
   if (node.provider === "claude") {
+    const settingsPath = path.join(transportDirectory, "claude-settings.json")
+    await atomicWriteFile(
+      settingsPath,
+      claudeSettingsDocument(node, state, intent, transportDirectory, sourceRoot)
+    )
     return {
-      args: claudeArguments(node, source, state, intent, transportDirectory, sourceRoot)
+      args: claudeArguments(node, source, settingsPath)
     }
   }
   const profile = codexControlProfile(paneId)

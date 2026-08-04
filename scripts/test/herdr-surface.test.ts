@@ -842,24 +842,33 @@ describe("herdr surface", () => {
       "runs",
       runState.id
     )
-    expect(log).toContain("--safe-mode --settings")
-    expect(log).toContain('"failIfUnavailable":true')
-    expect(log).toContain('"allowUnsandboxedCommands":false')
-    expect(log).toContain(`"allowRead":[${JSON.stringify(submissionDirectory)}]`)
-    expect(log).toContain(JSON.stringify(canonicalSubmissionsRoot))
+    const settingsPath = path.join(submissionDirectory, "claude-settings.json")
+    const settings = await readFile(settingsPath, "utf8")
+    expect(log).toContain(`--safe-mode --settings ${settingsPath}`)
     expect(log).toContain("--permission-mode dontAsk")
     expect(log).toContain("--tools Bash")
+    // The PTY input line caps at 1024 bytes, so every launch stays typed
+    // configuration-free: settings live in the file, never inline.
+    expect(log).not.toContain("--allowedTools")
+    expect(log).not.toContain('"failIfUnavailable"')
+    const startLine = log.split("\n").find((line) => line.startsWith("agent start"))
+    expect(startLine).toBeDefined()
+    expect((startLine as string).length).toBeLessThan(1_024)
+    expect(settings).toContain('"failIfUnavailable":true')
+    expect(settings).toContain('"allowUnsandboxedCommands":false')
+    expect(settings).toContain(`"allowRead":[${JSON.stringify(submissionDirectory)}]`)
+    expect(settings).toContain(JSON.stringify(canonicalSubmissionsRoot))
     expect(log).not.toContain(`--add-dir ${submissionDirectory}`)
     expect(log).toContain(`--cwd ${canonicalSubmissionDirectory}`)
-    expect(log).not.toContain(`Edit(${submissionDirectory}/**)`)
+    expect(settings).not.toContain(`Edit(${submissionDirectory}/**)`)
     expect(log).not.toContain(`--add-dir ${authoritativeRunDirectory}`)
-    expect(log).toContain(
+    expect(settings).toContain(
       `Bash('/tmp/orchestrate' 'node-done' '${runState.id}' '${node.id}' '--token' 'token-1' '--outcome' 'completed')`
     )
-    expect(log).toContain(
+    expect(settings).toContain(
       `Bash('/tmp/orchestrate' 'node-done' '${runState.id}' '${node.id}' '--token' 'token-1' '--outcome' 'failed')`
     )
-    expect(log).toContain(
+    expect(settings).toContain(
       `Bash('/tmp/orchestrate' 'node-done' '${runState.id}' '${node.id}' '--token' 'token-1' '--outcome' 'completed' '--hold')`
     )
     expect(log).not.toContain(`--add-dir ${process.env.ORCHESTRATE_STATE_DIR} `)
