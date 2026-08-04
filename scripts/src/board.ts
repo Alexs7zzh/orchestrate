@@ -222,8 +222,16 @@ export function renderBoardFrame(
     if (row.kind === "repeat-round") {
       const bound =
         row.maxRounds === null ? `round ${row.round}` : `round ${row.round}/${row.maxRounds}`
+      const backTo = row.backTo.length === 0 ? "loop start" : row.backTo.join(" + ")
       lines.push(
-        `${"  ".repeat(row.depth)}↻ ${row.repeatId}  ${bound}${row.until === null ? "" : `  ${row.until}`}`
+        `${"  ".repeat(row.depth)}↻ ${row.repeatId}  ${bound} — back to ${backTo}${row.until === null ? "" : ` ${row.until}`}`
+      )
+      continue
+    }
+    if (row.kind === "unrolled-repeat") {
+      const backTo = row.backTo.length === 0 ? "loop start" : row.backTo.join(" + ")
+      lines.push(
+        `${"  ".repeat(row.depth)}↻ ${row.label}  round ${row.round}/${row.maxRounds} — back to ${backTo}${row.until === null ? ` for up to ${row.maxRounds} rounds` : ` ${row.until}`}`
       )
       continue
     }
@@ -248,7 +256,7 @@ export function renderBoardFrame(
       : ` ${node.continuationGlyph}`
     rowNodeIds[lines.length] = node.id
     lines.push(
-      `${prefix} ${"  ".repeat(node.depth)}${node.glyph} ${node.id}  ${node.status}${dependencyRelease}  ${duration(node.elapsedMs)}${stalled}`
+      `${prefix} ${"  ".repeat(row.depth)}${node.glyph} ${node.id}  ${node.status}${dependencyRelease}  ${duration(node.elapsedMs)}${stalled}`
     )
   }
   lines.push("", "↑/↓ select  enter open  p pause/resume  h hold/release  s stop  q quit")
@@ -387,14 +395,13 @@ async function runInteractiveBoard(runDir: string, renderer: CliRenderer): Promi
         if (closed || renderer.isDestroyed) {
           return
         }
+        const workflow = await readWorkflow(runDir).catch(() => null)
         model = buildBoardModel(state, await readEvents(runDir), {
           now: new Date().toISOString(),
           paneGarnish: await observePaneGarnish(state, surface),
           // Re-read per refresh: an approved revision can change repeats.
-          repeats: await readWorkflow(runDir).then(
-            (workflow) => workflow.repeats,
-            () => []
-          )
+          repeats: workflow?.repeats ?? [],
+          workflowNodes: workflow?.nodes ?? []
         })
         const staged = await installedBuild()
         if (closed || renderer.isDestroyed) {

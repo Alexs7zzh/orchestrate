@@ -1382,7 +1382,8 @@ export async function runCli(
     const model = buildBoardModel(state, await readEvents(runDir), {
       now: new Date().toISOString(),
       paneGarnish,
-      repeats: boardWorkflow?.repeats ?? []
+      repeats: boardWorkflow?.repeats ?? [],
+      workflowNodes: boardWorkflow?.nodes ?? []
     })
     output(
       json,

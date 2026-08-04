@@ -8,7 +8,8 @@ import type {
   Provider,
   RepeatCondition,
   RepeatSpec,
-  RunState
+  RunState,
+  WorkflowNode
 } from "./types.js"
 
 import { holdBlocksDependencies } from "./state.js"
@@ -28,6 +29,11 @@ export interface BoardModelOptions {
   // Repeat bounds and conditions live only in the workflow spec; without them
   // the board still renders rounds, just without the "round R/N — until" line.
   readonly repeats?: readonly RepeatSpec[]
+  // Authored nodes let the board recognize legacy workflows that copied
+  // round-shaped nodes instead of declaring a repeat. Runtime state alone
+  // intentionally does not carry output schemas, which supply the best
+  // available convergence label for those workflows.
+  readonly workflowNodes?: readonly WorkflowNode[]
 }
 
 export interface AttemptMetric {
@@ -93,9 +99,25 @@ export interface BoardRepeatRoundRow {
   readonly round: number
   readonly maxRounds: number | null
   readonly until: string | null
+  readonly backTo: readonly string[]
 }
 
-export type BoardRow = BoardNodeRow | BoardRepeatHistoryRow | BoardRepeatRoundRow
+export interface BoardUnrolledRepeatRow {
+  readonly kind: "unrolled-repeat"
+  readonly key: string
+  readonly depth: number
+  readonly label: string
+  readonly round: number
+  readonly maxRounds: number
+  readonly until: string | null
+  readonly backTo: readonly string[]
+}
+
+export type BoardRow =
+  | BoardNodeRow
+  | BoardRepeatHistoryRow
+  | BoardRepeatRoundRow
+  | BoardUnrolledRepeatRow
 
 interface AttentionBase {
   readonly title: string
@@ -480,31 +502,311 @@ function repeatConditionText(condition: RepeatCondition): string {
   return `until ${condition.node} reports ${field.length === 0 ? "its result" : field} = ${JSON.stringify(condition.equals)}`
 }
 
+interface ParsedUnrolledRound {
+  readonly id: string
+  readonly normalizedId: string
+  readonly round: number
+  readonly authoredIndex: number
+}
+
+interface UnrolledRoundGroup {
+  readonly key: string
+  readonly label: string
+  readonly normalizedIds: readonly string[]
+  readonly rounds: readonly number[]
+  readonly members: readonly ParsedUnrolledRound[]
+}
+
+function parseUnrolledRoundId(id: string, authoredIndex: number): ParsedUnrolledRound | null {
+  const segments = id.split("-")
+  let parsed: {
+    readonly index: number
+    readonly prefix: string
+    readonly marker: string
+    readonly round: number
+  } | null = null
+  for (const [index, segment] of segments.entries()) {
+    const match = /^(.*?)(r(?:ound)?)([1-9][0-9]*)$/.exec(segment)
+    if (match === null) {
+      continue
+    }
+    const prefix = match[1] ?? ""
+    const marker = match[2] ?? ""
+    // Avoid treating ordinary ids such as "server1" as round notation. The
+    // compact s1r1 form is accepted because the prefix itself ends in a digit.
+    if (marker !== "round" && prefix.length > 0 && !/[0-9]$/.test(prefix)) {
+      continue
+    }
+    if (parsed !== null) {
+      return null
+    }
+    parsed = { index, prefix, marker, round: Number(match[3]) }
+  }
+  if (parsed === null) {
+    return null
+  }
+  segments[parsed.index] = `${parsed.prefix}${parsed.marker}#`
+  return { id, normalizedId: segments.join("-"), round: parsed.round, authoredIndex }
+}
+
+function sameNumbers(left: readonly number[], right: readonly number[]): boolean {
+  return left.length === right.length && left.every((value, index) => value === right[index])
+}
+
+function commonPrefix(values: readonly string[]): string {
+  const first = values[0] ?? ""
+  let length = first.length
+  for (const value of values.slice(1)) {
+    while (length > 0 && !value.startsWith(first.slice(0, length))) {
+      length -= 1
+    }
+  }
+  return first.slice(0, length)
+}
+
+// Some pre-repeat workflows copied an isomorphic multi-node round several
+// times so resumed provider sessions could remain explicit. Collapse only
+// exact, connected copies: ids must differ by one round token, every member
+// must exist in every consecutive round, and same-round dependencies must be
+// identical after normalizing that token. This deliberately avoids guessing
+// from titles or prompts.
+function unrolledRoundGroups(
+  workflowNodes: readonly WorkflowNode[]
+): readonly UnrolledRoundGroup[] {
+  const parsed = workflowNodes.flatMap((node, index) => {
+    const value = parseUnrolledRoundId(node.id, index)
+    return value === null ? [] : [value]
+  })
+  const parsedById = new Map(parsed.map((value) => [value.id, value]))
+  const nodesById = new Map(workflowNodes.map((node) => [node.id, node]))
+  const buckets = new Map<string, ParsedUnrolledRound[]>()
+  for (const value of parsed) {
+    const bucket = buckets.get(value.normalizedId) ?? []
+    bucket.push(value)
+    buckets.set(value.normalizedId, bucket)
+  }
+  const candidateKeys = new Set(
+    [...buckets]
+      .filter(([, members]) => {
+        const rounds = [...new Set(members.map((member) => member.round))].toSorted(
+          (left, right) => left - right
+        )
+        return (
+          rounds.length >= 2 &&
+          rounds.every((round, index) => index === 0 || round === (rounds[index - 1] ?? 0) + 1)
+        )
+      })
+      .map(([key]) => key)
+  )
+  const adjacent = new Map([...candidateKeys].map((key) => [key, new Set<string>()]))
+  for (const value of parsed) {
+    if (!candidateKeys.has(value.normalizedId)) {
+      continue
+    }
+    const node = nodesById.get(value.id)
+    for (const dependency of node?.needs ?? []) {
+      const parsedDependency = parsedById.get(dependency)
+      if (
+        parsedDependency === undefined ||
+        parsedDependency.round !== value.round ||
+        !candidateKeys.has(parsedDependency.normalizedId) ||
+        parsedDependency.normalizedId === value.normalizedId
+      ) {
+        continue
+      }
+      adjacent.get(value.normalizedId)?.add(parsedDependency.normalizedId)
+      adjacent.get(parsedDependency.normalizedId)?.add(value.normalizedId)
+    }
+  }
+
+  const seen = new Set<string>()
+  const groups: UnrolledRoundGroup[] = []
+  for (const start of candidateKeys) {
+    if (seen.has(start)) {
+      continue
+    }
+    const pending = [start]
+    const component: string[] = []
+    while (pending.length > 0) {
+      const key = pending.pop()
+      if (key === undefined || seen.has(key)) {
+        continue
+      }
+      seen.add(key)
+      component.push(key)
+      pending.push(...(adjacent.get(key) ?? []))
+    }
+    if (component.length < 2) {
+      continue
+    }
+    component.sort(
+      (left, right) =>
+        (buckets.get(left)?.[0]?.authoredIndex ?? 0) - (buckets.get(right)?.[0]?.authoredIndex ?? 0)
+    )
+    const rounds = [
+      ...new Set((buckets.get(component[0] ?? "") ?? []).map((item) => item.round))
+    ].toSorted((left, right) => left - right)
+    if (
+      !component.every((key) => {
+        const memberRounds = [
+          ...new Set((buckets.get(key) ?? []).map((item) => item.round))
+        ].toSorted((left, right) => left - right)
+        return sameNumbers(rounds, memberRounds)
+      })
+    ) {
+      continue
+    }
+    const componentSet = new Set(component)
+    const dependencyShapesMatch = component.every((key) => {
+      const signatures = (buckets.get(key) ?? []).map((member) =>
+        (nodesById.get(member.id)?.needs ?? [])
+          .flatMap((dependency) => {
+            const parsedDependency = parsedById.get(dependency)
+            return parsedDependency !== undefined &&
+              parsedDependency.round === member.round &&
+              componentSet.has(parsedDependency.normalizedId)
+              ? [parsedDependency.normalizedId]
+              : []
+          })
+          .toSorted()
+          .join("\n")
+      )
+      return signatures.every((signature) => signature === signatures[0])
+    })
+    if (!dependencyShapesMatch) {
+      continue
+    }
+    const prefix = commonPrefix(component)
+    const roundMarker = prefix.lastIndexOf("r#")
+    const label = (roundMarker < 0 ? prefix : prefix.slice(0, roundMarker)).replace(/[-_.]+$/, "")
+    groups.push({
+      key: component.join("|"),
+      label: label.length === 0 ? "rounds" : label,
+      normalizedIds: component,
+      rounds,
+      members: component
+        .flatMap((key) => buckets.get(key) ?? [])
+        .toSorted((left, right) => left.authoredIndex - right.authoredIndex)
+    })
+  }
+  return groups.toSorted(
+    (left, right) => (left.members[0]?.authoredIndex ?? 0) - (right.members[0]?.authoredIndex ?? 0)
+  )
+}
+
+function schemaRequiresDone(node: WorkflowNode | undefined): boolean {
+  if (node?.type !== "agent" || node.output.format !== "json" || node.output.schema === null) {
+    return false
+  }
+  const required = node.output.schema["required"]
+  return Array.isArray(required) && required.includes("done")
+}
+
 function visibleRows(
   nodes: readonly BoardNodeView[],
-  repeats: readonly RepeatSpec[]
+  repeats: readonly RepeatSpec[],
+  workflowNodes: readonly WorkflowNode[]
 ): readonly BoardRow[] {
   const rows: BoardRow[] = []
   const emittedHistory = new Set<string>()
   const emittedRounds = new Set<string>()
+  const repeatMembers = new Map(
+    [...new Set(nodes.flatMap((node) => (node.repeatId === null ? [] : [node.repeatId])))].map(
+      (repeatId) => [repeatId, nodes.filter((node) => node.repeatId === repeatId)] as const
+    )
+  )
+  const manualGroups = unrolledRoundGroups(workflowNodes)
+  const manualByMember = new Map(
+    manualGroups.flatMap((group) => group.members.map((member) => [member.id, group] as const))
+  )
+  const workflowById = new Map(workflowNodes.map((node) => [node.id, node]))
+  const activeManualRounds = new Map(
+    manualGroups.map((group) => {
+      const active =
+        group.rounds.find((round) =>
+          group.members
+            .filter((member) => member.round === round)
+            .some((member) => nodes.find((node) => node.id === member.id)?.status !== "completed")
+        ) ??
+        group.rounds.at(-1) ??
+        1
+      return [group.key, active] as const
+    })
+  )
+  const lastActiveManualMember = new Map(
+    manualGroups.map((group) => {
+      const active = activeManualRounds.get(group.key)
+      const ids = group.members
+        .filter((member) => member.round === active)
+        .map((member) => member.id)
+      return [group.key, nodes.findLast((node) => ids.includes(node.id))?.id ?? ids.at(-1)] as const
+    })
+  )
   for (const node of nodes) {
-    if (node.repeatId !== null && node.round !== null && !emittedRounds.has(node.repeatId)) {
-      emittedRounds.add(node.repeatId)
-      const members = nodes.filter((candidate) => candidate.repeatId === node.repeatId)
-      const currentRound = members.find((candidate) => candidate.currentRound)?.round ?? node.round
-      const spec = repeats.find((candidate) => candidate.id === node.repeatId)
-      rows.push({
-        kind: "repeat-round",
-        key: `${node.repeatId}:round`,
-        depth: Math.min(...members.map((candidate) => candidate.depth)),
-        repeatId: node.repeatId,
-        round: currentRound,
-        maxRounds: spec?.maxRounds ?? null,
-        until: spec === undefined ? null : repeatConditionText(spec.until)
-      })
+    const manualGroup = manualByMember.get(node.id)
+    if (manualGroup !== undefined) {
+      const activeRound = activeManualRounds.get(manualGroup.key)
+      const member = manualGroup.members.find((candidate) => candidate.id === node.id)
+      if (member?.round !== activeRound) {
+        continue
+      }
+      rows.push({ kind: "node", key: node.id, depth: 1, node })
+      if (lastActiveManualMember.get(manualGroup.key) === node.id) {
+        const firstRound = manualGroup.rounds[0] ?? activeRound ?? 1
+        const firstRoundMembers = manualGroup.members.filter(
+          (candidate) => candidate.round === firstRound
+        )
+        const firstRoundIds = new Set(firstRoundMembers.map((candidate) => candidate.id))
+        const backTo = firstRoundMembers
+          .filter(
+            (candidate) =>
+              !(workflowById.get(candidate.id)?.needs ?? []).some((dependency) =>
+                firstRoundIds.has(dependency)
+              )
+          )
+          .map((candidate) => candidate.id)
+        const verdict = firstRoundMembers.find((candidate) =>
+          schemaRequiresDone(workflowById.get(candidate.id))
+        )
+        rows.push({
+          kind: "unrolled-repeat",
+          key: `${manualGroup.key}:loop`,
+          depth: 1,
+          label: manualGroup.label,
+          round: activeRound ?? firstRound,
+          maxRounds: manualGroup.rounds.at(-1) ?? firstRound,
+          until: verdict === undefined ? null : `until ${verdict.id} reports done = true`,
+          backTo
+        })
+      }
+      continue
     }
     if (node.repeatId === null || node.round === null || node.currentRound) {
-      rows.push({ kind: "node", key: node.id, depth: node.depth, node })
+      const exitsManualGroup = node.needs.some((dependency) => manualByMember.has(dependency))
+      rows.push({ kind: "node", key: node.id, depth: exitsManualGroup ? 0 : node.depth, node })
+      if (node.repeatId !== null && node.round !== null) {
+        const members = repeatMembers.get(node.repeatId) ?? []
+        const currentMembers = members.filter((candidate) => candidate.currentRound)
+        if (currentMembers.at(-1)?.id === node.id && !emittedRounds.has(node.repeatId)) {
+          emittedRounds.add(node.repeatId)
+          const spec = repeats.find((candidate) => candidate.id === node.repeatId)
+          const currentIds = new Set(currentMembers.map((candidate) => candidate.id))
+          rows.push({
+            kind: "repeat-round",
+            key: `${node.repeatId}:round`,
+            depth: Math.min(...members.map((candidate) => candidate.depth)),
+            repeatId: node.repeatId,
+            round: node.round,
+            maxRounds: spec?.maxRounds ?? null,
+            until: spec === undefined ? null : repeatConditionText(spec.until),
+            backTo: currentMembers
+              .filter(
+                (candidate) => !candidate.needs.some((dependency) => currentIds.has(dependency))
+              )
+              .map((candidate) => candidate.templateId)
+          })
+        }
+      }
       continue
     }
     const key = `${node.repeatId}:r${node.round}`
@@ -571,7 +873,7 @@ export function buildBoardModel(
       stalledPane: stalledPane(state, node, options.paneGarnish?.[node.id])
     }
   })
-  const rows = visibleRows(nodes, options.repeats ?? [])
+  const rows = visibleRows(nodes, options.repeats ?? [], options.workflowNodes ?? [])
   return {
     run: {
       id: state.id,

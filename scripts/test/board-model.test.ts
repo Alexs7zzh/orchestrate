@@ -1,6 +1,14 @@
 import { describe, expect, test } from "bun:test"
 
-import type { AttemptState, EventRecord, NodeRunState, NodeStatus, RunState } from "../src/types.js"
+import type {
+  AgentNode,
+  AttemptState,
+  EventRecord,
+  NodeRunState,
+  NodeStatus,
+  RunState,
+  WorkflowNode
+} from "../src/types.js"
 
 import {
   buildBoardModel,
@@ -69,6 +77,43 @@ function node(id: string, status: NodeStatus, overrides: Partial<NodeRunState> =
     result: null,
     error: status === "failed" ? "failed" : null,
     ...overrides
+  }
+}
+
+function workflowAgent(
+  id: string,
+  needs: readonly string[] = [],
+  output: AgentNode["output"] = { format: "text", schema: null }
+): WorkflowNode {
+  return {
+    id,
+    type: "agent",
+    title: id,
+    needs,
+    cwd: null,
+    workspace: {
+      mode: "shared",
+      path: null,
+      vcs: "none",
+      writes: [],
+      exclusiveResources: []
+    },
+    inputs: [],
+    retry: { maxAttempts: 1 },
+    gate: "none",
+    provider: "codex",
+    model: "provider-default",
+    effort: null,
+    prompt: `Work on ${id}.`,
+    session: { mode: "fresh", from: null, saveAs: null },
+    permissions: {
+      execution: { sandbox: "read-only" },
+      escalation: "deny",
+      extraArgs: [],
+      inheritEnv: [],
+      env: {}
+    },
+    output
   }
 }
 
@@ -356,24 +401,25 @@ describe("board view model", () => {
     expect(model.nodes.find((value) => value.id === "review--r2")?.needs).toEqual(["draft--r2"])
     expect(model.nodes.find((value) => value.id === "after")?.needs).toEqual(["review--r2"])
     expect(model.rows.map((row) => [row.kind, row.key])).toEqual([
-      ["repeat-round", "loop:round"],
       ["repeat-history", "loop:r1"],
       ["node", "draft--r2"],
       ["node", "review--r2"],
+      ["repeat-round", "loop:round"],
       ["node", "after"]
     ])
-    expect(model.rows[0]).toEqual({
+    expect(model.rows[3]).toEqual({
       kind: "repeat-round",
       key: "loop:round",
       depth: 0,
       repeatId: "loop",
       round: 2,
       maxRounds: 3,
-      until: "until review reports agree = true"
+      until: "until review reports agree = true",
+      backTo: ["draft"]
     })
     expect(model.selectableNodeIds).toEqual(["draft--r2", "review--r2", "after"])
     expect(renderBoardFrame(model, null).text).toContain(
-      "↻ loop  round 2/3  until review reports agree = true"
+      "↻ loop  round 2/3 — back to draft until review reports agree = true"
     )
 
     const commandUntil = buildBoardModel(loopState, [], {
@@ -387,11 +433,87 @@ describe("board view model", () => {
         }
       ]
     })
-    expect(commandUntil.rows[0]).toMatchObject({ until: "until review succeeds" })
+    expect(commandUntil.rows[3]).toMatchObject({ until: "until review succeeds" })
 
     const withoutSpec = buildBoardModel(loopState, [], { now: NOW })
-    expect(withoutSpec.rows[0]).toMatchObject({ round: 2, maxRounds: null, until: null })
-    expect(renderBoardFrame(withoutSpec, null).text).toContain("↻ loop  round 2\n")
+    expect(withoutSpec.rows[3]).toMatchObject({ round: 2, maxRounds: null, until: null })
+    expect(renderBoardFrame(withoutSpec, null).text).toContain("↻ loop  round 2 — back to draft\n")
+  })
+
+  test("folds hand-unrolled rounds into one body with an explicit return condition", () => {
+    const authored: WorkflowNode[] = []
+    const runtime: NodeRunState[] = []
+    for (const round of [1, 2]) {
+      const prefix = `s1r${round}`
+      const previousBuild = round === 1 ? [] : [`s1r${round - 1}-build`]
+      const definitions = [
+        workflowAgent(`${prefix}-review-codex`, previousBuild),
+        workflowAgent(`${prefix}-review-claude`, previousBuild),
+        workflowAgent(`${prefix}-debate`, [`${prefix}-review-codex`, `${prefix}-review-claude`]),
+        workflowAgent(`${prefix}-verdict`, [`${prefix}-debate`], {
+          format: "json",
+          schema: { type: "object", required: ["done"] }
+        }),
+        workflowAgent(`${prefix}-fix`, [`${prefix}-verdict`]),
+        workflowAgent(`${prefix}-build`, [`${prefix}-fix`])
+      ]
+      authored.push(...definitions)
+      runtime.push(
+        ...definitions.map((definition) =>
+          node(definition.id, "pending", { needs: definition.needs })
+        )
+      )
+    }
+    authored.push(workflowAgent("s1-gate", ["s1r2-build"]))
+    runtime.push(node("s1-gate", "pending", { needs: ["s1r2-build"] }))
+
+    const model = buildBoardModel(state(runtime), [], {
+      now: NOW,
+      workflowNodes: authored
+    })
+    expect(model.rows.map((row) => row.key)).toEqual([
+      "s1r1-review-codex",
+      "s1r1-review-claude",
+      "s1r1-debate",
+      "s1r1-verdict",
+      "s1r1-fix",
+      "s1r1-build",
+      "s1r#-review-codex|s1r#-review-claude|s1r#-debate|s1r#-verdict|s1r#-fix|s1r#-build:loop",
+      "s1-gate"
+    ])
+    expect(model.rows.at(-2)).toMatchObject({
+      kind: "unrolled-repeat",
+      label: "s1",
+      round: 1,
+      maxRounds: 2,
+      backTo: ["s1r1-review-codex", "s1r1-review-claude"],
+      until: "until s1r1-verdict reports done = true"
+    })
+    const frame = renderBoardFrame(model, null).text
+    expect(frame).toContain(
+      "↻ s1  round 1/2 — back to s1r1-review-codex + s1r1-review-claude until s1r1-verdict reports done = true"
+    )
+    expect(frame).not.toContain("s1r2-review-codex")
+    expect(frame).not.toContain("s1r2-build")
+    expect(frame).toContain("\n  ○ s1-gate")
+
+    const advanced = buildBoardModel(
+      state(
+        runtime.map((runtimeNode) =>
+          runtimeNode.id.startsWith("s1r1-")
+            ? node(runtimeNode.id, "completed", { needs: runtimeNode.needs })
+            : runtimeNode
+        )
+      ),
+      [],
+      { now: NOW, workflowNodes: authored }
+    )
+    const advancedFrame = renderBoardFrame(advanced, null).text
+    expect(advancedFrame).toContain("s1r2-review-codex")
+    expect(
+      advanced.rows.some((row) => row.kind === "node" && row.node.id === "s1r1-review-codex")
+    ).toBe(false)
+    expect(advancedFrame).toContain("↻ s1  round 2/2")
   })
 
   test("treats stale-pane data as garnish only and gives agent panes a manual command", () => {

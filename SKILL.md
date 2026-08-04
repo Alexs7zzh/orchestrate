@@ -58,9 +58,10 @@ Use Orchestrate only when the task is materially clearer or safer as an explicit
   worktrees, include `{{nodeId}}` in both the branch and any explicit path.
 - Express iteration as a `repeat`: ordered members, a bounded `maxRounds`, and an objective
   `until` condition — a command's success or a named field in a verdict node's JSON result. Never
-  unroll rounds into copied nodes; the board folds repeat rounds into one aligned group, while
-  copies render as an ever-deepening chain. Round extensions and acceptance are explicit human
-  decisions.
+  unroll rounds into copied nodes; declared repeats keep execution and presentation semantics
+  aligned. The board also folds exact connected copies from legacy workflows into one active-round
+  body with a loop-back footer, but that display compatibility does not add runtime repeat semantics.
+  Round extensions and acceptance are explicit human decisions.
 - Holds control dependency release. Pausing prevents new panes but lets running panes finish.
   Stopping closes live panes and settles the run.
 - A human pause or stop does not prompt the launching agent. Completion, exhausted failure, gates,
