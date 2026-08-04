@@ -3,7 +3,7 @@ name: Build release artifacts
 on:
   push:
     tags:
-      - "orchestrate-*"
+      - "v*"
 
 permissions:
   contents: read
@@ -40,8 +40,8 @@ jobs:
         id: version
         run: |
           test "$GITHUB_REF_TYPE" = tag
-          case "$GITHUB_REF_NAME" in orchestrate-*) ;; *) echo "Release tag must be orchestrate-<semver>." >&2; exit 1 ;; esac
-          VERSION="${GITHUB_REF_NAME#orchestrate-}"
+          case "$GITHUB_REF_NAME" in v*) ;; *) echo "Release tag must be v<semver>." >&2; exit 1 ;; esac
+          VERSION="${GITHUB_REF_NAME#v}"
           ORCHESTRATE_TAG_VERSION="$VERSION" bun -e 'import { assertReleaseVersion } from "./scripts/src/semver.ts"; assertReleaseVersion(process.env.ORCHESTRATE_TAG_VERSION ?? "")'
           echo "ORCHESTRATE_RELEASE_VERSION=$VERSION" >> "$GITHUB_ENV"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"

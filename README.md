@@ -203,11 +203,11 @@ Normal pushes to `main` run CI but do not build or publish a release. Start a re
 annotated or signed strict-SemVer tag that points to a commit on `main`:
 
 ```bash
-git tag -a orchestrate-0.2.0 -m "Orchestrate 0.2.0"
-git push origin orchestrate-0.2.0
+git tag -a v0.2.0 -m "Orchestrate 0.2.0"
+git push origin v0.2.0
 ```
 
-The tag workflow derives one version from `orchestrate-<semver>`, verifies the exact tagged source,
+The tag workflow derives one version from `v<semver>`, verifies the exact tagged source,
 builds the macOS ARM64 payload, and creates a draft GitHub Release with the archive, checksum, and
 rendered Homebrew formula attached. Review those assets and generated notes in GitHub, then publish
 the draft manually. Release binaries and the generated `scripts/orchestrate.mjs` bundle are not

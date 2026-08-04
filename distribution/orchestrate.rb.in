@@ -2,7 +2,7 @@ class Orchestrate < Formula
   desc "Run validated agent workflow graphs in herdr panes"
   homepage "https://github.com/@REPOSITORY@"
   version "@VERSION@"
-  url "https://github.com/@REPOSITORY@/releases/download/orchestrate-@VERSION@/orchestrate-macos-arm64.tar.gz"
+  url "https://github.com/@REPOSITORY@/releases/download/v@VERSION@/orchestrate-macos-arm64.tar.gz"
   sha256 "@SHA256@"
   license "MIT"
 
