@@ -102,9 +102,11 @@ jobs:
               ;;
             *) echo "Unexpected bottle cellar: $CELLAR" >&2; exit 1 ;;
           esac
+          # brew requests release bottles with a single name-version dash, not
+          # the double dash of its local cache naming.
           mv orchestrate--*.bottle.tar.gz \
-            "release/orchestrate--$ORCHESTRATE_RELEASE_VERSION.all.bottle.tar.gz"
-          shasum -a 256 -c <(echo "$BOTTLE_SHA  release/orchestrate--$ORCHESTRATE_RELEASE_VERSION.all.bottle.tar.gz")
+            "release/orchestrate-$ORCHESTRATE_RELEASE_VERSION.all.bottle.tar.gz"
+          shasum -a 256 -c <(echo "$BOTTLE_SHA  release/orchestrate-$ORCHESTRATE_RELEASE_VERSION.all.bottle.tar.gz")
           awk -v url="https://github.com/$GITHUB_REPOSITORY/releases/download/$GITHUB_REF_NAME" \
             -v shaline="$SHA_LINE" '
             { print }
@@ -123,7 +125,7 @@ jobs:
           path: |
             release/orchestrate-macos-arm64.tar.gz
             release/orchestrate-macos-arm64.tar.gz.sha256
-            release/orchestrate--*.all.bottle.tar.gz
+            release/orchestrate-*.all.bottle.tar.gz
             release/orchestrate.rb
           if-no-files-found: error
           retention-days: 7
@@ -150,7 +152,7 @@ jobs:
           ASSETS=(
             release/orchestrate-macos-arm64.tar.gz
             release/orchestrate-macos-arm64.tar.gz.sha256
-            "release/orchestrate--$ORCHESTRATE_RELEASE_VERSION.all.bottle.tar.gz"
+            "release/orchestrate-$ORCHESTRATE_RELEASE_VERSION.all.bottle.tar.gz"
             release/orchestrate.rb
           )
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
