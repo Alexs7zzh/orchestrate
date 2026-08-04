@@ -995,9 +995,13 @@ describe("herdr surface", () => {
     })
     const log = await readFile(logPath, "utf8")
     expect(observation.providerSessionId).toBeNull()
-    expect(log).toContain("pane run p1 /bin/bash -c")
-    expect(log).toContain("node-exit")
-    expect(log).toContain("/usr/bin/printf ok")
+    const runLine = log.split("\n").find((line) => line.startsWith("pane run p1")) as string
+    // Every typed word must be quoting-free: the pane shell re-splits them.
+    expect(runLine).toMatch(/^pane run p1 \/bin\/bash \S+command\.sh$/)
+    const commandPath = runLine.split(" ").at(-1) as string
+    const script = await readFile(commandPath, "utf8")
+    expect(script).toContain("node-exit")
+    expect(script).toContain(`'/usr/bin/printf' 'ok' 2>&1 | tee "$ORCHESTRATE_OUTPUT_PATH"`)
   })
 
   test("creates a no-focus split in the selected group and closes a retry slot", async () => {

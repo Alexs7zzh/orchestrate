@@ -993,14 +993,21 @@ async function createSplit(
   }
 }
 
-function commandScript(): string {
+// herdr `pane run` types its words into the pane's interactive shell without
+// quoting, so any multi-word argument (the old inline `bash -c` trampoline,
+// or a command node's own argv) is re-split by whatever shell the pane runs.
+// The trampoline therefore lives in a per-attempt script file — bash parses
+// the file, and the typed line stays two plain unquoted-safe tokens.
+function commandFile(argv: readonly string[]): string {
   return [
+    "#!/bin/bash",
     "set -o pipefail",
-    '"$@" 2>&1 | tee "$ORCHESTRATE_OUTPUT_PATH"',
+    `${argv.map(shellQuote).join(" ")} 2>&1 | tee "$ORCHESTRATE_OUTPUT_PATH"`,
     ["code=", "{PIPESTATUS[0]}"].join("$"),
     '"$ORCHESTRATE_BIN" node-exit "$ORCHESTRATE_RUN_ID" "$ORCHESTRATE_NODE_ID" --token "$ORCHESTRATE_NODE_TOKEN" --code "$code"',
-    'exit "$code"'
-  ].join("; ")
+    'exit "$code"',
+    ""
+  ].join("\n")
 }
 
 export interface SpawnRequest {
@@ -1284,16 +1291,9 @@ export class HerdrSurface {
         `${intent.nodeId}: ${runtimeNode?.title ?? node.title}`.slice(0, 80)
       ])
       if (node.type === "command") {
-        await runHerdr([
-          "pane",
-          "run",
-          pane.paneId,
-          "/bin/bash",
-          "-c",
-          commandScript(),
-          "orchestrate-command",
-          ...node.argv
-        ])
+        const commandPath = path.join(path.dirname(attempt.resultPath), "command.sh")
+        await atomicWriteFile(commandPath, commandFile(node.argv))
+        await runHerdr(["pane", "run", pane.paneId, "/bin/bash", commandPath])
         const observation = { pane, providerSessionId: null }
         await atomicWriteJson(receiptPath(attempt), {
           status: "ready",
