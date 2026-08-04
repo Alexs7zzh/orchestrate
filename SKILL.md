@@ -1,6 +1,6 @@
 ---
 name: orchestrate
-description: Design, validate, approve, and run explicit multi-agent DAG workflows in Herdr panes. Use when work benefits from independent branches, structured handoffs, or bounded review loops. Do not use for a simple one-agent task.
+description: Design, validate, approve, and run explicit multi-agent DAG workflows in Herdr panes. Use when the requested work is shaped like a graph or loop rather than one straight run - multiple agent steps with handoffs or dependencies between them, repeating steps until a condition or agreement is reached, bounded rounds of rework, independent parallel branches merged later, or deliberate context control such as keeping a stable agent session across steps versus starting a fresh one - especially across multiple agents or providers (such as Codex and Claude reviewing each other). Do not use for a simple one-agent task.
 ---
 
 # Orchestrate
