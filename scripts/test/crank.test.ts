@@ -913,6 +913,29 @@ describe("crank shell", () => {
     expect(surface.handoffs[0]).toContain(`Orchestrate run ${failed.id} failed.`)
   })
 
+  test("consumes finished submissions while paused without starting new work", async () => {
+    const surface = new FakeSurface()
+    const started = await start(workflow([agent("review"), agent("next", ["review"])]), surface)
+    const runDir = runDirectory(started.state.id)
+    const attempt = started.state.nodes.review?.attempts.at(-1)
+    if (attempt === undefined) {
+      throw new Error("missing review attempt")
+    }
+    const paused = await crankRun(runDir, { type: "pause" }, { surface })
+    expect(paused.state.status).toBe("paused")
+
+    await mkdir(path.dirname(attempt.resultPath), { recursive: true })
+    await writeFile(attempt.resultPath, '{"clean":true}\n')
+    await submitNodeDone(runDir, "review", attempt.token, "completed")
+
+    const reconciled = await reconcileRun(runDir, { surface })
+    expect(reconciled.state.status).toBe("paused")
+    expect(reconciled.state.nodes.review?.status).toBe("completed")
+    // Pause still blocks new pane starts: the dependent stays unstarted.
+    expect(reconciled.state.nodes.next?.status).toBe("pending")
+    expect(reconciled.state.nodes.next?.attempts).toHaveLength(0)
+  })
+
   test("routes trusted Herdr completion events to the captured master", async () => {
     const surface = new FakeSurface()
     const started = await start(workflow([agent("review")]), surface)

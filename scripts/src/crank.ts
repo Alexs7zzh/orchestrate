@@ -808,7 +808,10 @@ export async function reconcileRun(
     const ui = await readUiSnapshot(runDir)
     const events: EventRecord[] = []
 
-    while (state.status === "running") {
+    // Pause blocks new pane starts only: finished panes' submissions still
+    // commit while paused (reconcilePlannedSpawns and the reconcile transition
+    // each self-guard on running status, so nothing schedules under pause).
+    while (state.status === "running" || state.status === "paused") {
       const sequenceBefore = state.sequence
       const submitted = await consumeNodeDoneSubmissions(
         runDir,
@@ -821,7 +824,7 @@ export async function reconcileRun(
       )
       state = submitted.state
       workflow = submitted.workflow
-      if (state.status !== "running") {
+      if (state.status !== "running" && state.status !== "paused") {
         break
       }
       const reconciled = transition(
