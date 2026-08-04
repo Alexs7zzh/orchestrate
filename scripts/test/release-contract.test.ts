@@ -143,10 +143,18 @@ describe("release payload contract", () => {
   })
 
   test("builds tags from main and creates a reviewable draft release", async () => {
+    const ciWorkflow = await readFile(
+      path.resolve(import.meta.dir, "../../.github/workflows/ci.yml"),
+      "utf8"
+    )
     const releaseWorkflow = await readFile(
       path.resolve(import.meta.dir, "../../.github/workflows/release.yml"),
       "utf8"
     )
+    for (const workflowSource of [ciWorkflow, releaseWorkflow]) {
+      expect(workflowSource).toContain('HOMEBREW_NO_AUTO_UPDATE: "1"')
+      expect(workflowSource).toContain("brew install fish")
+    }
     expect(releaseWorkflow).toContain("runs-on: macos-15")
     expect(releaseWorkflow).toContain('test "$(uname -m)" = arm64')
     expect(releaseWorkflow).toContain("fetch-depth: 0")

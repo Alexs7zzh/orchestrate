@@ -24,6 +24,10 @@ jobs:
       - name: Install dependencies
         working-directory: scripts
         run: bun install --frozen-lockfile
+      - name: Install Fish completion test dependency
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+        run: brew install fish
       - name: Format, lint, typecheck, build, and test source plus packaged contract
         working-directory: scripts
         run: bun run verify
