@@ -83,7 +83,7 @@ jobs:
           brew tap-new --no-git local/release
           sed "s|^  url .*|  url \"file://$GITHUB_WORKSPACE/release/orchestrate-macos-arm64.tar.gz\"|" \
             release/orchestrate.rb > "$(brew --repository)/Library/Taps/local/homebrew-release/Formula/orchestrate.rb"
-          brew install --build-from-source --ignore-dependencies local/release/orchestrate
+          brew install --build-bottle --ignore-dependencies local/release/orchestrate
           brew bottle --json --no-rebuild \
             --root-url "https://github.com/$GITHUB_REPOSITORY/releases/download/$GITHUB_REF_NAME" \
             local/release/orchestrate
