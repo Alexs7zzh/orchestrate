@@ -1,6 +1,6 @@
 import { Option, Schema } from "effect"
 import { spawn } from "node:child_process"
-import { createHash } from "node:crypto"
+import { createHash, randomUUID } from "node:crypto"
 import { lstatSync, realpathSync } from "node:fs"
 import { access, mkdir, readFile, rm } from "node:fs/promises"
 import os from "node:os"
@@ -58,7 +58,9 @@ const AGENT_PANE_READY_POLL_MS = 50
 const AGENT_START_TIMEOUT_MS = 120_000
 const AGENT_SESSION_TIMEOUT_MS = 30_000
 const AGENT_SESSION_POLL_MS = 50
-const AGENT_PROMPT_ACCEPT_TIMEOUT_MS = 15_000
+// Claude's interactive boot can hold the welcome screen well past 15s; the
+// prompt wait must outlast it or a healthy launch records an ambiguous spawn.
+const AGENT_PROMPT_ACCEPT_TIMEOUT_MS = 60_000
 
 const decodeNodeDoneSubmission = Schema.decodeUnknownOption(NodeDoneSubmissionSchema)
 const decodeSpawnReceipt = Schema.decodeUnknownOption(SpawnReceiptSchema)
@@ -604,7 +606,8 @@ function claudeSettingsDocument(
 function claudeArguments(
   node: Extract<AgentNode, { readonly provider: "claude" }>,
   source: string | null,
-  settingsPath: string
+  settingsPath: string,
+  sessionId: string | null
 ) {
   const args: string[] = [
     "--safe-mode",
@@ -615,6 +618,12 @@ function claudeArguments(
     "--tools",
     "Bash"
   ]
+  // --safe-mode disables user hooks, including the herdr hook that reports
+  // Claude session ids, so a saveAs lineage must be launcher-chosen: fresh
+  // and forked sessions get an explicit id, and resume keeps the source id.
+  if (sessionId !== null && node.session.mode !== "resume") {
+    args.push("--session-id", sessionId)
+  }
   if (node.model !== "provider-default") {
     args.push("--model", node.model)
   }
@@ -638,6 +647,7 @@ async function prepareProviderLaunch(
   paneId: string
 ): Promise<{
   readonly args: readonly string[]
+  readonly providerSessionId: string | null
 }> {
   const source = sourceSession(node, state)
   const transportDirectory = path.dirname(attemptFor(state, intent).resultPath)
@@ -647,8 +657,15 @@ async function prepareProviderLaunch(
       settingsPath,
       claudeSettingsDocument(node, state, intent, transportDirectory, sourceRoot)
     )
+    const sessionId =
+      node.session.saveAs === null
+        ? null
+        : node.session.mode === "resume"
+          ? (source as string)
+          : randomUUID()
     return {
-      args: claudeArguments(node, source, settingsPath)
+      args: claudeArguments(node, source, settingsPath, sessionId),
+      providerSessionId: sessionId
     }
   }
   const profile = codexControlProfile(paneId)
@@ -657,7 +674,7 @@ async function prepareProviderLaunch(
     profilePath,
     codexControlProfileDocument(profile, transportDirectory, providerWriteRoots(node, sourceRoot))
   )
-  return { args: codexArguments(node, source, profile) }
+  return { args: codexArguments(node, source, profile), providerSessionId: null }
 }
 
 async function startAgentWhenShellReady(args: readonly string[]): Promise<void> {
@@ -1112,6 +1129,7 @@ export class HerdrSurface {
     }
     let promptMayHaveBeenAccepted = false
     let promptDeliveryConfirmed = false
+    let launchSessionId: string | null = null
     try {
       await runHerdr([
         "pane",
@@ -1140,6 +1158,7 @@ export class HerdrSurface {
       }
 
       const launch = await prepareProviderLaunch(node, state, intent, sourceRoot, pane.paneId)
+      launchSessionId = launch.providerSessionId
       await startAgentWhenShellReady([
         "agent",
         "start",
@@ -1177,7 +1196,8 @@ export class HerdrSurface {
       const sessionId =
         node.session.saveAs === null
           ? null
-          : await waitForProviderSession(pane.paneId, node.provider, intent.nodeId)
+          : (launchSessionId ??
+            (await waitForProviderSession(pane.paneId, node.provider, intent.nodeId)))
       const promptHook = afterAgentPromptForTests
       afterAgentPromptForTests = null
       await promptHook?.()
@@ -1190,10 +1210,12 @@ export class HerdrSurface {
       return observation
     } catch (error) {
       if (promptMayHaveBeenAccepted) {
+        // A launcher-chosen session id survives into the receipt so recovery
+        // never needs to observe it from herdr.
         await atomicWriteJson(receiptPath(attempt), {
           status: promptDeliveryConfirmed ? "session-pending" : "ambiguous",
           pane,
-          providerSessionId: null,
+          providerSessionId: promptDeliveryConfirmed ? launchSessionId : null,
           detail: herdrError(error)
         } satisfies SpawnReceipt)
         throw new HerdrObservationError(
@@ -1261,11 +1283,12 @@ export class HerdrSurface {
         if (recorded.status === "session-pending" && node.type === "agent") {
           // The receipt durably records that the prompt was observed taken;
           // only the session id capture is outstanding, so reconcile retries
-          // that capture alone and never re-prompts. A capture failure falls
-          // through to the attention path below.
+          // that capture alone and never re-prompts. A launcher-chosen id in
+          // the receipt promotes directly; a capture failure falls through to
+          // the attention path below.
           const observation =
-            node.session.saveAs === null
-              ? { pane: recorded.pane, providerSessionId: null }
+            node.session.saveAs === null || recorded.providerSessionId !== null
+              ? { pane: recorded.pane, providerSessionId: recorded.providerSessionId }
               : await waitForProviderSession(
                   recorded.pane.paneId,
                   node.provider,

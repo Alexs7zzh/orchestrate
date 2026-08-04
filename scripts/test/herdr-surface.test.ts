@@ -1453,6 +1453,29 @@ describe("herdr surface", () => {
     })
   })
 
+  test("chooses the Claude session id at launch instead of observing herdr", async () => {
+    // herdr never reports a claude session (safe-mode disables the hook that
+    // would); the launcher-chosen id must make that irrelevant.
+    await writeShim(false)
+    const node = {
+      ...claudeAgent(),
+      session: { mode: "fresh" as const, from: null, saveAs: "claude-session" }
+    }
+    const observation = await new HerdrSurface().spawn({
+      workflow: workflow(node),
+      state: state(node.id),
+      intent: intent(node.id),
+      prompt: "Review and report completion.",
+      placement: placement(node.id)
+    })
+    expect(observation.providerSessionId).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
+    )
+    const log = await readFile(logPath, "utf8")
+    expect(log).toContain(`--session-id ${observation.providerSessionId}`)
+    expect(log).not.toContain("agent get p1")
+  })
+
   test("records session-pending when herdr never reports a lineage session id", async () => {
     await writeShim(false)
     setAgentSessionTimeoutForTests(300)

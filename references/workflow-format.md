@@ -64,8 +64,9 @@ Agent nodes add `provider`, `model`, nullable `effort`, `prompt`, `session`, `pe
 `output`.
 
 `session.mode` is `fresh`, `resume`, or `fork`; `from` names an earlier `saveAs` alias for resume or
-fork. `saveAs` captures the provider's native session ID after the first prompt; nodes without a
-`saveAs` alias do not depend on Herdr reporting that ID. Fan-out must fork rather than resume the
+fork. `saveAs` records the session id for lineage: Claude ids are launcher-chosen and passed to the
+provider at start (resume keeps the source id), while Codex ids are captured from Herdr after the
+first prompt. Nodes without a `saveAs` alias never depend on session reporting. Fan-out must fork rather than resume the
 same source twice.
 
 Permissions deliberately separate two axes:
