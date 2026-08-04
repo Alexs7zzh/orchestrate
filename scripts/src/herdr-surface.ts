@@ -19,6 +19,18 @@ import type {
   WorkflowSpec
 } from "./types.js"
 
+import {
+  decodeHerdrAgentInfoResponse,
+  decodeHerdrErrorResponse,
+  decodeHerdrPaneCurrentResponse,
+  decodeHerdrPaneInfoResponse,
+  decodeHerdrPaneListResponse,
+  decodeHerdrTabCreatedResponse,
+  decodeHerdrTabListResponse,
+  decodeHerdrWorkspaceCreatedResponse,
+  decodeHerdrWorkspaceListResponse
+} from "./herdr-api.generated.js"
+import { HERDR_SCHEMA_BASELINE_VERSION, MINIMUM_HERDR_VERSION } from "./herdr-contract.js"
 import { NodeDoneSubmissionSchema, SpawnReceiptSchema } from "./schema.js"
 import {
   atomicWriteFile,
@@ -40,7 +52,6 @@ import {
 
 declare const ORCHESTRATE_BUILD_EMBEDDED: string
 
-const MINIMUM_HERDR = [0, 7, 5] as const
 const STDERR_LIMIT = 8_192
 const AGENT_PANE_READY_TIMEOUT_MS = 5_000
 const AGENT_PANE_READY_POLL_MS = 50
@@ -48,59 +59,9 @@ const AGENT_START_TIMEOUT_MS = 120_000
 const AGENT_SESSION_TIMEOUT_MS = 30_000
 const AGENT_SESSION_POLL_MS = 50
 const AGENT_PROMPT_ACCEPT_TIMEOUT_MS = 15_000
-const UnknownRecordSchema = Schema.Record(Schema.String, Schema.Unknown)
-const HerdrPaneIdentitySchema = Schema.Struct({
-  workspace_id: Schema.String,
-  tab_id: Schema.String,
-  pane_id: Schema.String
-})
-const HerdrAgentSessionSchema = Schema.Struct({
-  agent: Schema.Literals(["codex", "claude"]),
-  kind: Schema.Literal("id"),
-  value: Schema.String
-})
-const HerdrCurrentOriginSchema = Schema.Struct({
-  result: Schema.Struct({
-    pane: Schema.Struct({
-      workspace_id: Schema.String,
-      tab_id: Schema.String,
-      pane_id: Schema.String,
-      agent: Schema.NullOr(Schema.Literals(["codex", "claude"])),
-      agent_session: Schema.NullOr(HerdrAgentSessionSchema)
-    })
-  })
-})
-const HerdrCurrentPaneSchema = Schema.Struct({
-  result: Schema.Struct({ pane: HerdrPaneIdentitySchema })
-})
-const HerdrAgentDetailsSchema = Schema.Struct({
-  result: Schema.Struct({
-    agent: Schema.Struct({
-      agent_session: Schema.NullOr(HerdrAgentSessionSchema)
-    })
-  })
-})
-const HerdrAgentStatusDetailsSchema = Schema.Struct({
-  result: Schema.Struct({
-    agent: Schema.Struct({
-      agent_session: Schema.NullOr(HerdrAgentSessionSchema),
-      agent_status: Schema.Literals(["idle", "working", "blocked", "unknown", "done"])
-    })
-  })
-})
-const HerdrErrorEnvelopeSchema = Schema.Struct({
-  error: Schema.Struct({ code: Schema.String, message: Schema.String }),
-  id: Schema.optionalKey(Schema.String)
-})
 
-const decodeUnknownRecord = Schema.decodeUnknownOption(UnknownRecordSchema)
 const decodeNodeDoneSubmission = Schema.decodeUnknownOption(NodeDoneSubmissionSchema)
 const decodeSpawnReceipt = Schema.decodeUnknownOption(SpawnReceiptSchema)
-const decodeHerdrCurrentOrigin = Schema.decodeUnknownOption(HerdrCurrentOriginSchema)
-const decodeHerdrCurrentPane = Schema.decodeUnknownOption(HerdrCurrentPaneSchema)
-const decodeHerdrAgentDetails = Schema.decodeUnknownOption(HerdrAgentDetailsSchema)
-const decodeHerdrAgentStatusDetails = Schema.decodeUnknownOption(HerdrAgentStatusDetailsSchema)
-const decodeHerdrErrorEnvelope = Schema.decodeUnknownOption(HerdrErrorEnvelopeSchema)
 
 function asError(error: unknown): Error {
   return error instanceof Error ? error : new Error(String(error))
@@ -121,7 +82,7 @@ function decodeHerdrFailure(
 ): { readonly code: string; readonly message: string } | null {
   for (const line of stderr.trim().split("\n").toReversed()) {
     try {
-      const decoded = Option.getOrNull(decodeHerdrErrorEnvelope(JSON.parse(line) as unknown))
+      const decoded = Option.getOrNull(decodeHerdrErrorResponse(JSON.parse(line) as unknown))
       if (decoded !== null) {
         return decoded.error
       }
@@ -182,32 +143,20 @@ export async function runHerdr(args: readonly string[]): Promise<string> {
   })
 }
 
-function parseJson(stdout: string, operation: string): Record<string, unknown> {
+function decodeHerdrJson<A>(
+  stdout: string,
+  operation: string,
+  decode: (value: unknown) => Option.Option<A>
+): A {
   try {
-    const parsed = Option.getOrNull(decodeUnknownRecord(JSON.parse(stdout) as unknown))
-    if (parsed !== null) {
-      return parsed
+    const decoded = Option.getOrNull(decode(JSON.parse(stdout) as unknown))
+    if (decoded !== null) {
+      return decoded
     }
   } catch {
     // Report one bounded error below.
   }
   throw new Error(`herdr ${operation} returned invalid JSON.`)
-}
-
-function valueAt(value: unknown, keys: readonly string[]): unknown {
-  let cursor = value
-  for (const key of keys) {
-    if (cursor === null || typeof cursor !== "object" || Array.isArray(cursor)) {
-      return null
-    }
-    cursor = (cursor as Record<string, unknown>)[key]
-  }
-  return cursor
-}
-
-function stringAt(value: unknown, ...keys: readonly string[]): string | null {
-  const found = valueAt(value, keys)
-  return typeof found === "string" ? found : null
 }
 
 function semverParts(value: string): readonly [number, number, number] | null {
@@ -233,8 +182,10 @@ function versionAtLeast(
 export async function requireHerdr(): Promise<string> {
   const output = (await runHerdr(["--version"])).trim()
   const parsed = semverParts(output)
-  if (parsed === null || !versionAtLeast(parsed, MINIMUM_HERDR)) {
-    throw new Error(`orchestrate requires herdr 0.7.5 or newer; found "${output}".`)
+  if (parsed === null || !versionAtLeast(parsed, MINIMUM_HERDR_VERSION)) {
+    throw new Error(
+      `orchestrate requires herdr ${HERDR_SCHEMA_BASELINE_VERSION} or newer; found "${output}".`
+    )
   }
   return output
 }
@@ -717,9 +668,9 @@ async function startAgentWhenShellReady(args: readonly string[]): Promise<void> 
 }
 
 function providerSession(value: unknown, provider: AgentNode["provider"]): string | null {
-  const details = Option.getOrNull(decodeHerdrAgentDetails(value))
+  const details = Option.getOrNull(decodeHerdrAgentInfoResponse(value))
   const session = details?.result.agent.agent_session
-  return session?.agent === provider ? session.value : null
+  return session?.agent === provider && session.kind === "id" ? session.value : null
 }
 
 async function waitForProviderSession(
@@ -729,13 +680,16 @@ async function waitForProviderSession(
 ): Promise<string> {
   const deadline = Date.now() + AGENT_SESSION_TIMEOUT_MS
   for (;;) {
-    const details = parseJson(await runHerdr(["agent", "get", paneId]), "agent get")
-    const decoded = Option.getOrNull(decodeHerdrAgentStatusDetails(details))
+    const details = decodeHerdrJson(
+      await runHerdr(["agent", "get", paneId]),
+      "agent get",
+      decodeHerdrAgentInfoResponse
+    )
     const sessionId = providerSession(details, provider)
     if (sessionId !== null) {
       return sessionId
     }
-    if (decoded?.result.agent.agent_status !== "idle" || Date.now() >= deadline) {
+    if (details.result.agent.agent_status !== "idle" || Date.now() >= deadline) {
       throw new Error(
         `herdr did not report the ${provider} session id required by session.saveAs for node "${nodeId}".`
       )
@@ -770,7 +724,8 @@ async function liveOriginWorkspace(state: RunState): Promise<string | null> {
   }
   return runHerdr(["pane", "get", state.origin.paneId])
     .then((raw) => {
-      const workspaceId = stringAt(parseJson(raw, "pane get"), "result", "pane", "workspace_id")
+      const workspaceId = decodeHerdrJson(raw, "pane get", decodeHerdrPaneInfoResponse).result.pane
+        .workspace_id
       return workspaceId === state.origin?.workspaceId ? workspaceId : null
     })
     .catch((error: unknown) => {
@@ -786,24 +741,21 @@ function workspaceLabel(workflow: WorkflowSpec, runId: string): string {
 }
 
 async function findWorkspace(workflow: WorkflowSpec, runId: string): Promise<string | null> {
-  const listed = parseJson(await runHerdr(["workspace", "list"]), "workspace list")
-  const workspaces = valueAt(listed, ["result", "workspaces"])
-  if (!Array.isArray(workspaces)) {
-    return null
-  }
-  for (const value of workspaces) {
-    if (value !== null && typeof value === "object" && !Array.isArray(value)) {
-      const item = value as Record<string, unknown>
-      if (item.label === workspaceLabel(workflow, runId) && typeof item.workspace_id === "string") {
-        return item.workspace_id
-      }
+  const listed = decodeHerdrJson(
+    await runHerdr(["workspace", "list"]),
+    "workspace list",
+    decodeHerdrWorkspaceListResponse
+  )
+  for (const workspace of listed.result.workspaces) {
+    if (workspace.label === workspaceLabel(workflow, runId)) {
+      return workspace.workspace_id
     }
   }
   return null
 }
 
 async function createWorkspace(workflow: WorkflowSpec, runId: string): Promise<string> {
-  const created = parseJson(
+  const created = decodeHerdrJson(
     await runHerdr([
       "workspace",
       "create",
@@ -813,13 +765,10 @@ async function createWorkspace(workflow: WorkflowSpec, runId: string): Promise<s
       workspaceLabel(workflow, runId),
       "--no-focus"
     ]),
-    "workspace create"
+    "workspace create",
+    decodeHerdrWorkspaceCreatedResponse
   )
-  const workspaceId = stringAt(created, "result", "workspace", "workspace_id")
-  if (workspaceId === null) {
-    throw new Error("herdr workspace create returned no workspace id.")
-  }
-  return workspaceId
+  return created.result.workspace.workspace_id
 }
 
 async function createTab(
@@ -828,7 +777,7 @@ async function createTab(
   cwd: string,
   environment: Readonly<Record<string, string>>
 ): Promise<PaneReference> {
-  const created = parseJson(
+  const created = decodeHerdrJson(
     await runHerdr([
       "tab",
       "create",
@@ -841,13 +790,11 @@ async function createTab(
       "--no-focus",
       ...Object.entries(environment).flatMap(([key, value]) => ["--env", `${key}=${value}`])
     ]),
-    "tab create"
+    "tab create",
+    decodeHerdrTabCreatedResponse
   )
-  const paneId = stringAt(created, "result", "root_pane", "pane_id")
-  const tabId = stringAt(created, "result", "tab", "tab_id")
-  if (paneId === null || tabId === null) {
-    throw new Error("herdr tab create returned incomplete ids.")
-  }
+  const paneId = created.result.root_pane.pane_id
+  const tabId = created.result.tab.tab_id
   return { workspaceId, tabId, paneId, group: label, surface: "tab" }
 }
 
@@ -859,7 +806,7 @@ async function createSplit(
   direction: "right" | "down" = "down",
   ratio: number | null = null
 ): Promise<PaneReference> {
-  const created = parseJson(
+  const created = decodeHerdrJson(
     await runHerdr([
       "pane",
       "split",
@@ -873,18 +820,11 @@ async function createSplit(
       "--no-focus",
       ...Object.entries(environment).flatMap(([key, value]) => ["--env", `${key}=${value}`])
     ]),
-    "pane split"
+    "pane split",
+    decodeHerdrPaneInfoResponse
   )
-  const paneId =
-    stringAt(created, "result", "pane", "pane_id") ??
-    stringAt(created, "result", "root_pane", "pane_id")
-  const tabId =
-    stringAt(created, "result", "pane", "tab_id") ??
-    stringAt(created, "result", "root_pane", "tab_id") ??
-    anchor.tabId
-  if (paneId === null) {
-    throw new Error("herdr pane split returned no pane id.")
-  }
+  const paneId = created.result.pane.pane_id
+  const tabId = created.result.pane.tab_id
   return {
     workspaceId: anchor.workspaceId,
     tabId,
@@ -918,14 +858,6 @@ export interface SpawnObservation {
 }
 
 export type HerdrAgentStatus = "idle" | "working" | "blocked" | "unknown" | "done"
-
-const HERDR_AGENT_STATUSES = new Set<HerdrAgentStatus>([
-  "idle",
-  "working",
-  "blocked",
-  "unknown",
-  "done"
-])
 
 type SpawnReceipt = Schema.Schema.Type<typeof SpawnReceiptSchema>
 
@@ -970,20 +902,26 @@ export class HerdrSurface {
 
   async captureOrigin(): Promise<RunOrigin | null> {
     const raw = await runHerdr(["pane", "current"])
-    let decoded: Schema.Schema.Type<typeof HerdrCurrentOriginSchema> | null = null
+    let decoded
     try {
-      decoded = Option.getOrNull(decodeHerdrCurrentOrigin(JSON.parse(raw) as unknown))
+      decoded = decodeHerdrJson(raw, "pane current", decodeHerdrPaneCurrentResponse)
     } catch {
-      decoded = null
-    }
-    if (decoded === null) {
       throw new HerdrObservationError("Herdr returned an invalid current-pane response.", raw)
     }
     const pane = decoded.result.pane
-    if (pane.agent === null || pane.agent_session === null) {
+    if (
+      (pane.agent === null || pane.agent === undefined) &&
+      (pane.agent_session === null || pane.agent_session === undefined)
+    ) {
       return null
     }
-    if (pane.agent_session.agent !== pane.agent) {
+    if (
+      (pane.agent !== "codex" && pane.agent !== "claude") ||
+      pane.agent_session === null ||
+      pane.agent_session === undefined ||
+      pane.agent_session.kind !== "id" ||
+      pane.agent_session.agent !== pane.agent
+    ) {
       throw new HerdrObservationError(
         "Herdr current-pane agent and session providers do not match.",
         raw
@@ -999,7 +937,11 @@ export class HerdrSurface {
   }
 
   async promptOrigin(origin: RunOrigin, prompt: string): Promise<void> {
-    const details = parseJson(await runHerdr(["agent", "get", origin.paneId]), "agent get")
+    const details = decodeHerdrJson(
+      await runHerdr(["agent", "get", origin.paneId]),
+      "agent get",
+      decodeHerdrAgentInfoResponse
+    )
     const sessionId = providerSession(details, origin.provider)
     if (sessionId !== origin.sessionId) {
       throw new Error("The originating herdr pane no longer hosts the launching agent session.")
@@ -1314,25 +1256,17 @@ export class HerdrSurface {
     if (workspaceId === null) {
       return
     }
-    const listed = parseJson(
+    const listed = decodeHerdrJson(
       await runHerdr(["tab", "list", "--workspace", workspaceId]),
-      "tab list"
+      "tab list",
+      decodeHerdrTabListResponse
     )
-    const tabs = valueAt(listed, ["result", "tabs"])
-    if (!Array.isArray(tabs)) {
-      return
-    }
-    for (const value of tabs) {
-      if (value === null || typeof value !== "object" || Array.isArray(value)) {
-        continue
-      }
-      const item = value as Record<string, unknown>
+    for (const tab of listed.result.tabs) {
       if (
-        item.label === request.placement.groupLabel &&
-        typeof item.tab_id === "string" &&
+        tab.label === request.placement.groupLabel &&
         (request.placement.surface === "tab" || request.placement.anchorPane === null)
       ) {
-        await runHerdr(["tab", "close", item.tab_id]).catch(() => undefined)
+        await runHerdr(["tab", "close", tab.tab_id]).catch(() => undefined)
       }
     }
   }
@@ -1340,10 +1274,7 @@ export class HerdrSurface {
   private async currentPane(): Promise<PaneReference | null> {
     return runHerdr(["pane", "current"])
       .then((raw) => {
-        const decoded = Option.getOrNull(decodeHerdrCurrentPane(JSON.parse(raw) as unknown))
-        if (decoded === null) {
-          return null
-        }
+        const decoded = decodeHerdrJson(raw, "pane current", decodeHerdrPaneCurrentResponse)
         const pane = decoded.result.pane
         return {
           workspaceId: pane.workspace_id,
@@ -1414,10 +1345,9 @@ export class HerdrSurface {
   async agentStatus(paneId: string): Promise<HerdrAgentStatus | null> {
     return runHerdr(["agent", "get", paneId])
       .then((raw) => {
-        const status = stringAt(parseJson(raw, "agent get"), "result", "agent", "agent_status")
-        return status !== null && HERDR_AGENT_STATUSES.has(status as HerdrAgentStatus)
-          ? (status as HerdrAgentStatus)
-          : null
+        const status = decodeHerdrJson(raw, "agent get", decodeHerdrAgentInfoResponse).result.agent
+          .agent_status
+        return status
       })
       .catch(() => null)
   }
@@ -1434,34 +1364,14 @@ export class HerdrSurface {
   async paneSnapshot(): Promise<
     ReadonlyMap<string, { readonly agentStatus: HerdrAgentStatus | null }>
   > {
-    const parsed = parseJson(await runHerdr(["pane", "list"]), "pane list")
-    const panes =
-      typeof parsed === "object" &&
-      parsed !== null &&
-      "result" in parsed &&
-      typeof parsed.result === "object" &&
-      parsed.result !== null &&
-      "panes" in parsed.result &&
-      Array.isArray(parsed.result.panes)
-        ? parsed.result.panes
-        : []
+    const parsed = decodeHerdrJson(
+      await runHerdr(["pane", "list"]),
+      "pane list",
+      decodeHerdrPaneListResponse
+    )
     const snapshot = new Map<string, { readonly agentStatus: HerdrAgentStatus | null }>()
-    for (const pane of panes) {
-      if (typeof pane !== "object" || pane === null) {
-        continue
-      }
-      const record = pane as Record<string, unknown>
-      const paneId = typeof record["pane_id"] === "string" ? record["pane_id"] : null
-      if (paneId === null) {
-        continue
-      }
-      const status = record["agent_status"]
-      snapshot.set(paneId, {
-        agentStatus:
-          typeof status === "string" && HERDR_AGENT_STATUSES.has(status as HerdrAgentStatus)
-            ? (status as HerdrAgentStatus)
-            : null
-      })
+    for (const pane of parsed.result.panes) {
+      snapshot.set(pane.pane_id, { agentStatus: pane.agent_status })
     }
     return snapshot
   }

@@ -38,4 +38,5 @@ jobs:
             ../references/workflow.schema.json \
             ../references/preferences.schema.json \
             ../references/state.schema.json \
-            ../references/event.schema.json
+            ../references/event.schema.json \
+            src/herdr-api.generated.ts

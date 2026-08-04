@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test"
+import { Option } from "effect"
 import {
   access,
   chmod,
@@ -23,6 +24,14 @@ import type {
   WorkflowSpec
 } from "../src/types.js"
 
+import {
+  decodeHerdrErrorResponse,
+  decodeHerdrPaneCurrentResponse
+} from "../src/herdr-api.generated.js"
+import {
+  fetchBaselineHerdrApiSchema,
+  HERDR_SCHEMA_BASELINE_VERSION
+} from "../src/herdr-contract.js"
 import {
   HerdrObservationError,
   HerdrSurface,
@@ -211,6 +220,71 @@ function intent(id: string): SpawnIntent {
   }
 }
 
+function herdrPane(
+  paneId: string,
+  workspaceId: string,
+  tabId: string,
+  fields: Readonly<Record<string, unknown>> = {}
+) {
+  return {
+    terminal_id: `terminal-${paneId}`,
+    agent_status: "idle",
+    workspace_id: workspaceId,
+    tab_id: tabId,
+    pane_id: paneId,
+    focused: false,
+    revision: 1,
+    ...fields
+  }
+}
+
+function herdrTab(tabId: string, workspaceId: string, label: string) {
+  return {
+    tab_id: tabId,
+    workspace_id: workspaceId,
+    number: 1,
+    label,
+    focused: false,
+    pane_count: 1,
+    agent_status: "idle"
+  }
+}
+
+function herdrWorkspace(workspaceId: string, label: string) {
+  return {
+    workspace_id: workspaceId,
+    number: 1,
+    label,
+    focused: false,
+    pane_count: 1,
+    tab_count: 1,
+    active_tab_id: "t1",
+    agent_status: "idle"
+  }
+}
+
+function herdrAgent(
+  paneId: string,
+  provider: "codex" | "claude",
+  session: Readonly<Record<string, unknown>> | null | undefined
+) {
+  return {
+    terminal_id: `terminal-${paneId}`,
+    agent_status: "working",
+    workspace_id: "w1",
+    tab_id: "t1",
+    pane_id: paneId,
+    focused: false,
+    revision: 1,
+    agent: provider,
+    ...(session === undefined ? {} : { agent_session: session })
+  }
+}
+
+function herdrResponse(result: Readonly<Record<string, unknown>>): string {
+  return JSON.stringify({ id: `cli:test:${String(result["type"])}`, result })
+}
+
 async function writeShim(
   reportSession = true,
   busyOnce = false,
@@ -220,46 +294,89 @@ async function writeShim(
 ): Promise<void> {
   const busyMarker = path.join(temporaryRoot, "agent-start-busy-once")
   const claudeMarker = path.join(temporaryRoot, "agent-is-claude")
+  const codexSession = {
+    agent: "codex",
+    kind: "id",
+    source: "herdr:codex",
+    value: "session-1"
+  }
+  const claudeSession = {
+    agent: "claude",
+    kind: "id",
+    source: "herdr:claude",
+    value: "session-1"
+  }
+  const originSession = {
+    agent: "codex",
+    kind: "id",
+    source: "herdr:codex",
+    value: "origin-session"
+  }
+  const workspaceCreated = herdrResponse({
+    type: "workspace_created",
+    workspace: herdrWorkspace("w1", "surface-test"),
+    tab: herdrTab("t1", "w1", "surface-test"),
+    root_pane: herdrPane("p1", "w1", "t1")
+  })
+  const tabCreated = herdrResponse({
+    type: "tab_created",
+    tab: herdrTab("t1", "w1", "surface-test"),
+    root_pane: herdrPane("p1", "w1", "t1")
+  })
+  const paneSplit = herdrResponse({
+    type: "pane_info",
+    pane: herdrPane("p2", "w1", "t1")
+  })
+  const currentPane = herdrResponse({
+    type: "pane_current",
+    pane: herdrPane("origin-pane", "origin-workspace", "origin-tab", {
+      agent: "codex",
+      agent_session: originSession
+    })
+  })
   const body = `#!/bin/sh
 printf '%s\n' "$*" >> ${JSON.stringify(logPath)}
 case "$1 $2" in
   "--version ") printf 'herdr 0.7.5\n' ;;
-  "workspace create") printf '%s\n' '{"result":{"workspace":{"workspace_id":"w1"}}}' ;;
-  "tab create") printf '%s\n' '{"result":{"root_pane":{"pane_id":"p1"},"tab":{"tab_id":"t1"}}}' ;;
+  "workspace list") printf '%s\n' '${herdrResponse({ type: "workspace_list", workspaces: [] })}' ;;
+  "workspace create") printf '%s\n' '${workspaceCreated}' ;;
+  "tab create") printf '%s\n' '${tabCreated}' ;;
+  "tab list") printf '%s\n' '${herdrResponse({ type: "tab_list", tabs: [] })}' ;;
+  "pane list") printf '%s\n' '${herdrResponse({ type: "pane_list", panes: [] })}' ;;
   "pane split")
     if [ ${JSON.stringify(paneFailure)} = "split-missing" ]; then
-      printf '%s\n' '{"error":{"code":"pane_not_found","message":"anchor closed"}}' >&2
+      printf '%s\n' '{"error":{"code":"pane_not_found","message":"anchor closed"},"id":"cli:pane:split"}' >&2
       exit 1
     fi
     if [ ${JSON.stringify(paneFailure)} = "split-transport" ]; then
-      printf '%s\n' '{"error":{"code":"server_unavailable","message":"service outage"}}' >&2
+      printf '%s\n' '{"error":{"code":"server_unavailable","message":"service outage"},"id":"cli:pane:split"}' >&2
       exit 1
     fi
-    printf '%s\n' '{"result":{"pane":{"pane_id":"p2","tab_id":"t1"}}}' ;;
-  "pane current") printf '%s\n' '{"result":{"pane":{"agent":"codex","agent_session":{"agent":"codex","kind":"id","source":"herdr:codex","value":"origin-session"},"workspace_id":"origin-workspace","tab_id":"origin-tab","pane_id":"origin-pane"}}}' ;;
+    printf '%s\n' '${paneSplit}' ;;
+  "pane current") printf '%s\n' '${currentPane}' ;;
   "pane get")
     if [ ${JSON.stringify(paneFailure)} = "transport" ]; then
-      printf '%s\n' '{"error":{"code":"server_unavailable","message":"service outage"}}' >&2
+      printf '%s\n' '{"error":{"code":"server_unavailable","message":"service outage"},"id":"cli:pane:get"}' >&2
       exit 1
     fi
     if [ "$3" = ${JSON.stringify(missingPane ?? "")} ]; then
-      printf '%s\n' '{"error":{"code":"pane_not_found","message":"pane missing"}}' >&2
+      printf '%s\n' '{"error":{"code":"pane_not_found","message":"pane missing"},"id":"cli:pane:get"}' >&2
       exit 1
     fi
     if [ "$3" = "origin-pane" ]; then
       if ${originLive ? "true" : "false"}; then
-        printf '%s\n' '{"result":{"pane":{"workspace_id":"origin-workspace","tab_id":"origin-tab","pane_id":"origin-pane"}}}'
+        printf '%s\n' '${herdrResponse({ type: "pane_info", pane: herdrPane("origin-pane", "origin-workspace", "origin-tab") })}'
       else
-        printf '%s\n' '{"error":{"code":"pane_not_found","message":"pane missing"}}' >&2
+        printf '%s\n' '{"error":{"code":"pane_not_found","message":"pane missing"},"id":"cli:pane:get"}' >&2
         exit 1
       fi
     else
-      printf '%s\n' '{"result":{"pane":{"workspace_id":"w1","tab_id":"t1","pane_id":"p1"}}}'
+      printf '%s\n' '${herdrResponse({ type: "pane_info", pane: herdrPane("p1", "w1", "t1") })}'
     fi ;;
   "agent start")
     if ${busyOnce ? "true" : "false"} && [ ! -f ${JSON.stringify(busyMarker)} ]; then
       touch ${JSON.stringify(busyMarker)}
-      printf '%s\n' '{ "error": { "code": "agent_pane_busy", "message": "agent target pane is not an available shell" } }' >&2
+      printf '%s\n' '{ "error": { "code": "agent_pane_busy", "message": "agent target pane is not an available shell" }, "id": "cli:agent:start" }' >&2
       exit 1
     fi
     previous=""
@@ -272,19 +389,22 @@ case "$1 $2" in
     if [ "$5" = "claude" ]; then touch ${JSON.stringify(claudeMarker)}; fi ;;
   "agent get")
     if [ "$3" = "origin-pane" ]; then
-      printf '%s\n' '{"result":{"agent":{"agent_session":{"agent":"codex","kind":"id","source":"herdr:codex","value":"origin-session"}}}}'
+      printf '%s\n' '${herdrResponse({ type: "agent_info", agent: herdrAgent("origin-pane", "codex", originSession) })}'
     else
       if [ -f ${JSON.stringify(claudeMarker)} ]; then
         printf '%s\n' '${
           reportSession
-            ? '{"result":{"agent":{"agent_status":"working","agent_session":{"agent":"claude","kind":"id","source":"herdr:claude","value":"session-1"}}}}'
-            : '{"result":{"agent":{}}}'
+            ? herdrResponse({
+                type: "agent_info",
+                agent: herdrAgent("p1", "claude", claudeSession)
+              })
+            : herdrResponse({ type: "agent_info", agent: herdrAgent("p1", "claude", undefined) })
         }'
       else
         printf '%s\n' '${
           reportSession
-            ? '{"result":{"agent":{"agent_status":"working","agent_session":{"agent":"codex","kind":"id","source":"herdr:codex","value":"session-1"}}}}'
-            : '{"result":{"agent":{}}}'
+            ? herdrResponse({ type: "agent_info", agent: herdrAgent("p1", "codex", codexSession) })
+            : herdrResponse({ type: "agent_info", agent: herdrAgent("p1", "codex", undefined) })
         }'
       fi
     fi ;;
@@ -330,6 +450,47 @@ afterEach(async () => {
 })
 
 describe("herdr surface", () => {
+  test("requires socket correlation ids on generated CLI envelopes", () => {
+    const success = JSON.parse(
+      herdrResponse({
+        type: "pane_current",
+        pane: herdrPane("p1", "w1", "t1")
+      })
+    ) as Record<string, unknown>
+    const { id: _successId, ...successWithoutId } = success
+    expect(Option.isSome(decodeHerdrPaneCurrentResponse(success))).toBeTrue()
+    expect(Option.isNone(decodeHerdrPaneCurrentResponse(successWithoutId))).toBeTrue()
+
+    const error = {
+      id: "cli:pane:get",
+      error: { code: "pane_not_found", message: "missing" }
+    }
+    const { id: _errorId, ...errorWithoutId } = error
+    expect(Option.isSome(decodeHerdrErrorResponse(error))).toBeTrue()
+    expect(Option.isNone(decodeHerdrErrorResponse(errorWithoutId))).toBeTrue()
+  })
+
+  test("rejects a schema refresh from a non-baseline Herdr before reading its schema", async () => {
+    const calls: Array<readonly string[]> = []
+    await expect(
+      fetchBaselineHerdrApiSchema(async (args) => {
+        calls.push(args)
+        return "herdr 0.8.0"
+      })
+    ).rejects.toThrow(`requires exactly ${HERDR_SCHEMA_BASELINE_VERSION}`)
+    expect(calls).toEqual([["--version"]])
+  })
+
+  test("reads the schema only after confirming the exact baseline Herdr", async () => {
+    const calls: Array<readonly string[]> = []
+    const schema = await fetchBaselineHerdrApiSchema(async (args) => {
+      calls.push(args)
+      return args[0] === "--version" ? `herdr ${HERDR_SCHEMA_BASELINE_VERSION}` : '{"protocol":17}'
+    })
+    expect(schema).toEqual({ protocol: 17 })
+    expect(calls).toEqual([["--version"], ["api", "schema", "--json"]])
+  })
+
   test("creates an origin-workspace tab when the launching pane is still live", async () => {
     const node = command()
     const runState: RunState = {
@@ -755,10 +916,21 @@ describe("herdr surface", () => {
     const shim = path.join(shimDirectory, "herdr")
     await writeFile(
       shim,
-      `#!/bin/sh\nprintf '%s\\n' '{"result":{"pane":{"agent":null,"agent_session":null,"workspace_id":"w1","tab_id":"t1","pane_id":"p1"}}}'\n`
+      `#!/bin/sh\nprintf '%s\\n' '${herdrResponse({
+        type: "pane_current",
+        pane: herdrPane("p1", "w1", "t1", { agent: null, agent_session: null })
+      })}'\n`
     )
     await chmod(shim, 0o755)
     expect(await new HerdrSurface().captureOrigin()).toBeNull()
+
+    await writeFile(
+      shim,
+      `#!/bin/sh\nprintf '%s\\n' '{"result":{"pane":{"agent":"codex","agent_session":{"agent":"codex","kind":"id","source":"herdr:codex","value":"origin-session"},"workspace_id":"w1","tab_id":"t1","pane_id":"p1"}}}'\n`
+    )
+    await expect(new HerdrSurface().captureOrigin()).rejects.toThrow(
+      "invalid current-pane response"
+    )
 
     await writeFile(shim, "#!/bin/sh\nprintf '%s\\n' 'not-json'\n")
     await expect(new HerdrSurface().captureOrigin()).rejects.toThrow(
@@ -767,7 +939,7 @@ describe("herdr surface", () => {
 
     await writeFile(
       shim,
-      `#!/bin/sh\nprintf '%s\\n' '{ "error": { "code": "server_unavailable", "message": "outage" } }' >&2\nexit 1\n`
+      `#!/bin/sh\nprintf '%s\\n' '{ "error": { "code": "server_unavailable", "message": "outage" }, "id": "cli:pane:current" }' >&2\nexit 1\n`
     )
     await expect(new HerdrSurface().captureOrigin()).rejects.toThrow("server_unavailable")
   })

@@ -111,37 +111,37 @@ beforeEach(async () => {
 printf '%s\n' "$*" >> ${JSON.stringify(herdrLog)}
 case "$1 $2" in
   "--version ") printf 'herdr 0.7.5\n' ;;
-  "workspace list") printf '%s\n' '{"result":{"workspaces":[]}}' ;;
-  "workspace create") printf '%s\n' '{"result":{"workspace":{"workspace_id":"w1"}}}' ;;
+  "workspace list") printf '%s\n' '{"id":"cli:workspace:list","result":{"type":"workspace_list","workspaces":[]}}' ;;
+  "workspace create") printf '%s\n' '{"id":"cli:workspace:create","result":{"type":"workspace_created","workspace":{"workspace_id":"w1","number":1,"label":"packaged-test","focused":false,"pane_count":1,"tab_count":1,"active_tab_id":"t1","agent_status":"idle"},"tab":{"tab_id":"t1","workspace_id":"w1","number":1,"label":"packaged-test","focused":false,"pane_count":1,"agent_status":"idle"},"root_pane":{"terminal_id":"terminal-p1","agent_status":"idle","workspace_id":"w1","tab_id":"t1","pane_id":"p1","focused":false,"revision":1}}}' ;;
   "tab create")
     count_file=${JSON.stringify(`${herdrLog}.tabs`)}
     count=$(cat "$count_file" 2>/dev/null || printf 0)
     count=$((count + 1))
     printf '%s' "$count" > "$count_file"
-    printf '{"result":{"root_pane":{"pane_id":"p%s"},"tab":{"tab_id":"t%s"}}}\n' "$count" "$count" ;;
-  "pane get") printf '%s\n' '{"result":{"pane":{"pane_id":"p1"}}}' ;;
-  "pane current") printf '%s\n' '{"result":{"pane":{"agent":null,"agent_session":null,"workspace_id":"w1","tab_id":"t1","pane_id":"p1"}}}' ;;
+    printf '{"id":"cli:tab:create","result":{"type":"tab_created","root_pane":{"terminal_id":"terminal-p%s","agent_status":"idle","workspace_id":"w1","tab_id":"t%s","pane_id":"p%s","focused":false,"revision":1},"tab":{"tab_id":"t%s","workspace_id":"w1","number":%s,"label":"check","focused":false,"pane_count":1,"agent_status":"idle"}}}\n' "$count" "$count" "$count" "$count" "$count" ;;
+  "pane get") printf '%s\n' '{"id":"cli:pane:get","result":{"type":"pane_info","pane":{"terminal_id":"terminal-p1","agent_status":"idle","workspace_id":"w1","tab_id":"t1","pane_id":"p1","focused":false,"revision":1}}}' ;;
+  "pane current") printf '%s\n' '{"id":"cli:pane:current","result":{"type":"pane_current","pane":{"terminal_id":"terminal-p1","agent_status":"idle","agent":null,"agent_session":null,"workspace_id":"w1","tab_id":"t1","pane_id":"p1","focused":false,"revision":1}}}' ;;
   "pane list")
     count_file=${JSON.stringify(`${herdrLog}.tabs`)}
     count=$(cat "$count_file" 2>/dev/null || printf 0)
-    printf '%s' '{"result":{"panes":['
+    printf '%s' '{"id":"cli:pane:list","result":{"type":"pane_list","panes":['
     index=1
     while [ "$index" -le "$count" ]; do
       [ "$index" -eq 1 ] || printf ','
       pane_id="p$index"
       if [ "$pane_id" = "\${HERDR_DONE_PANE-}" ]; then status=done; else status=idle; fi
-      printf '{"pane_id":"%s","agent_status":"%s"}' "$pane_id" "$status"
+      printf '{"terminal_id":"terminal-%s","agent_status":"%s","workspace_id":"w1","tab_id":"t%s","pane_id":"%s","focused":false,"revision":1}' "$pane_id" "$status" "$index" "$pane_id"
       index=$((index + 1))
     done
     printf '%s\n' ']}}' ;;
   "agent get")
     if [ "$3" = "\${HERDR_DONE_PANE-}" ]; then status=done; else status=idle; fi
-    printf '{"result":{"agent":{"agent_status":"%s","agent_session":{"agent":"codex","kind":"id","source":"herdr:codex","value":"session-%s"}}}}\n' "$status" "$3" ;;
+    printf '{"id":"cli:agent:get","result":{"type":"agent_info","agent":{"terminal_id":"terminal-%s","agent_status":"%s","workspace_id":"w1","tab_id":"t1","pane_id":"%s","focused":false,"revision":1,"agent":"codex","agent_session":{"agent":"codex","kind":"id","source":"herdr:codex","value":"session-%s"}}}}\n' "$3" "$status" "$3" "$3" ;;
   "plugin list") printf '%s\n' '{"result":{"plugins":[{"id":"orchestrate"}]}}' ;;
   "plugin link") [ "\${HERDR_FAIL_LINK-}" = 1 ] && { printf 'link failed\n' >&2; exit 9; }; true ;;
   "plugin unlink") [ "\${HERDR_FAIL_UNLINK-}" = 1 ] && { printf 'unlink failed\n' >&2; exit 9; }; true ;;
-  "tab list") printf '%s\n' '{"result":{"tabs":[]}}' ;;
-  *) printf '%s\n' '{"result":{"type":"ok"}}' ;;
+  "tab list") printf '%s\n' '{"id":"cli:tab:list","result":{"type":"tab_list","tabs":[]}}' ;;
+  *) printf '%s\n' '{"id":"cli:test","result":{"type":"ok"}}' ;;
 esac
 `
   await writeFile(path.join(shimDir, "herdr"), shim)
