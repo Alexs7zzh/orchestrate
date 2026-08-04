@@ -107,8 +107,7 @@ orchestrate clean <run-id> --dry-run
 The interactive board, `board --json`, `runs --needs-attention`, and the Herdr panel sample live pane
 state for durably running nodes. `blocked`, `done`, and gone panes need attention; `done` is shown as
 `result missing`, while `idle`, `unknown`, and `working` remain transient. Observed attention affects
-default selection, so an older result-missing run wins over a newer healthy run and exits with code
-2. JSON mode writes one stable value to stdout on success or error; `events --follow --json` is the
+default selection, so an older result-missing run wins over a newer healthy run and exits with code 2. JSON mode writes one stable value to stdout on success or error; `events --follow --json` is the
 documented newline-delimited streaming exception.
 
 Crash semantics, pane receipts, run locking, and the at-least-once boundary for external Herdr
