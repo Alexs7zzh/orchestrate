@@ -34,6 +34,7 @@ function state(overrides: Partial<RunState> = {}): RunState {
     gates: {},
     holds: {},
     repeats: {},
+    workrooms: {},
     spawnIntents: {},
     ...overrides
   }

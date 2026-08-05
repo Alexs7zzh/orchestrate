@@ -17,12 +17,15 @@ recovery for a missing or torn snapshot.
 
 Before a pane starts, Orchestrate persists an intent and attempt token. The surface records one
 small receipt after Herdr creates a pane and marks it `ready` only after command start or agent
-prompt succeeds. Agent prompts are delivered atomically and wait until the agent is observed
-working, so a `ready` receipt means the prompt was actually taken, not merely accepted. Delivery
-waits for the agent to report interactive readiness first, requires the prompt text to appear in
-the pane transcript before trusting the observation, and delivers a prompt beyond the PTY-safe
-typed budget as a short pointer to a prompt copy in the attempt submission directory. A prompt
-error or wait timeout is recorded as `ambiguous`. A failure after the prompt was observed taken —
+prompt succeeds. Every agent prompt carries a unique per-attempt delivery marker and waits until
+the agent is observed working, done, or blocked, so a `ready` receipt means the prompt was actually
+taken, not merely accepted. Delivery waits for the agent to report interactive readiness first and
+requires the marker to appear in the pane transcript before trusting the observation. If Herdr
+reports a stall with that marker visible, Orchestrate submits the already-rendered composer once
+with Enter and waits for a live state; it resends the full prompt only while the marker is absent.
+A prompt beyond the PTY-safe typed budget is delivered as a short pointer to a prompt copy in the
+attempt submission directory. A prompt error or wait timeout is recorded as `ambiguous`. A failure
+after the prompt was observed taken —
 such as a provider reporting a required lineage session id late — is recorded as
 `session-pending`: reconcile retries only the session capture on that live pane and promotes the
 receipt to ready without re-prompting. Reconcile adopts a live ready pane. If a prompt-bearing
@@ -32,9 +35,10 @@ and forks the unchanged committed parent. It never re-prompts a possibly accepte
 under the same completion token. A dead `created` receipt, which predates command start or prompt
 delivery, may still be retried in place. Every other live incomplete or ambiguous receipt stops for
 agent-assisted inspection. Reconcile does not infer prompt acceptance from provider lifecycle
-status or close label-matched tabs. One node's ambiguous or pending spawn is surfaced after the
-other planned intents of the same reconciliation have started; it never starves independent ready
-work.
+status or close label-matched tabs. One node's ambiguous or pending spawn is surfaced after
+independent planned intents of the same reconciliation have started; it never starves ready work
+outside that node's declared workroom. A seated observation failure blocks later seat launches in
+the same room for that reconciliation because the room's physical occupancy is unresolved.
 
 New agent panes may briefly exist before their interactive shell is ready; the surface retries only
 Herdr's explicit `agent_pane_busy` readiness response within a fixed bound. Other unambiguous start
@@ -146,6 +150,13 @@ leaves the parent head unchanged. A retry therefore forks the same committed par
 provider conversation lineage; it does not roll back source-workspace mutations performed by a
 failed attempt.
 
+For a seatful node, the reusable placement slot is its declared workroom seat. Later repeat
+instances inherit the same seat. An active room parks a successful seat pane rather than applying
+`close-success` to that individual turn. A failed attempt remains actionable in the same seat, and
+its retry returns there; neither failure nor retry advances room settlement. Workroom presentation
+does not alter the provider lineage contract and does not automatically replace an unavailable
+resume with a fresh provider session.
+
 ## Repeats and limits
 
 A repeat instantiates its member subgraph one round at a time. Runtime IDs append `--r<N>`.
@@ -160,6 +171,10 @@ outside consumer. Different repeats cannot be joined by a condition. The schedul
 member anew each round before gates and attempts; a skip in one round does not force a skip in the
 next. The verdict member cannot be conditional, so every settled round has an actual result for
 `until`.
+
+Repeat instances retain their template's workroom and seat. A workroom settlement anchor is a
+non-repeat node downstream of all room work, including its repeat; reaching `maxRounds` therefore
+pauses without settling that room.
 
 The condition is either a command result or a JSON pointer into a schema-validated agent result.
 At `maxRounds`, the run pauses. Resume requires `--continue-rounds <n>` or
@@ -187,6 +202,9 @@ behavior: it never silently chooses either branch. A skipped dependency releases
 held; content inputs render `[skipped]`, while path inputs are invalid because skipped nodes have no
 result file.
 Status, result JSON, events, and the board expose the skipped state and reason.
+A skipped seatful node has no attempt and performs no Herdr action: it does not open a workroom,
+replace a provider, close a parked pane, or otherwise consume its seat. It may still satisfy a
+workroom settlement anchor because `skipped` is a durable scheduler-owned terminal outcome.
 
 ## Gates and revisions
 
@@ -209,18 +227,50 @@ template becomes immutable after its first attempt or skip, so approval cannot r
 provider lineage between rounds. Thus newly inserted barriers affect scheduling as well as board
 edges.
 
+Once any node opens a workroom, revision approval also freezes that room's id, label, layout,
+ordered seats, and `settlesOn` anchors. The revised workflow must preserve every live pane's unique
+room and seat assignment. A revision that would move an occupant, assign two live occupants to one
+seat, or leave a live seat outside the room is rejected rather than repaired by placement guesses.
+
 ## Herdr presentation
 
-Every node is a real herdr pane. `placement.workspace` chooses the dedicated run workspace or the
-launching origin workspace, independently from the ordered placement rules that choose tabs or
-splits, group related nodes, cap splits per tab, and define retry reuse. Origin placement verifies
-that the recorded origin pane still belongs to its workspace and falls back to the dedicated run
-workspace when it does not. A recorded split anchor is verified immediately before creation.
-Explicit `pane_not_found` falls back to a fresh tab in the selected origin or dedicated workspace;
-transport failures abort with the planned intent intact and consume no retry. Board policy
-separately chooses a right split, the current workspace,
-or a dedicated workspace. Completion policy may close successful panes; focus policy may focus
-only attention events or every start.
+Every node is a real herdr pane. Optional approved workrooms provide stable tabs with ordered
+`columns` or `rows` seats. A node assigned a seat bypasses matcher-selected tab/split grouping and
+uses that declared room and seat; only one live attempt may occupy it. A node that names a workroom
+without a seat remains supporting, transient work. Command nodes are always seatless in V1 and
+continue to execute in transient Herdr panes rather than a background process.
+
+Workrooms inherit the effective `placement.workspace`: the dedicated run workspace or the launching
+origin workspace. Origin placement verifies that the recorded origin pane still belongs to its
+workspace and falls back to the dedicated run workspace when it does not. Ordinary seatless nodes
+continue to use the ordered placement rules that choose tabs or splits, group related nodes, cap
+splits per tab, and define retry reuse.
+
+While a room is active, successful seat panes park and ignore the ordinary agent `close-success`
+policy so later turns can reuse the stable seats. The room settles after every `settlesOn` anchor is
+durably `completed` or scheduler-owned `skipped`; failed, paused, gated, or exhausted-repeat anchors
+that have not reached either status leave it active. A downstream hold remains a separate fact and
+does not rewrite a completed anchor. At settlement, the effective agent completion preference
+applies once to the parked room: `keep-open` leaves an archived room and `close-success` closes its
+seat panes.
+Seatless nodes retain their normal per-node completion behavior.
+
+A recorded workroom pane and its remaining live occupants are verified immediately before reuse or
+restoration. An explicitly missing seat pane is recreated in the declared room only when that
+observation identifies the vacant seat unambiguously. Contradictory occupants, duplicate candidates,
+or ambiguous Herdr state produce human attention; Orchestrate does not spill a seatful node into a
+fresh matcher-selected tab. A transient occupancy-verification transport failure defers the seat
+without durable attention, while a genuine contradiction durably marks it for attention. Both
+cases block sibling seat launches in the room until reconciliation can observe the occupancy;
+unrelated rooms and unseated work may continue. The planned intent stays intact and consumes no
+retry. Automatic fresh-provider fallback and alias rebinding are outside V1.
+
+The declared layout and seat order determine split intent and preview order. Herdr owns the actual
+tab and split geometry, so recovery guarantees logical seat identity and co-location inside the
+declared room, not pixel-perfect reconstruction of an earlier arrangement.
+
+Board policy separately chooses a right split, the current workspace, or a dedicated workspace.
+Focus policy may focus only attention events or every start.
 
 The interactive board refreshes on a bounded clock as well as journal writes, so elapsed time and
 herdr garnish remain live. Herdr `idle` and `unknown` startup samples are transient. For a durably

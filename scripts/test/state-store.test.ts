@@ -97,6 +97,7 @@ function state(sequence = 1): RunState {
     gates: {},
     holds: {},
     repeats: {},
+    workrooms: {},
     spawnIntents: {}
   }
 }

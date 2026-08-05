@@ -535,6 +535,9 @@ export function runNeedsAttention(state: RunState): boolean {
     state.status === "failed" ||
     state.pendingRevision !== null ||
     Object.values(state.nodes).some((node) => node.status === "awaiting-approval") ||
+    Object.values(state.workrooms).some((workroom) =>
+      Object.values(workroom.seats).some((seat) => seat.status === "attention")
+    ) ||
     Object.values(state.holds).some((hold) => holdBlocksDependencies(state, hold)) ||
     Object.values(state.repeats).some((repeat) => repeat.status === "max-rounds")
   )

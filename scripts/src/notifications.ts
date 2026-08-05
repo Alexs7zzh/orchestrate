@@ -22,6 +22,7 @@ export const EVENT_SEVERITIES = {
   "node.ready": "progress",
   "node.spawn-planned": "progress",
   "node.started": "progress",
+  "workroom.attention": "attention",
   "node.completed": "milestone",
   "node.skipped": "progress",
   "node.failed": "milestone",
@@ -37,6 +38,7 @@ export const EVENT_SEVERITIES = {
   "repeat.round-started": "progress",
   "repeat.completed": "milestone",
   "repeat.max-rounds": "attention",
+  "workroom.seat-cleared": "progress",
   "ui.degraded": "progress"
 } as const satisfies Readonly<Record<EventType, EventSeverity>>
 

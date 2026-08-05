@@ -18,11 +18,75 @@ schema requires them.
   `allow-with-approval`.
 - `nodes`: static agent and command nodes.
 - `repeats`: bounded repeated subgraphs.
+- optional `presentation.workrooms`: approved, stable Herdr rooms for related node turns.
+
+## Presentation workrooms
+
+`presentation` is optional. Its `workrooms` array declares stable human-facing rooms without
+changing DAG, permission, workspace, or provider-session semantics. Each workroom declares:
+
+- a unique `id` and human-facing `label`;
+- `layout`, either `columns` or `rows`;
+- an ordered `seats` array of one to four globally unique `{ "id", "label" }` entries; and
+- a non-empty `settlesOn` array of node template IDs.
+
+Seat order is presentation order. A room settles only after every `settlesOn` node has the durable
+status `completed` or scheduler-owned `skipped`; failures, pauses, unopened gates, and exhausted
+repeats do not satisfy an anchor. A downstream hold is a separate fact and does not rewrite a
+completed anchor. An anchor must be outside every repeat and downstream of every node assigned to
+the room, so settlement cannot race unfinished room work.
+
+A node may name `workroom` and may name `seat`. Both are omission-only optional fields: in
+particular, a seatless node omits `seat` rather than writing `"seat": null`. A seatful node must
+name an existing room that declares that seat. A seatless supporting node may name the room with
+`seat` omitted.
+A node outside a room must not name a seat. Workrooms and seats are presentation identities, not
+provider-session aliases: agent nodes still declare `session.mode`, `from`, and `saveAs` normally.
+
+```json
+{
+  "presentation": {
+    "workrooms": [
+      {
+        "id": "review-s1",
+        "label": "Deep Review · Slice 1",
+        "layout": "columns",
+        "seats": [
+          { "id": "implementer", "label": "Implementer" },
+          { "id": "reviewer", "label": "Independent Reviewer" }
+        ],
+        "settlesOn": ["s1-gate"]
+      }
+    ]
+  }
+}
+```
+
+The implementer and reviewer agent nodes name `workroom: "review-s1"` and their respective seat.
+A supporting build command names only `workroom: "review-s1"`; its `seat` field is omitted.
+
+Seatful nodes use their declared room and ordered seat instead of matching the ordinary tab/split
+placement rules. The room inherits the effective `placement.workspace` (`dedicated` or `origin`);
+an unavailable origin still falls back to the dedicated run workspace. Nodes without a seat use
+ordinary matcher placement. In particular, V1 command nodes remain seatless, transient Herdr panes
+even when they support a workroom; workrooms do not add a headless command executor.
+
+`layout` and seat order define the intended split direction and preview order. Herdr owns physical
+geometry: after missing-pane reconstruction, Orchestrate guarantees logical seat identity and
+workroom co-location when observation is unambiguous, not pixel-perfect restoration of the former
+split geometry.
+
+Only one live attempt may occupy a seat. Validation rejects seat assignments that can run
+concurrently. A successful seatful turn parks in its seat while the room is active, even when the
+ordinary agent completion preference is `close-success`. After settlement, that existing
+preference applies to the parked seat panes: `keep-open` leaves the room archived and
+`close-success` closes them. Seatless nodes keep their normal completion behavior.
 
 ## Common node fields
 
 Every node declares `id`, `type`, `title`, `needs`, nullable `cwd`, `workspace`, `inputs`, `retry`,
-and `gate`, and may declare `when`. IDs are unique and dependencies must form a DAG.
+and `gate`, and may declare `when`, `workroom`, and `seat`. IDs are unique and dependencies
+must form a DAG.
 
 Naming convention: `parent--sub` (for example `api--test`) marks a sub-node of `api`. The default
 UI placement written by `ui wizard` keys on this: sub-nodes open as splits in their parent's tab
@@ -73,6 +137,11 @@ Approved mid-run revisions may reorder, insert, remove, or change dependencies f
 not started. Their runtime entries are rebuilt in revised declaration order and rescheduled from
 `pending`. Templates for nodes with an attempt or a scheduler-derived skip are immutable; unsafe
 removal or rewriting is rejected so journal history, decisions, and session lineage remain valid.
+Once an assigned attempt reserves a workroom, its identity, label, layout, seat order, seat
+identities, and settlement anchors are immutable. The reservation boundary also covers a crash
+after pane creation but before spawn observation reaches run state. Revisions must preserve every
+live pane's unambiguous room and seat occupancy; a revision that would move, duplicate, or orphan
+one is rejected rather than guessed.
 The proposal and approval mechanics are in [runtime-operations.md](runtime-operations.md).
 
 ## Agent nodes
@@ -85,11 +154,16 @@ fork. `saveAs` records the session id for lineage: Claude ids are launcher-chose
 provider at start (resume keeps the source id), while Codex ids are captured from Herdr after the
 first prompt. Nodes without a `saveAs` alias never depend on session reporting. Claude sessions are
 project-scoped by launch directory, so every Claude node participating in a lineage runs from one
-run-shared session directory beside the token-addressed submission directories. Fan-out must fork rather than resume the
-same source twice.
-When a resumed session's previous Herdr pane is still live, Orchestrate replaces the provider in
-that pane's existing UI slot instead of opening another configured tab or split. A missing pane
-falls back to the normal placement rules.
+run-shared session directory beside the token-addressed submission directories. Fan-out must fork
+rather than resume the same source twice. In V1 a resumed or forked node must retain its source
+node's workroom and seat assignment;
+continuing one provider lineage across presentation identities is rejected.
+When a resumed or forked session's previous Herdr pane is still live, Orchestrate replaces the
+provider in that pane's existing UI slot instead of opening another configured tab or split. For a seatful
+node, the declared seat is authoritative: an explicitly missing pane is restored in that seat and
+room only when the observed Herdr room and remaining occupants identify the slot unambiguously.
+Ambiguous or contradictory occupancy requires human attention instead of placement fallback. A
+seatless node with a missing pane follows the normal placement rules.
 
 A repeat member may resume an alias seeded by an unconditional node outside the repeat. Members
 sharing one alias must form a total dependency order; they cannot fork, replace the alias name, or
@@ -147,8 +221,9 @@ token-addressed submission allowance is the only exception.
 ## Command nodes
 
 Command nodes add `argv`, `mutates`, `inheritEnv`, literal `env`, and `allowedExitCodes`. They run
-directly in a herdr pane. Output is tee'd to the attempt output path before `node-exit` reports the
-numeric status.
+directly in a transient herdr pane and do not occupy a workroom seat in V1. A command may still name
+its supporting `workroom` with `seat` omitted. Output is tee'd to the attempt output path
+before `node-exit` reports the numeric status.
 
 ## Node environment
 
@@ -175,6 +250,14 @@ source keeps its stable ID, and an outside consumer of a repeat source observes 
 round. Conditions across two different repeats are invalid. Each member is evaluated anew per
 round. Completed and skipped members both settle their dependency edge, subject to holds, while the
 unconditional verdict member always runs and determines whether another round is instantiated.
+Every runtime instance inherits its template's workroom and seat. Retries and later rounds reuse
+that seat; a scheduler-owned `when` skip creates no attempt or pane and does not replace, close, or
+otherwise touch the seat's parked occupant.
+
+Workrooms do not automatically recover an unavailable provider session as a fresh session. V1
+retains the approved `fresh`, `resume`, and `fork` contract and stops for existing recovery when a
+resume cannot be established; automatic fresh fallback and alias rebinding are outside this
+presentation feature.
 
 ## Stable prompts and planning
 

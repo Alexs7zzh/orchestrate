@@ -138,6 +138,114 @@ describe("CLI contract", () => {
         nodes: [{ ...reorderedNode, env: { BETA: "changed", ALPHA: "1" } }]
       })
     ).toEqual(["~ node build"])
+    expect(
+      structuralDiff(before, {
+        ...after,
+        presentation: {
+          workrooms: [
+            {
+              id: "delivery",
+              label: "Delivery",
+              layout: "columns",
+              seats: [{ id: "builder", label: "Builder" }],
+              settlesOn: ["build"]
+            }
+          ]
+        }
+      })
+    ).toEqual(["~ presentation"])
+  })
+
+  test("previews the workroom floor plan and authoritative seat assignments", async () => {
+    const temporary = await mkdtemp(path.join(os.tmpdir(), "orchestrate-preview-workrooms-"))
+    const file = path.join(temporary, "workflow.json")
+    const spec: WorkflowSpec = {
+      name: "preview-workrooms",
+      objective: "Preview presentation intent.",
+      cwd: "/tmp",
+      concurrency: 1,
+      callback: { type: "none" },
+      milestones: false,
+      limits: { maxStarts: null },
+      writeConflicts: "reject",
+      presentation: {
+        workrooms: [
+          {
+            id: "delivery",
+            label: "Delivery\nforged room",
+            layout: "columns",
+            seats: [{ id: "builder", label: "Builder\nforged seat" }],
+            settlesOn: ["build"]
+          }
+        ]
+      },
+      repeats: [],
+      nodes: [
+        {
+          id: "build",
+          type: "agent",
+          title: "Build",
+          needs: [],
+          workroom: "delivery",
+          seat: "builder",
+          cwd: null,
+          workspace: {
+            mode: "shared",
+            path: null,
+            vcs: "none",
+            writes: [],
+            exclusiveResources: []
+          },
+          inputs: [],
+          retry: { maxAttempts: 1 },
+          gate: "none",
+          provider: "codex",
+          model: "provider-default",
+          effort: null,
+          prompt: "Build.",
+          session: { mode: "fresh", from: null, saveAs: null },
+          permissions: {
+            execution: { sandbox: "read-only" },
+            escalation: "deny",
+            extraArgs: [],
+            inheritEnv: [],
+            env: {}
+          },
+          output: { format: "text", schema: null }
+        }
+      ]
+    }
+    try {
+      await Bun.write(file, `${JSON.stringify(spec)}\n`)
+      const json = await capture(() => runCli(["preview", file, "--json"]))
+      expect(json.code).toBe(0)
+      expect(JSON.parse(json.output)).toMatchObject({
+        floorPlan: {
+          activeSeatsOverrideCloseSuccess: true,
+          workrooms: [
+            {
+              id: "delivery",
+              layout: "columns",
+              settlesOn: ["build"],
+              seats: [{ id: "builder", nodes: ["build"] }]
+            }
+          ]
+        },
+        nodes: [{ id: "build", workroom: "delivery", seat: "builder" }]
+      })
+      const plain = await capture(() => runCli(["preview", file]))
+      expect(plain.output).toContain("Floor plan:")
+      expect(plain.output).toContain("Active seats override close-success: true")
+      expect(plain.output).toContain(
+        'delivery "Delivery\\nforged room" layout=columns settlesOn=build'
+      )
+      expect(plain.output).toContain('seat builder "Builder\\nforged seat" nodes=build')
+      expect(plain.output).not.toContain("Delivery\nforged room")
+      expect(plain.output).not.toContain("Builder\nforged seat")
+      expect(plain.output).toContain("workroom=delivery seat=builder")
+    } finally {
+      await rm(temporary, { recursive: true, force: true })
+    }
   })
 
   test("publishes the command vocabulary and the global exit table", async () => {

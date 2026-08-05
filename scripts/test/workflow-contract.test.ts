@@ -158,6 +158,254 @@ describe("workflow contract", () => {
     }
   })
 
+  test("accepts ordered workroom seats and preserves workflows without presentation", () => {
+    const legacy = workflow([command("legacy")])
+    expect(validateWorkflow(legacy).issues).toEqual([])
+    expect(validateWorkflow(legacy).workflow?.presentation).toBeUndefined()
+
+    const presented: WorkflowSpec = {
+      ...workflow([
+        agent("plan", { workroom: "delivery", seat: "builder" }),
+        agent("build", {
+          needs: ["plan"],
+          workroom: "delivery",
+          seat: "builder"
+        }),
+        command("review", { needs: ["build"], workroom: "delivery" }),
+        agent("settle", { needs: ["review"], workroom: "delivery", seat: "reviewer" })
+      ]),
+      presentation: {
+        workrooms: [
+          {
+            id: "delivery",
+            label: "Delivery",
+            layout: "columns",
+            seats: [
+              { id: "builder", label: "Builder" },
+              { id: "reviewer", label: "Reviewer" }
+            ],
+            settlesOn: ["settle"]
+          }
+        ]
+      }
+    }
+    expect(validateWorkflow(presented).issues).toEqual([])
+  })
+
+  test("validates workroom references, globally unique seats, capacity, and settlement anchors", () => {
+    const base: WorkflowSpec = {
+      ...workflow([
+        agent("left", { workroom: "alpha", seat: "shared-seat" }),
+        agent("right", { workroom: "alpha", seat: "shared-seat" }),
+        command("settle", { needs: ["left"], workroom: "alpha" })
+      ]),
+      presentation: {
+        workrooms: [
+          {
+            id: "alpha",
+            label: "Alpha",
+            layout: "rows",
+            seats: [{ id: "shared-seat", label: "Shared" }],
+            settlesOn: ["settle"]
+          },
+          {
+            id: "beta",
+            label: "Beta",
+            layout: "columns",
+            seats: [{ id: "shared-seat", label: "Duplicate" }],
+            settlesOn: ["missing"]
+          }
+        ]
+      }
+    }
+    const codes = validateWorkflow(base).issues.map((issue) => issue.code)
+    expect(codes).toEqual(expect.arrayContaining(["seat-id", "seat-order", "workroom-settlement"]))
+
+    const badAssignmentsResult = validateWorkflow({
+      ...workflow([
+        agent("seat-without-room", { seat: "alpha-seat" }),
+        command("unknown-room", { workroom: "missing" }),
+        agent("wrong-room", { workroom: "alpha", seat: "beta-seat" }),
+        agent("unknown-seat", { workroom: "alpha", seat: "missing-seat" }),
+        command("command-seat", { workroom: "alpha", seat: "alpha-seat" }),
+        command("settle", {
+          needs: ["seat-without-room", "unknown-room", "wrong-room", "unknown-seat", "command-seat"]
+        })
+      ]),
+      presentation: {
+        workrooms: [
+          {
+            id: "alpha",
+            label: "Alpha",
+            layout: "columns",
+            seats: [{ id: "alpha-seat", label: "Alpha" }],
+            settlesOn: ["settle"]
+          },
+          {
+            id: "beta",
+            label: "Beta",
+            layout: "columns",
+            seats: [{ id: "beta-seat", label: "Beta" }],
+            settlesOn: ["settle"]
+          }
+        ]
+      }
+    })
+    const badAssignments = badAssignmentsResult.issues.map((issue) => issue.code)
+    expect(badAssignments).toEqual(expect.arrayContaining(["node-seat", "node-workroom"]))
+    expect(badAssignmentsResult.issues.map((issue) => issue.message).join("\n")).toContain(
+      "cannot occupy participant seat"
+    )
+
+    for (const seats of [
+      [],
+      Array.from({ length: 5 }, (_unused, index) => ({
+        id: `seat-${index}`,
+        label: `Seat ${index}`
+      }))
+    ]) {
+      const invalidCapacity = structuredClone(base) as unknown as Record<string, unknown>
+      const presentation = invalidCapacity.presentation as {
+        workrooms: Array<{ seats: Array<{ id: string; label: string }> }>
+      }
+      presentation.workrooms[0]!.seats = seats
+      const capacityResult = validateWorkflow(invalidCapacity)
+      expect(capacityResult.workflow).toBeNull()
+      expect(capacityResult.issues.map((issue) => issue.code)).toContain("workroom-seats")
+    }
+
+    const duplicatedInput = structuredClone(base)
+    for (const workroom of duplicatedInput.presentation!.workrooms) {
+      Object.assign(workroom, { id: "duplicate" })
+    }
+    const duplicatedWorkroom = validateWorkflow(duplicatedInput)
+    expect(duplicatedWorkroom.issues.map((issue) => issue.code)).toContain("workroom-id")
+  })
+
+  test("uses repeat-aware ordering but rejects repeat settlement anchors", () => {
+    const research = agent("research", { workroom: "review-room", seat: "review-seat" })
+    const verdict = command("verdict")
+    const settle = agent("settle", {
+      needs: ["verdict"],
+      workroom: "review-room",
+      seat: "review-seat"
+    })
+    const spec: WorkflowSpec = {
+      ...workflow([research, verdict, settle]),
+      presentation: {
+        workrooms: [
+          {
+            id: "review-room",
+            label: "Review",
+            layout: "rows",
+            seats: [{ id: "review-seat", label: "Review" }],
+            settlesOn: ["settle"]
+          }
+        ]
+      },
+      repeats: [
+        {
+          id: "review-loop",
+          members: ["research", "verdict"],
+          until: { type: "command-success", node: "verdict" },
+          maxRounds: 2
+        }
+      ]
+    }
+    expect(validateWorkflow(spec).issues).toEqual([])
+    expect(
+      validateWorkflow({
+        ...spec,
+        presentation: {
+          workrooms: [{ ...spec.presentation!.workrooms[0]!, settlesOn: ["verdict"] }]
+        }
+      }).issues.map((issue) => issue.code)
+    ).toContain("workroom-settlement")
+  })
+
+  test("rejects cycles introduced by repeat-boundary dependency expansion", () => {
+    const spec: WorkflowSpec = {
+      ...workflow([
+        agent("worker", { workroom: "review-room", seat: "worker-seat" }),
+        command("verdict", { needs: ["bridge"] }),
+        command("bridge", { needs: ["worker"], workroom: "review-room" })
+      ]),
+      presentation: {
+        workrooms: [
+          {
+            id: "review-room",
+            label: "Review room",
+            layout: "columns",
+            seats: [{ id: "worker-seat", label: "Worker" }],
+            settlesOn: ["bridge"]
+          }
+        ]
+      },
+      repeats: [
+        {
+          id: "review-loop",
+          members: ["worker", "verdict"],
+          until: { type: "command-success", node: "verdict" },
+          maxRounds: 2
+        }
+      ]
+    }
+
+    const result = validateWorkflow(spec)
+    expect(result.workflow).toBeNull()
+    expect(result.issues).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          severity: "error",
+          code: "repeat-boundary-cycle",
+          nodes: expect.arrayContaining(["bridge", "verdict"])
+        })
+      ])
+    )
+  })
+
+  test("keeps canonical session lineage in one seat and rejects presentation handoffs", () => {
+    const source = agent("source", {
+      workroom: "sessions",
+      seat: "source-seat",
+      session: { mode: "fresh", from: null, saveAs: "canonical" }
+    })
+    const resumed = agent("resumed", {
+      needs: ["source"],
+      workroom: "sessions",
+      seat: "source-seat",
+      session: { mode: "resume", from: "canonical", saveAs: null }
+    })
+    const spec: WorkflowSpec = {
+      ...workflow([source, resumed]),
+      presentation: {
+        workrooms: [
+          {
+            id: "sessions",
+            label: "Sessions",
+            layout: "columns",
+            seats: [
+              { id: "source-seat", label: "Source" },
+              { id: "other-seat", label: "Other" }
+            ],
+            settlesOn: ["resumed"]
+          }
+        ]
+      }
+    }
+    expect(validateWorkflow(spec).issues).toEqual([])
+    const crossSeat = structuredClone(spec)
+    const resumedNode = crossSeat.nodes.find((node) => node.id === "resumed")
+    expect(resumedNode).toBeDefined()
+    if (resumedNode === undefined) {
+      throw new Error("Expected resumed node in cloned workflow.")
+    }
+    Object.assign(resumedNode, { seat: "other-seat" })
+    expect(validateWorkflow(crossSeat).issues.map((issue) => issue.code)).toContain(
+      "session-presentation"
+    )
+  })
+
   test("rejects malformed and unsupported webhook callback URLs before approval", () => {
     for (const url of ["not a url", "file:///tmp/callback", "ftp://example.invalid/hook"]) {
       const result = validateWorkflow({

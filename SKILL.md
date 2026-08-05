@@ -14,16 +14,16 @@ Use Orchestrate only when the task is materially clearer or safer as an explicit
 2. Inspect project instructions and the current working tree before designing writes.
 3. Write a complete workflow JSON document using `references/workflow.schema.json`.
 4. Declare every dependency, input, workspace, write pattern, exclusive resource, permission,
-   retry, gate, session relationship, repeat, and execution limit explicitly.
+   retry, gate, session relationship, repeat, presentation workroom, and execution limit explicitly.
 5. Prefer concurrency 3. It limits simultaneous active node attempts and is a human-attention budget.
 6. Run `orchestrate validate`, then `orchestrate preview`.
-7. Present the objective, graph, mutation boundaries, permissions, repeat limits, and preview
-   digest as a readable prose walkthrough in your reply message — describe the nodes,
-   dependencies, loops, providers, and models in words. Never paste raw workflow JSON or terminal
-   preview output as the presentation, and never route approval through an interactive question
-   tool: terminal output is often collapsed, so the human would be approving work they never saw.
-   End your message after the walkthrough and wait for the human to reply. Do not start until the
-   user approves that digest.
+7. Present the objective, graph, mutation boundaries, permissions, repeat limits, presentation
+   workrooms/seats, and preview digest as a readable prose walkthrough in your reply message —
+   describe the nodes, dependencies, loops, providers, and models in words. Never paste raw
+   workflow JSON or terminal preview output as the presentation, and never route approval through
+   an interactive question tool: terminal output is often collapsed, so the human would be
+   approving work they never saw. End your message after the walkthrough and wait for the human to
+   reply. Do not start until the user approves that digest.
 8. Start with `orchestrate run <file> --approve <digest>`. Report the run ID. Initial panes run
    independently. `node-done` writes only the authenticated submission; Herdr's trusted plugin event
    hook wakes the launching master when a workflow agent becomes blocked or done.
@@ -37,6 +37,17 @@ Use Orchestrate only when the task is materially clearer or safer as an explicit
 
 - Keep the graph static. If downstream work is unknowable, add a planner that emits
   schema-validated JSON and put an approval gate on the executor that consumes it.
+- Use optional `presentation.workrooms` when several ordered agent turns should occupy stable
+  human-facing seats. Declare one to four ordered seats and non-repeat `settlesOn` nodes downstream
+  of all room work. Assign `workroom` plus `seat` to participant agents; assign only `workroom` to
+  supporting seatless work. Nodes sharing a seat must be totally dependency-ordered, and a resumed
+  or forked provider session must keep its source workroom and seat.
+- Seatful nodes bypass ordinary matcher-selected tab/split placement but inherit
+  `placement.workspace`. Retries and repeat instances reuse the seat; a false `when` creates no
+  pane and does not touch it. Active seats park until every settlement anchor completes or is
+  scheduler-skipped, then the normal agent completion preference archives or closes the room.
+  Command nodes remain seatless transient Herdr panes. Workrooms do not provide automatic fresh
+  session fallback or alias rebinding.
 - Use `session.saveAs` and `session.from` only for intentional provider lineage. A fork preserves
   the source and creates a new session; resume continues the source. A repeat may resume an
   unconditional alias seeded outside the repeat when every consumer of that alias is dependency-

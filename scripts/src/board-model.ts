@@ -163,6 +163,12 @@ export interface StalledPaneAttention extends AttentionBase {
   readonly condition: "gone" | "blocked" | "done"
 }
 
+export interface WorkroomAttention extends AttentionBase {
+  readonly kind: "workroom"
+  readonly workroomId: string
+  readonly seatId: string
+}
+
 export type BoardAttention =
   | GateAttention
   | RevisionAttention
@@ -170,6 +176,7 @@ export type BoardAttention =
   | ConditionAttention
   | MaxRoundsAttention
   | DownstreamHeldAttention
+  | WorkroomAttention
   | StalledPaneAttention
 
 export interface BoardViewModel {
@@ -493,6 +500,23 @@ function buildAttention(
       }
     })
 
+  const workrooms: WorkroomAttention[] = Object.values(state.workrooms).flatMap((workroom) =>
+    Object.values(workroom.seats).flatMap((seat) =>
+      seat.status !== "attention"
+        ? []
+        : [
+            {
+              kind: "workroom" as const,
+              workroomId: workroom.id,
+              seatId: seat.id,
+              title: `${workroom.id}: seat ${seat.id} needs occupancy attention`,
+              detail: "Inspect or repair the Herdr room, then reconcile the planned seat.",
+              command: `orchestrate reconcile ${state.id}`
+            }
+          ]
+    )
+  )
+
   const stalled: StalledPaneAttention[] = nodes.flatMap((node) => {
     if (node.stalledPane === null) {
       return []
@@ -521,6 +545,7 @@ function buildAttention(
     ...condition,
     ...maxRounds,
     ...downstreamHeld,
+    ...workrooms,
     ...stalled
   ]
 }

@@ -106,9 +106,12 @@ function isPaneNotFound(error: unknown): boolean {
 }
 
 export class HerdrObservationError extends Error {
-  constructor(message: string, cause: unknown) {
+  readonly requiresAttention: boolean
+
+  constructor(message: string, cause: unknown, requiresAttention = false) {
     super(message, { cause })
     this.name = "HerdrObservationError"
+    this.requiresAttention = requiresAttention
   }
 }
 
@@ -786,12 +789,18 @@ async function promptVisible(paneId: string, marker: string): Promise<boolean> {
 // `blocked` states are also acceptance evidence. The state transition alone
 // can still be a boot flicker, and herdr's internal stall detector fires after
 // 5s of no state change regardless of the requested timeout. Delivery
-// therefore counts only when the prompt's own text also appears in the pane
-// transcript; a stalled or invisible delivery was never accepted, so
-// re-prompting within the accept budget is safe.
-async function promptUntilWorking(paneId: string, prompt: string): Promise<void> {
+// therefore counts only when this attempt's unique delivery marker appears in
+// the pane transcript. A stalled call may have left a visible prompt in the
+// provider composer without submitting it. Nudge that exact prompt with Enter
+// and require a live state before deciding that delivery succeeded; only an
+// invisible marker permits re-prompting the full text.
+async function promptUntilWorking(
+  paneId: string,
+  prompt: string,
+  deliveryMarker: string
+): Promise<void> {
   const deadline = Date.now() + AGENT_PROMPT_ACCEPT_TIMEOUT_MS
-  const marker = normalizeForScreenMatch(prompt).slice(0, 40)
+  const marker = normalizeForScreenMatch(deliveryMarker)
   for (;;) {
     const remaining = Math.max(1_000, deadline - Date.now())
     try {
@@ -813,6 +822,23 @@ async function promptUntilWorking(paneId: string, prompt: string): Promise<void>
     } catch (error) {
       if (!isHerdrErrorCode(error, "agent_prompt_stalled") || Date.now() >= deadline) {
         throw error
+      }
+      if (await promptVisible(paneId, marker)) {
+        await runHerdr(["agent", "send-keys", paneId, "enter"])
+        await runHerdr([
+          "agent",
+          "wait",
+          paneId,
+          "--until",
+          "working",
+          "--until",
+          "done",
+          "--until",
+          "blocked",
+          "--timeout",
+          String(Math.max(1_000, deadline - Date.now()))
+        ])
+        return
       }
       continue
     }
@@ -1230,6 +1256,110 @@ export class HerdrSurface {
     return this.workspaceId
   }
 
+  private async observedWorkroomPlacement(request: SpawnRequest): Promise<{
+    readonly replacementPane: PaneReference | null
+    readonly anchorPane: PaneReference | null
+  }> {
+    const workroom = request.placement.workroom
+    if (workroom === undefined) {
+      return { replacementPane: null, anchorPane: null }
+    }
+    const seats = workroom.seats.map((seat) => ({
+      ...seat,
+      pane: seat.id === workroom.seatId ? request.placement.reusePane : seat.pane
+    }))
+    const referenced = seats.filter(
+      (seat): seat is typeof seat & { readonly pane: PaneReference } => seat.pane !== null
+    )
+    if (referenced.length === 0 && (workroom.workspaceId === null || workroom.tabId === null)) {
+      return { replacementPane: null, anchorPane: null }
+    }
+
+    const ownerByPane = new Map<string, string>()
+    for (const seat of referenced) {
+      const owner = ownerByPane.get(seat.pane.paneId)
+      if (owner !== undefined && owner !== seat.id) {
+        throw new HerdrObservationError(
+          `Workroom "${workroom.id}" records pane "${seat.pane.paneId}" for both seats "${owner}" and "${seat.id}".`,
+          new Error("contradictory workroom seat ownership"),
+          true
+        )
+      }
+      ownerByPane.set(seat.pane.paneId, seat.id)
+    }
+
+    let listed
+    try {
+      listed = decodeHerdrJson(
+        await runHerdr(["pane", "list"]),
+        "pane list",
+        decodeHerdrPaneListResponse
+      )
+    } catch (error) {
+      throw new HerdrObservationError(
+        `Could not verify workroom "${workroom.id}" occupancy.`,
+        error
+      )
+    }
+    const observedById = new Map(listed.result.panes.map((pane) => [pane.pane_id, pane]))
+    const live = referenced.flatMap((seat) => {
+      const observed = observedById.get(seat.pane.paneId)
+      if (observed === undefined) {
+        return []
+      }
+      if (
+        observed.workspace_id !== seat.pane.workspaceId ||
+        observed.tab_id !== seat.pane.tabId ||
+        (workroom.workspaceId !== null && observed.workspace_id !== workroom.workspaceId) ||
+        (workroom.tabId !== null && observed.tab_id !== workroom.tabId)
+      ) {
+        throw new HerdrObservationError(
+          `Workroom "${workroom.id}" has contradictory live placement for seat "${seat.id}".`,
+          new Error("recorded and observed workroom locations differ"),
+          true
+        )
+      }
+      return [seat]
+    })
+    const liveLocations = new Set(
+      live.map((seat) => `${seat.pane.workspaceId}\0${seat.pane.tabId}`)
+    )
+    if (liveLocations.size > 1) {
+      throw new HerdrObservationError(
+        `Workroom "${workroom.id}" has live seats in more than one Herdr tab.`,
+        new Error("contradictory workroom occupancy"),
+        true
+      )
+    }
+
+    const target = live.find((seat) => seat.id === workroom.seatId)?.pane ?? null
+    if (target !== null) {
+      return { replacementPane: target, anchorPane: target }
+    }
+    const anchor = live.find((seat) => seat.id !== workroom.seatId)?.pane ?? null
+    if (anchor !== null) {
+      return { replacementPane: null, anchorPane: anchor }
+    }
+
+    if (workroom.workspaceId !== null && workroom.tabId !== null) {
+      const referencedPaneIds = new Set(referenced.map((seat) => seat.pane.paneId))
+      const unknownOccupant = listed.result.panes.find(
+        (pane) =>
+          pane.workspace_id === workroom.workspaceId &&
+          pane.tab_id === workroom.tabId &&
+          !referencedPaneIds.has(pane.pane_id)
+      )
+      if (unknownOccupant !== undefined) {
+        throw new HerdrObservationError(
+          `Workroom "${workroom.id}" cannot restore seat "${workroom.seatId}" because tab "${workroom.tabId}" has unowned live occupants.`,
+          new Error("ambiguous workroom occupancy"),
+          true
+        )
+      }
+    }
+    return { replacementPane: null, anchorPane: null }
+  }
+
   async spawn(request: SpawnRequest): Promise<SpawnObservation> {
     const { workflow, state, intent } = request
     const runtimeNode = state.nodes[intent.nodeId]
@@ -1279,7 +1409,12 @@ export class HerdrSurface {
           : realpathSync.native(path.dirname(attempt.resultPath))
         : sourceRoot
     let replacementPane: PaneReference | null = null
-    if (request.placement.reusePane !== null) {
+    let observedWorkroomAnchor: PaneReference | null = null
+    if (request.placement.workroom !== undefined) {
+      const observed = await this.observedWorkroomPlacement(request)
+      replacementPane = observed.replacementPane
+      observedWorkroomAnchor = observed.anchorPane
+    } else if (request.placement.reusePane !== null) {
       try {
         if (await this.paneExists(request.placement.reusePane.paneId)) {
           replacementPane = request.placement.reusePane
@@ -1304,12 +1439,14 @@ export class HerdrSurface {
     }
     const workspaceId =
       replacementPane?.workspaceId ??
+      observedWorkroomAnchor?.workspaceId ??
       (await this.nodeWorkspace(request, true, providerCwd, environment))
     if (workspaceId === null) {
       throw new Error(`Could not resolve a workspace for node "${intent.nodeId}".`)
     }
     const splitAnchor =
       replacementPane ??
+      observedWorkroomAnchor ??
       (request.placement.surface === "split" &&
       request.placement.anchorPane !== null &&
       request.placement.anchorPane.workspaceId === workspaceId
@@ -1343,7 +1480,8 @@ export class HerdrSurface {
           splitAnchor as PaneReference,
           providerCwd,
           environment,
-          replacementPane?.group ?? request.placement.group
+          replacementPane?.group ?? request.placement.group,
+          request.placement.splitDirection ?? "down"
         )
         pane =
           replacementPane === null
@@ -1354,8 +1492,14 @@ export class HerdrSurface {
                 surface: replacementPane.surface
               }
       } catch (error) {
-        if (isPaneNotFound(error)) {
+        if (isPaneNotFound(error) && request.placement.workroom === undefined) {
           pane = await freshTab()
+        } else if (isPaneNotFound(error)) {
+          throw new HerdrObservationError(
+            `Workroom "${request.placement.workroom?.id ?? "unknown"}" changed after its occupancy was verified.`,
+            error,
+            true
+          )
         } else {
           throw new HerdrObservationError(
             `Could not split from anchor "${(splitAnchor as PaneReference).paneId}".`,
@@ -1384,11 +1528,20 @@ export class HerdrSurface {
     let promptDeliveryConfirmed = false
     let launchSessionId: string | null = null
     try {
+      const seatLabel =
+        node.seat === undefined
+          ? null
+          : (workflow.presentation?.workrooms
+              .flatMap((workroom) => workroom.seats)
+              .find((seat) => seat.id === node.seat)?.label ?? node.seat)
       await runHerdr([
         "pane",
         "rename",
         pane.paneId,
-        `${intent.nodeId}: ${runtimeNode?.title ?? node.title}`.slice(0, 80)
+        (seatLabel === null
+          ? `${intent.nodeId}: ${runtimeNode?.title ?? node.title}`
+          : `${seatLabel} · ${runtimeNode?.title ?? node.title}`
+        ).slice(0, 80)
       ])
       if (node.type === "command") {
         const commandPath = path.join(path.dirname(attempt.resultPath), "command.sh")
@@ -1443,8 +1596,10 @@ export class HerdrSurface {
           node.provider === "claude" ? `Source workspace: ${sourceRoot}\n\n` : ""
         }You are a workflow agent started by this machine's orchestrate launcher. Your task briefing was too large to deliver inline, so the launcher that started this session saved it to ${deliveredPromptPath} (inside this attempt's own readable transport directory). Read that file and carry out the task it describes.`
       }
+      const deliveryMarker = `orchestrate-delivery:${intent.token}`
+      prompt = `${prompt}\n\n[${deliveryMarker}]`
       promptMayHaveBeenAccepted = true
-      await promptUntilWorking(pane.paneId, prompt)
+      await promptUntilWorking(pane.paneId, prompt, deliveryMarker)
       promptDeliveryConfirmed = true
       const sessionId = !capturesProviderSession(node, state, intent)
         ? null
@@ -1686,6 +1841,10 @@ export class HerdrSurface {
       }
     }
     await rm(codexProfilePath(codexControlProfile(paneId)), { force: true }).catch(() => undefined)
+  }
+
+  async renamePane(paneId: string, label: string): Promise<void> {
+    await runHerdr(["pane", "rename", paneId, label])
   }
 
   async paneExists(paneId: string): Promise<boolean> {

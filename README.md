@@ -67,6 +67,12 @@ commands, herdr, paths, output schemas, worktree prerequisites, and declared wri
 state or panes are created. `--dry-run` performs the same read-only `herdr --version` preflight as
 a real start, but creates no state, worktrees, workspaces, tabs, or panes.
 
+A workflow may also approve stable presentation workrooms. Each workroom has a label, a `columns`
+or `rows` layout, ordered named seats, and explicit `settlesOn` nodes. Nodes name their workroom and
+optionally a seat; preview shows this topology so the human approves stable agent positions and the
+room's settlement boundary with the graph. Workrooms affect Herdr presentation only—they do not
+change dependencies, permissions, workspaces, or provider-session lineage.
+
 Every agent prompt has a stable frame: objective, node contract, declared inputs, result path, and
 the exact `node-done` command. Dynamic inputs are resolved only when dependencies finish. A task
 whose later work cannot be known up front should use a planning node that emits structured output,
@@ -168,6 +174,28 @@ run workspace. A recorded split anchor is verified immediately before use: expli
 a fresh tab in the selected workspace. If the pane closes between that check and split, one
 `pane_not_found` falls back exactly once to a fresh tab without consuming the attempt; transport
 errors preserve the planned intent as observation failures.
+
+Seatful workroom nodes are the exception to matcher-selected tab/split placement: they use the
+declared workroom and ordered seat while inheriting the same effective `placement.workspace`.
+Retries and repeat rounds return to that seat. A false `when` has no attempt or pane and does not
+disturb its parked occupant. While a room is active, successful seat panes remain parked even if
+ordinary agent panes use `close-success`. After every `settlesOn` node completes or is
+scheduler-skipped, that preference applies to the room: `keep-open` leaves it archived and
+`close-success` closes its seat panes.
+
+A node may support a workroom without occupying a seat. Commands are always seatless in V1 and
+remain transient Herdr panes; successful command-pane cleanup is unchanged, and workrooms do not
+provide headless background execution. If a seat pane disappears, Orchestrate restores it in the
+declared room only when live Herdr state makes the vacancy unambiguous. Conflicting occupancy needs
+human attention rather than silently opening the agent elsewhere. While occupancy is unresolved,
+Orchestrate holds other seat launches in that room but may continue unrelated work; planned intents
+and retry budgets remain intact. A transient Herdr verification failure defers without paging the
+human; contradictory occupancy raises durable attention. Workrooms also do not add automatic
+fresh-provider fallback: unavailable resumes continue through the existing explicit recovery path.
+
+Seat order and the workroom's `columns` or `rows` layout determine split intent and preview order.
+Herdr owns physical geometry, so a recovered room preserves logical seat identity and co-location
+when observation is unambiguous, not pixel-perfect reconstruction of its former splits.
 
 Agent and command nodes always execute through herdr. `ORCHESTRATE_DISABLE_UI=1` suppresses board
 auto-open and presentation notifications, but never changes execution. A named herdr remote must

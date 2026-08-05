@@ -116,6 +116,8 @@ const CommonFields = {
   id: NodeId,
   title: NonEmptyString,
   needs: Schema.Array(NodeId),
+  workroom: Schema.optionalKey(NodeId),
+  seat: Schema.optionalKey(NodeId),
   cwd: Schema.NullOr(AbsolutePath),
   workspace: WorkspaceSchema,
   inputs: Schema.Array(InputSchema),
@@ -192,6 +194,25 @@ const CallbackSchema = Schema.Union([
   Schema.Struct({ type: Schema.Literal("notification") })
 ])
 
+const WorkroomSeatsSchema = Schema.Array(
+  Schema.Struct({
+    id: NodeId,
+    label: NonEmptyString
+  })
+).pipe(Schema.check(Schema.isMinLength(1)), Schema.check(Schema.isMaxLength(4)))
+
+const WorkroomSchema = Schema.Struct({
+  id: NodeId,
+  label: NonEmptyString,
+  layout: Schema.Literals(["columns", "rows"]),
+  seats: WorkroomSeatsSchema,
+  settlesOn: Schema.Array(NodeId).check(Schema.isMinLength(1))
+})
+
+const PresentationSchema = Schema.Struct({
+  workrooms: Schema.Array(WorkroomSchema).check(Schema.isMinLength(1))
+})
+
 export const WorkflowSchema = Schema.Struct({
   name: NonEmptyString,
   objective: NonEmptyString,
@@ -201,6 +222,7 @@ export const WorkflowSchema = Schema.Struct({
   milestones: Schema.Boolean,
   limits: Schema.Struct({ maxStarts: NullablePositiveInteger }),
   writeConflicts: Schema.Literals(["reject", "allow-with-approval"]),
+  presentation: Schema.optionalKey(PresentationSchema),
   nodes: Schema.Array(WorkflowNodeSchema).check(Schema.isMinLength(1)),
   repeats: Schema.Array(RepeatSchema)
 })
@@ -293,6 +315,21 @@ export const PaneReferenceSchema = Schema.Struct({
   paneId: NonEmptyString,
   group: NonEmptyString,
   surface: Schema.Literals(["tab", "split"])
+})
+
+const SeatRunStateSchema = Schema.Struct({
+  id: NonEmptyString,
+  status: Schema.Literals(["empty", "running", "parked", "attention"]),
+  nodeId: NullableString,
+  pane: Schema.NullOr(PaneReferenceSchema)
+})
+
+const WorkroomRunStateSchema = Schema.Struct({
+  id: NonEmptyString,
+  status: Schema.Literals(["pending", "active", "settled", "aborted"]),
+  workspaceId: NullableString,
+  tabId: NullableString,
+  seats: Schema.Record(Schema.String, SeatRunStateSchema)
 })
 
 const AttemptStateSchema = Schema.Struct({
@@ -474,6 +511,7 @@ export const RunStateSchema = Schema.Struct({
   gates: Schema.Record(Schema.String, GateStateSchema),
   holds: Schema.Record(Schema.String, HoldStateSchema),
   repeats: Schema.Record(Schema.String, RepeatRunStateSchema),
+  workrooms: Schema.Record(Schema.String, WorkroomRunStateSchema),
   spawnIntents: Schema.Record(Schema.String, SpawnIntentSchema)
 })
 
@@ -557,6 +595,7 @@ export const EventRecordSchema = Schema.Union([
   nodeEventWithoutData("node.ready"),
   nodeEventWithData("node.spawn-planned", SpawnData),
   nodeEventWithData("node.started", SpawnData),
+  nodeEventWithData("workroom.attention", Schema.Struct({ intentId: NonEmptyString })),
   nodeEventWithData(
     "node.completed",
     Schema.Union([AttemptData, Schema.Struct({ attempt: PositiveInteger, exitCode: Schema.Int })])
@@ -597,6 +636,10 @@ export const EventRecordSchema = Schema.Union([
   ),
   eventWithData("repeat.completed", Schema.Struct({ repeatId: NodeId, accepted: Schema.Boolean })),
   eventWithData("repeat.max-rounds", Schema.Struct({ repeatId: NodeId, rounds: PositiveInteger })),
+  eventWithData(
+    "workroom.seat-cleared",
+    Schema.Struct({ workroomId: NodeId, seatId: NodeId, paneId: NonEmptyString })
+  ),
   eventWithData("ui.degraded", Schema.Struct({ reason: NonEmptyString }))
 ])
 

@@ -470,6 +470,121 @@
                     "allow-with-approval"
                   ]
                 },
+                "presentation": {
+                  "type": "object",
+                  "properties": {
+                    "workrooms": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "string",
+                            "allOf": [
+                              {
+                                "minLength": 1
+                              },
+                              {
+                                "pattern": "^(?!.*--r[1-9][0-9]*$)[a-z0-9][a-z0-9-]*$"
+                              }
+                            ]
+                          },
+                          "label": {
+                            "type": "string",
+                            "allOf": [
+                              {
+                                "minLength": 1
+                              }
+                            ]
+                          },
+                          "layout": {
+                            "type": "string",
+                            "enum": [
+                              "columns",
+                              "rows"
+                            ]
+                          },
+                          "seats": {
+                            "type": "array",
+                            "items": {
+                              "type": "object",
+                              "properties": {
+                                "id": {
+                                  "type": "string",
+                                  "allOf": [
+                                    {
+                                      "minLength": 1
+                                    },
+                                    {
+                                      "pattern": "^(?!.*--r[1-9][0-9]*$)[a-z0-9][a-z0-9-]*$"
+                                    }
+                                  ]
+                                },
+                                "label": {
+                                  "type": "string",
+                                  "allOf": [
+                                    {
+                                      "minLength": 1
+                                    }
+                                  ]
+                                }
+                              },
+                              "required": [
+                                "id",
+                                "label"
+                              ],
+                              "additionalProperties": false
+                            },
+                            "allOf": [
+                              {
+                                "minItems": 1
+                              },
+                              {
+                                "maxItems": 4
+                              }
+                            ]
+                          },
+                          "settlesOn": {
+                            "type": "array",
+                            "items": {
+                              "type": "string",
+                              "allOf": [
+                                {
+                                  "minLength": 1
+                                },
+                                {
+                                  "pattern": "^(?!.*--r[1-9][0-9]*$)[a-z0-9][a-z0-9-]*$"
+                                }
+                              ]
+                            },
+                            "allOf": [
+                              {
+                                "minItems": 1
+                              }
+                            ]
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "label",
+                          "layout",
+                          "seats",
+                          "settlesOn"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "allOf": [
+                        {
+                          "minItems": 1
+                        }
+                      ]
+                    }
+                  },
+                  "required": [
+                    "workrooms"
+                  ],
+                  "additionalProperties": false
+                },
                 "nodes": {
                   "type": "array",
                   "items": {
@@ -498,6 +613,28 @@
                           },
                           "needs": {
                             "$ref": "#/$defs/Arrays_1"
+                          },
+                          "workroom": {
+                            "type": "string",
+                            "allOf": [
+                              {
+                                "minLength": 1
+                              },
+                              {
+                                "pattern": "^(?!.*--r[1-9][0-9]*$)[a-z0-9][a-z0-9-]*$"
+                              }
+                            ]
+                          },
+                          "seat": {
+                            "type": "string",
+                            "allOf": [
+                              {
+                                "minLength": 1
+                              },
+                              {
+                                "pattern": "^(?!.*--r[1-9][0-9]*$)[a-z0-9][a-z0-9-]*$"
+                              }
+                            ]
                           },
                           "cwd": {
                             "anyOf": [
@@ -666,6 +803,28 @@
                           },
                           "needs": {
                             "$ref": "#/$defs/Arrays_1"
+                          },
+                          "workroom": {
+                            "type": "string",
+                            "allOf": [
+                              {
+                                "minLength": 1
+                              },
+                              {
+                                "pattern": "^(?!.*--r[1-9][0-9]*$)[a-z0-9][a-z0-9-]*$"
+                              }
+                            ]
+                          },
+                          "seat": {
+                            "type": "string",
+                            "allOf": [
+                              {
+                                "minLength": 1
+                              },
+                              {
+                                "pattern": "^(?!.*--r[1-9][0-9]*$)[a-z0-9][a-z0-9-]*$"
+                              }
+                            ]
                           },
                           "cwd": {
                             "anyOf": [
@@ -838,6 +997,28 @@
                           },
                           "needs": {
                             "$ref": "#/$defs/Arrays_1"
+                          },
+                          "workroom": {
+                            "type": "string",
+                            "allOf": [
+                              {
+                                "minLength": 1
+                              },
+                              {
+                                "pattern": "^(?!.*--r[1-9][0-9]*$)[a-z0-9][a-z0-9-]*$"
+                              }
+                            ]
+                          },
+                          "seat": {
+                            "type": "string",
+                            "allOf": [
+                              {
+                                "minLength": 1
+                              },
+                              {
+                                "pattern": "^(?!.*--r[1-9][0-9]*$)[a-z0-9][a-z0-9-]*$"
+                              }
+                            ]
                           },
                           "cwd": {
                             "anyOf": [
@@ -1656,6 +1837,111 @@
         "additionalProperties": false
       }
     },
+    "workrooms": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "allOf": [
+              {
+                "minLength": 1
+              }
+            ]
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "pending",
+              "active",
+              "settled",
+              "aborted"
+            ]
+          },
+          "workspaceId": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "tabId": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "seats": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "allOf": [
+                    {
+                      "minLength": 1
+                    }
+                  ]
+                },
+                "status": {
+                  "type": "string",
+                  "enum": [
+                    "empty",
+                    "running",
+                    "parked",
+                    "attention"
+                  ]
+                },
+                "nodeId": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "pane": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/$defs/Objects_5"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "id",
+                "status",
+                "nodeId",
+                "pane"
+              ],
+              "additionalProperties": false
+            }
+          }
+        },
+        "required": [
+          "id",
+          "status",
+          "workspaceId",
+          "tabId",
+          "seats"
+        ],
+        "additionalProperties": false
+      }
+    },
     "spawnIntents": {
       "type": "object",
       "additionalProperties": {
@@ -1746,6 +2032,7 @@
     "gates",
     "holds",
     "repeats",
+    "workrooms",
     "spawnIntents"
   ],
   "additionalProperties": false,
@@ -2153,6 +2440,58 @@
         ]
       }
     },
+    "Objects_5": {
+      "type": "object",
+      "properties": {
+        "workspaceId": {
+          "type": "string",
+          "allOf": [
+            {
+              "minLength": 1
+            }
+          ]
+        },
+        "tabId": {
+          "type": "string",
+          "allOf": [
+            {
+              "minLength": 1
+            }
+          ]
+        },
+        "paneId": {
+          "type": "string",
+          "allOf": [
+            {
+              "minLength": 1
+            }
+          ]
+        },
+        "group": {
+          "type": "string",
+          "allOf": [
+            {
+              "minLength": 1
+            }
+          ]
+        },
+        "surface": {
+          "type": "string",
+          "enum": [
+            "tab",
+            "split"
+          ]
+        }
+      },
+      "required": [
+        "workspaceId",
+        "tabId",
+        "paneId",
+        "group",
+        "surface"
+      ],
+      "additionalProperties": false
+    },
     "Arrays_6": {
       "type": "array",
       "items": {
@@ -2187,56 +2526,7 @@
           "pane": {
             "anyOf": [
               {
-                "type": "object",
-                "properties": {
-                  "workspaceId": {
-                    "type": "string",
-                    "allOf": [
-                      {
-                        "minLength": 1
-                      }
-                    ]
-                  },
-                  "tabId": {
-                    "type": "string",
-                    "allOf": [
-                      {
-                        "minLength": 1
-                      }
-                    ]
-                  },
-                  "paneId": {
-                    "type": "string",
-                    "allOf": [
-                      {
-                        "minLength": 1
-                      }
-                    ]
-                  },
-                  "group": {
-                    "type": "string",
-                    "allOf": [
-                      {
-                        "minLength": 1
-                      }
-                    ]
-                  },
-                  "surface": {
-                    "type": "string",
-                    "enum": [
-                      "tab",
-                      "split"
-                    ]
-                  }
-                },
-                "required": [
-                  "workspaceId",
-                  "tabId",
-                  "paneId",
-                  "group",
-                  "surface"
-                ],
-                "additionalProperties": false
+                "$ref": "#/$defs/Objects_5"
               },
               {
                 "type": "null"

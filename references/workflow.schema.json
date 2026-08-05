@@ -176,6 +176,121 @@
         "allow-with-approval"
       ]
     },
+    "presentation": {
+      "type": "object",
+      "properties": {
+        "workrooms": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "allOf": [
+                  {
+                    "minLength": 1
+                  },
+                  {
+                    "pattern": "^(?!.*--r[1-9][0-9]*$)[a-z0-9][a-z0-9-]*$"
+                  }
+                ]
+              },
+              "label": {
+                "type": "string",
+                "allOf": [
+                  {
+                    "minLength": 1
+                  }
+                ]
+              },
+              "layout": {
+                "type": "string",
+                "enum": [
+                  "columns",
+                  "rows"
+                ]
+              },
+              "seats": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "allOf": [
+                        {
+                          "minLength": 1
+                        },
+                        {
+                          "pattern": "^(?!.*--r[1-9][0-9]*$)[a-z0-9][a-z0-9-]*$"
+                        }
+                      ]
+                    },
+                    "label": {
+                      "type": "string",
+                      "allOf": [
+                        {
+                          "minLength": 1
+                        }
+                      ]
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "label"
+                  ],
+                  "additionalProperties": false
+                },
+                "allOf": [
+                  {
+                    "minItems": 1
+                  },
+                  {
+                    "maxItems": 4
+                  }
+                ]
+              },
+              "settlesOn": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "allOf": [
+                    {
+                      "minLength": 1
+                    },
+                    {
+                      "pattern": "^(?!.*--r[1-9][0-9]*$)[a-z0-9][a-z0-9-]*$"
+                    }
+                  ]
+                },
+                "allOf": [
+                  {
+                    "minItems": 1
+                  }
+                ]
+              }
+            },
+            "required": [
+              "id",
+              "label",
+              "layout",
+              "seats",
+              "settlesOn"
+            ],
+            "additionalProperties": false
+          },
+          "allOf": [
+            {
+              "minItems": 1
+            }
+          ]
+        }
+      },
+      "required": [
+        "workrooms"
+      ],
+      "additionalProperties": false
+    },
     "nodes": {
       "type": "array",
       "items": {
@@ -204,6 +319,28 @@
               },
               "needs": {
                 "$ref": "#/$defs/Arrays_1"
+              },
+              "workroom": {
+                "type": "string",
+                "allOf": [
+                  {
+                    "minLength": 1
+                  },
+                  {
+                    "pattern": "^(?!.*--r[1-9][0-9]*$)[a-z0-9][a-z0-9-]*$"
+                  }
+                ]
+              },
+              "seat": {
+                "type": "string",
+                "allOf": [
+                  {
+                    "minLength": 1
+                  },
+                  {
+                    "pattern": "^(?!.*--r[1-9][0-9]*$)[a-z0-9][a-z0-9-]*$"
+                  }
+                ]
               },
               "cwd": {
                 "anyOf": [
@@ -372,6 +509,28 @@
               },
               "needs": {
                 "$ref": "#/$defs/Arrays_1"
+              },
+              "workroom": {
+                "type": "string",
+                "allOf": [
+                  {
+                    "minLength": 1
+                  },
+                  {
+                    "pattern": "^(?!.*--r[1-9][0-9]*$)[a-z0-9][a-z0-9-]*$"
+                  }
+                ]
+              },
+              "seat": {
+                "type": "string",
+                "allOf": [
+                  {
+                    "minLength": 1
+                  },
+                  {
+                    "pattern": "^(?!.*--r[1-9][0-9]*$)[a-z0-9][a-z0-9-]*$"
+                  }
+                ]
               },
               "cwd": {
                 "anyOf": [
@@ -544,6 +703,28 @@
               },
               "needs": {
                 "$ref": "#/$defs/Arrays_1"
+              },
+              "workroom": {
+                "type": "string",
+                "allOf": [
+                  {
+                    "minLength": 1
+                  },
+                  {
+                    "pattern": "^(?!.*--r[1-9][0-9]*$)[a-z0-9][a-z0-9-]*$"
+                  }
+                ]
+              },
+              "seat": {
+                "type": "string",
+                "allOf": [
+                  {
+                    "minLength": 1
+                  },
+                  {
+                    "pattern": "^(?!.*--r[1-9][0-9]*$)[a-z0-9][a-z0-9-]*$"
+                  }
+                ]
               },
               "cwd": {
                 "anyOf": [

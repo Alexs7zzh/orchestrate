@@ -132,6 +132,7 @@ class FakeSurface implements CrankSurface {
   readonly spawns: string[] = []
   readonly requests: SpawnRequest[] = []
   readonly closed: string[] = []
+  readonly renamed: Array<readonly [string, string]> = []
   readonly handoffs: string[] = []
   waitForAgentStatus?: (paneId: string, status: string, timeoutMs: number) => Promise<boolean>
   readonly origin: RunOrigin = {
@@ -170,6 +171,10 @@ class FakeSurface implements CrankSurface {
 
   async closePane(paneId: string): Promise<void> {
     this.closed.push(paneId)
+  }
+
+  async renamePane(paneId: string, label: string): Promise<void> {
+    this.renamed.push([paneId, label])
   }
 
   async notify(_title: string, _body: string, _sound: "none" | "done" | "request"): Promise<void> {}
@@ -768,6 +773,129 @@ describe("crank shell", () => {
     ).toBe(false)
   })
 
+  test("journals ambiguous workroom occupancy as durable attention without consuming a retry", async () => {
+    const planned = {
+      ...agent("planned"),
+      workroom: "review-room",
+      seat: "reviewer"
+    } satisfies AgentNode
+    const spec: WorkflowSpec = {
+      ...workflow([planned]),
+      presentation: {
+        workrooms: [
+          {
+            id: "review-room",
+            label: "Review room",
+            layout: "columns",
+            seats: [{ id: "reviewer", label: "Reviewer" }],
+            settlesOn: ["planned"]
+          }
+        ]
+      }
+    }
+    const persisted = await persistPlanned(spec)
+    class AmbiguousWorkroomSurface extends FakeSurface {
+      async recoverOrSpawn(): Promise<never> {
+        throw new HerdrObservationError(
+          "Workroom occupancy is ambiguous.",
+          new Error("duplicate candidates"),
+          true
+        )
+      }
+    }
+    const surface = new AmbiguousWorkroomSurface()
+    await expect(crankRun(persisted.runDir, { type: "reconcile" }, { surface })).rejects.toThrow(
+      "ambiguous"
+    )
+    const state = await readRunState(persisted.runDir)
+    expect(state.workrooms["review-room"]?.seats.reviewer?.status).toBe("attention")
+    expect(state.spawnIntents["planned:a1"]?.status).toBe("planned")
+    expect(state.nodes.planned?.attempts).toHaveLength(1)
+    expect(runNeedsAttention(state)).toBe(true)
+    expect(surface.handoffs.at(-1)).toContain("workroom.attention")
+    expect(
+      (await readEvents(persisted.runDir)).filter((event) => event.type === "workroom.attention")
+    ).toHaveLength(1)
+
+    await expect(crankRun(persisted.runDir, { type: "reconcile" }, { surface })).rejects.toThrow(
+      "ambiguous"
+    )
+    expect(
+      (await readEvents(persisted.runDir)).filter((event) => event.type === "workroom.attention")
+    ).toHaveLength(1)
+  })
+
+  test("blocks sibling seats without durable attention on a transient workroom failure", async () => {
+    const first = {
+      ...agent("first"),
+      workroom: "review-room",
+      seat: "first-seat"
+    } satisfies AgentNode
+    const second = {
+      ...agent("second"),
+      workroom: "review-room",
+      seat: "second-seat"
+    } satisfies AgentNode
+    const settle = {
+      ...command("settle", ["first", "second"]),
+      workroom: "review-room"
+    } satisfies CommandNode
+    const spec: WorkflowSpec = {
+      ...workflow([first, second, settle]),
+      presentation: {
+        workrooms: [
+          {
+            id: "review-room",
+            label: "Review room",
+            layout: "columns",
+            seats: [
+              { id: "first-seat", label: "First" },
+              { id: "second-seat", label: "Second" }
+            ],
+            settlesOn: ["settle"]
+          }
+        ]
+      }
+    }
+    const persisted = await persistPlanned(spec)
+    class PartialWorkroomSurface extends FakeSurface {
+      readonly attempted: string[] = []
+
+      async recoverOrSpawn(request: SpawnRequest) {
+        this.attempted.push(request.intent.id)
+        if (request.intent.nodeId === "first") {
+          throw new HerdrObservationError(
+            'Spawn for seat "first-seat" is session-pending.',
+            new Error("provider session unavailable")
+          )
+        }
+        return super.recoverOrSpawn(request)
+      }
+    }
+    const surface = new PartialWorkroomSurface()
+
+    await expect(crankRun(persisted.runDir, { type: "reconcile" }, { surface })).rejects.toThrow(
+      "session-pending"
+    )
+
+    expect(surface.attempted).toEqual(["first:a1"])
+    const state = await readRunState(persisted.runDir)
+    expect(state.workrooms["review-room"]?.seats["first-seat"]?.status).toBe("empty")
+    expect(state.workrooms["review-room"]?.seats["second-seat"]?.status).toBe("empty")
+    expect(state.spawnIntents["first:a1"]?.status).toBe("planned")
+    expect(state.spawnIntents["second:a1"]?.status).toBe("planned")
+    expect(state.nodes.first?.attempts).toHaveLength(1)
+    expect(state.nodes.second?.attempts).toHaveLength(1)
+    expect(runNeedsAttention(state)).toBe(false)
+    expect(surface.handoffs).toEqual([])
+    expect(
+      (await readEvents(persisted.runDir)).some((event) => event.type === "node.retrying")
+    ).toBe(false)
+    expect(
+      (await readEvents(persisted.runDir)).some((event) => event.type === "workroom.attention")
+    ).toBe(false)
+  })
+
   test("starts independent planned intents before surfacing an ambiguous spawn", async () => {
     const persisted = await persistPlanned(workflow([command("flaky"), command("solid")]))
     class PartialObservationSurface extends FakeSurface {
@@ -1233,6 +1361,86 @@ describe("crank shell", () => {
     expect(afterFirst.state.sessions["shared-session"]?.sourceNodeId).toBe("first")
     expect(surface.requests.at(-1)?.intent.nodeId).toBe("second")
     expect(surface.requests.at(-1)?.placement.reusePane?.paneId).toBe("pane:first:a1")
+  })
+
+  test("keeps active participant seats parked and applies close-success when the room settles", async () => {
+    const first = {
+      ...agent("first"),
+      workroom: "review-room",
+      seat: "reviewer"
+    } satisfies AgentNode
+    const second = {
+      ...agent("second", ["first"]),
+      workroom: "review-room",
+      seat: "reviewer"
+    } satisfies AgentNode
+    const settle = {
+      ...command("settle", ["second"]),
+      workroom: "review-room"
+    } satisfies CommandNode
+    const spec: WorkflowSpec = {
+      ...workflow([first, second, settle]),
+      presentation: {
+        workrooms: [
+          {
+            id: "review-room",
+            label: "Review room",
+            layout: "columns",
+            seats: [{ id: "reviewer", label: "Reviewer" }],
+            settlesOn: ["settle"]
+          }
+        ]
+      }
+    }
+    const surface = new FakeSurface()
+    const ui: UiPreferences = {
+      ...DEFAULT_UI_PREFERENCES,
+      completedPanes: { ...DEFAULT_UI_PREFERENCES.completedPanes, agent: "close-success" }
+    }
+    const started = await start(spec, surface, ui)
+    const runDir = runDirectory(started.state.id)
+
+    const finishAgent = async (nodeId: string) => {
+      const attempt = (await readRunState(runDir)).nodes[nodeId]?.attempts.at(-1)
+      if (attempt === undefined) {
+        throw new Error(`missing ${nodeId} attempt`)
+      }
+      await mkdir(path.dirname(attempt.resultPath), { recursive: true })
+      await Bun.write(attempt.resultPath, '{"clean":true}\n', { createPath: false })
+      await submitNodeDone(runDir, nodeId, attempt.token, "completed")
+      return reconcileRun(runDir, { surface })
+    }
+
+    const afterFirst = await finishAgent("first")
+    expect(afterFirst.state.workrooms["review-room"]?.seats.reviewer?.status).toBe("running")
+    expect(surface.requests.at(-1)?.intent.nodeId).toBe("second")
+    expect(surface.requests.at(-1)?.placement.reusePane?.paneId).toBe("pane:first:a1")
+    expect(surface.closed).not.toContain("pane:first:a1")
+    expect(surface.renamed).toContainEqual(["pane:first:a1", "Reviewer · parked · last: first"])
+
+    const afterSecond = await finishAgent("second")
+    expect(afterSecond.state.workrooms["review-room"]?.status).toBe("active")
+    expect(afterSecond.state.nodes.settle?.status).toBe("running")
+    expect(surface.closed).not.toContain("pane:second:a1")
+
+    const settleAttempt = afterSecond.state.nodes.settle?.attempts.at(-1)
+    if (settleAttempt === undefined) {
+      throw new Error("missing settle attempt")
+    }
+    const finished = await crankRun(
+      runDir,
+      {
+        type: "node-exit",
+        nodeId: "settle",
+        token: settleAttempt.token,
+        code: 0,
+        error: null
+      },
+      { surface }
+    )
+    expect(finished.state.status).toBe("completed")
+    expect(finished.state.workrooms["review-room"]?.status).toBe("settled")
+    expect(surface.closed).toContain("pane:second:a1")
   })
 
   test("inherits the committed session head and pane across persistent repeat rounds", async () => {

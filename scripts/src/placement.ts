@@ -18,6 +18,21 @@ export interface PlacementContext {
   readonly live: readonly LivePlacement[]
   readonly retryPane: PaneReference | null
   readonly sessionPane: PaneReference | null
+  readonly workroom?: {
+    readonly id: string
+    readonly label: string
+    readonly layout: "columns" | "rows"
+    readonly seatId: string
+    readonly seatIndex: number
+    readonly workspaceId: string | null
+    readonly tabId: string | null
+    readonly seats: readonly {
+      readonly id: string
+      readonly pane: PaneReference | null
+    }[]
+    readonly seatPane: PaneReference | null
+    readonly anchorPane: PaneReference | null
+  } | null
 }
 
 export interface PlacementResolution {
@@ -34,6 +49,18 @@ export interface PlacementResolution {
   readonly anchorPane: PaneReference | null
   /** An existing pane whose UI slot should be replaced by this attempt. */
   readonly reusePane: PaneReference | null
+  readonly splitDirection?: "right" | "down"
+  /** Durable logical-room identity used to verify live Herdr occupancy before reuse. */
+  readonly workroom?: {
+    readonly id: string
+    readonly seatId: string
+    readonly workspaceId: string | null
+    readonly tabId: string | null
+    readonly seats: readonly {
+      readonly id: string
+      readonly pane: PaneReference | null
+    }[]
+  }
 }
 
 const DEFAULT_MATCHER: NodeMatcher = {
@@ -261,6 +288,33 @@ export function resolvePlacement(
   preferences: UiPreferences,
   context: PlacementContext
 ): PlacementResolution {
+  if (context.workroom !== null && context.workroom !== undefined) {
+    const declared = context.workroom
+    const group = placementGroupKey(context.runId, declared.id, 1)
+    const reusePane = context.retryPane ?? declared.seatPane ?? context.sessionPane
+    const anchorPane = declared.anchorPane
+    return {
+      workspace: preferences.placement.workspace,
+      surface:
+        anchorPane !== null
+          ? "split"
+          : (reusePane?.surface ?? (declared.seatIndex === 0 ? "tab" : "split")),
+      matchedRuleIndex: -1,
+      group,
+      groupLabel: declared.label,
+      groupOrdinal: 1,
+      anchorPane,
+      reusePane,
+      splitDirection: declared.layout === "columns" ? "right" : "down",
+      workroom: {
+        id: declared.id,
+        seatId: declared.seatId,
+        workspaceId: declared.workspaceId,
+        tabId: declared.tabId,
+        seats: declared.seats
+      }
+    }
+  }
   assertPlacementRules(preferences.placement.rules)
   workflowNode(workflow, runtimeNode.templateId)
   const matchedRuleIndex = preferences.placement.rules.findIndex((rule) =>
@@ -291,7 +345,8 @@ export function resolvePlacement(
       groupLabel: groupLabel(baseGroup, ordinal),
       groupOrdinal: ordinal,
       anchorPane: context.retryPane,
-      reusePane: context.retryPane
+      reusePane: context.retryPane,
+      splitDirection: "down"
     }
   }
 
@@ -305,7 +360,8 @@ export function resolvePlacement(
       groupLabel: baseGroup,
       groupOrdinal: 1,
       anchorPane: paneForGroup(context.live, group),
-      reusePane: context.sessionPane
+      reusePane: context.sessionPane,
+      splitDirection: "down"
     }
   }
 
@@ -323,7 +379,8 @@ export function resolvePlacement(
     groupLabel: groupLabel(baseGroup, target.ordinal),
     groupOrdinal: target.ordinal,
     anchorPane: target.anchor,
-    reusePane: context.sessionPane
+    reusePane: context.sessionPane,
+    splitDirection: "down"
   }
 }
 

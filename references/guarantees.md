@@ -23,8 +23,9 @@ time is safe, and correctness never depends on receiving a wake-up.
 
 - Herdr owns workspaces, tabs, panes, provider lifecycle observation, focus, plugin event dispatch,
   and the prompt transport used for master wake-up.
-- Orchestrate owns the approved DAG, durable local run state, authenticated node submissions,
-  dependency readiness, holds, gates, repeats, and revisions.
+- Orchestrate owns the approved DAG and presentation contract, durable local run state,
+  authenticated node submissions, dependency readiness, holds, gates, repeats, workroom/seat
+  occupancy, and revisions.
 - The master agent owns reconciliation, debugging, and recovery decisions.
 - A node agent owns only its declared task writes and its exact token-addressed result submission.
   It never writes authoritative run state or schedules another node.
@@ -54,11 +55,25 @@ time is safe, and correctness never depends on receiving a wake-up.
 - A repeated resume attempt forks the committed provider-session head. Only a schema-valid success
   promotes the alias; failure and retry leave the prior head unchanged. This isolates conversation
   lineage, not arbitrary workspace writes made by an attempt.
+- An approved workroom has ordered seats and explicit settlement anchors. A seatful node runs in
+  its declared seat instead of ordinary matcher placement; retries and repeat instances reuse that
+  seat, and a scheduler-owned skipped node never consumes or changes it. Active seat panes park
+  until every anchor is durably completed or skipped, after which the effective completion
+  preference archives or closes them.
+- Workrooms inherit the effective `placement.workspace`. Seatless supporting commands remain real,
+  transient Herdr panes; presentation metadata does not create a headless execution path.
 - A dead prompt-bearing receipt is never re-prompted under its old completion token. Reconciliation
   adopts its submission only with exact child-session attribution; otherwise retry uses a fresh
   token and the unchanged committed parent.
-- Reconciliation either adopts an unambiguous observed Herdr resource or reports human attention.
+- Reconciliation adopts an unambiguous observed Herdr resource, defers a transient observation
+  failure without consuming the intent, or reports human attention for contradictory occupancy.
   It does not silently guess after an ambiguous failure.
+- An explicitly missing seat pane is restored inside its declared workroom only when live Herdr
+  state identifies that room and seat unambiguously. Conflicting or ambiguous occupancy reports
+  attention rather than moving the node through ordinary placement. Restoration preserves logical
+  seat identity and workroom co-location; Herdr-owned physical geometry is best effort.
+- While a seated spawn's occupancy is unresolved, reconciliation starts no sibling seat in that
+  workroom. It preserves every planned intent and retry budget while unrelated work may proceed.
 - Explicit human pause, stop, hold, gate, revision, and repeat-limit decisions remain explicit.
 
 ## External side effects and crashes
@@ -74,6 +89,8 @@ Orchestrate does not guarantee:
 - exactly-once pane creation, provider execution, prompting, callbacks, or notifications;
 - automatic recovery from a Herdr bug, Herdr restart, machine crash, forced process termination,
   filesystem failure, or ambiguous external side effect;
+- automatic fresh-provider fallback or session-alias rebinding when an approved resume is
+  unavailable;
 - programmatic reconstruction of every external action after a failure.
 
 These cases are expected to be rare. Recovery is agent-assisted: inspect durable Orchestrate state

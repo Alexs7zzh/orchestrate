@@ -291,6 +291,68 @@ describe("grouping", () => {
   })
 })
 
+describe("declared workroom placement", () => {
+  const rules: PlacementRule[] = [{ match: anyMatcher, surface: "tab" }]
+  const spec = workflow([agent("review")])
+  const parked = pane("legacy", "reviewer-pane", "tab")
+  const implementer = pane("legacy", "implementer-pane", "tab")
+
+  test("bypasses matcher grouping and reuses the durable seat before its session pane", () => {
+    const resolved = resolvePlacement(spec, runtimeNode("review"), preferences(rules), {
+      ...context(),
+      sessionPane: pane("session", "session-pane", "tab"),
+      workroom: {
+        id: "review-room",
+        label: "Review room",
+        layout: "columns",
+        seatId: "reviewer",
+        seatIndex: 1,
+        workspaceId: "workspace",
+        tabId: parked.tabId,
+        seats: [
+          { id: "implementer", pane: implementer },
+          { id: "reviewer", pane: parked }
+        ],
+        seatPane: parked,
+        anchorPane: implementer
+      }
+    })
+
+    expect(resolved).toMatchObject({
+      surface: "split",
+      matchedRuleIndex: -1,
+      group: placementGroupKey("run-a", "review-room", 1),
+      groupLabel: "Review room",
+      reusePane: parked,
+      anchorPane: implementer,
+      splitDirection: "right",
+      workroom: { id: "review-room", seatId: "reviewer" }
+    })
+  })
+
+  test("uses a retry pane before the durable seat and starts the first seat as the room tab", () => {
+    const retry = pane(placementGroupKey("run-a", "review-room", 1), "retry", "tab")
+    const resolved = resolvePlacement(spec, runtimeNode("review"), preferences(rules), {
+      ...context("run-a", [], retry),
+      workroom: {
+        id: "review-room",
+        label: "Review room",
+        layout: "rows",
+        seatId: "reviewer",
+        seatIndex: 0,
+        workspaceId: null,
+        tabId: null,
+        seats: [{ id: "reviewer", pane: parked }],
+        seatPane: parked,
+        anchorPane: null
+      }
+    })
+    expect(resolved.reusePane).toEqual(retry)
+    expect(resolved.surface).toBe("tab")
+    expect(resolved.splitDirection).toBe("down")
+  })
+})
+
 describe("placement slots", () => {
   const graph = workflow([agent("root"), agent("child", ["root"])])
   const rules: PlacementRule[] = [{ match: anyMatcher, surface: "split" }]

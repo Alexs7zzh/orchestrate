@@ -48,6 +48,8 @@ const ALL_EVENT_TYPES = [
   "repeat.round-started",
   "repeat.completed",
   "repeat.max-rounds",
+  "workroom.attention",
+  "workroom.seat-cleared",
   "ui.degraded"
 ] as const satisfies readonly EventType[]
 

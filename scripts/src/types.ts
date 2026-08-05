@@ -114,6 +114,8 @@ export interface CommonNode {
   readonly type: NodeType
   readonly title: string
   readonly needs: readonly string[]
+  readonly workroom?: string
+  readonly seat?: string
   readonly cwd: string | null
   readonly workspace: WorkspaceSpec
   readonly inputs: readonly InputSpec[]
@@ -179,6 +181,19 @@ export interface RepeatSpec {
   readonly maxRounds: number
 }
 
+export interface SeatSpec {
+  readonly id: string
+  readonly label: string
+}
+
+export interface WorkroomSpec {
+  readonly id: string
+  readonly label: string
+  readonly layout: "columns" | "rows"
+  readonly seats: readonly SeatSpec[]
+  readonly settlesOn: readonly string[]
+}
+
 // A dependency from outside a repeat to one of its members is a dependency on
 // the whole repeat. It releases only when the repeat settles, and an input from
 // that member resolves to its final-round instance.
@@ -229,6 +244,21 @@ export interface PaneReference {
   readonly paneId: string
   readonly group: string
   readonly surface: "tab" | "split"
+}
+
+export interface SeatRunState {
+  readonly id: string
+  readonly status: "empty" | "running" | "parked" | "attention"
+  readonly nodeId: string | null
+  readonly pane: PaneReference | null
+}
+
+export interface WorkroomRunState {
+  readonly id: string
+  readonly status: "pending" | "active" | "settled" | "aborted"
+  readonly workspaceId: string | null
+  readonly tabId: string | null
+  readonly seats: Readonly<Record<string, SeatRunState>>
 }
 
 export interface AttemptState {
@@ -441,6 +471,11 @@ export type CrankEvent =
       readonly nodeId: string
       readonly intentId: string
       readonly error: string
+    }
+  | {
+      readonly type: "spawn-attention"
+      readonly nodeId: string
+      readonly intentId: string
     }
   | { readonly type: "approve-gate"; readonly nodeId: string; readonly digest: string }
   | {

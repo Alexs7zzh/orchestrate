@@ -8,6 +8,7 @@ import type {
   AgentNode,
   CommandNode,
   NodeRunState,
+  PaneReference,
   RunState,
   SpawnIntent,
   WorkflowSpec
@@ -205,6 +206,7 @@ function state(id: string): RunState {
     gates: {},
     holds: {},
     repeats: {},
+    workrooms: {},
     spawnIntents: {}
   }
 }
@@ -313,13 +315,15 @@ async function writeShim(
   paneFailure: "none" | "transport" | "split-missing" | "split-transport" = "none",
   missingPane: string | null = null,
   reportSessionLate = false,
-  promptFailure: "none" | "stall-once" | "always" = "none",
-  bootDelayOnce = false
+  promptFailure: "none" | "stall-once" | "stall-once-hidden" | "always" = "none",
+  bootDelayOnce = false,
+  listedPanes: readonly ReturnType<typeof herdrPane>[] = []
 ): Promise<void> {
   const busyMarker = path.join(temporaryRoot, "agent-start-busy-once")
   const claudeMarker = path.join(temporaryRoot, "agent-is-claude")
   const sessionLateMarker = path.join(temporaryRoot, "agent-session-reported-late")
   const stallMarker = path.join(temporaryRoot, "agent-prompt-stalled-once")
+  const promptVisibleMarker = path.join(temporaryRoot, "agent-prompt-visible-after-retry")
   const bootMarker = path.join(temporaryRoot, "agent-boot-finished")
   const codexSession = {
     agent: "codex",
@@ -369,7 +373,7 @@ case "$1 $2" in
   "workspace create") printf '%s\n' '${workspaceCreated}' ;;
   "tab create") printf '%s\n' '${tabCreated}' ;;
   "tab list") printf '%s\n' '${herdrResponse({ type: "tab_list", tabs: [] })}' ;;
-  "pane list") printf '%s\n' '${herdrResponse({ type: "pane_list", panes: [] })}' ;;
+  "pane list") printf '%s\n' '${herdrResponse({ type: "pane_list", panes: listedPanes })}' ;;
   "pane split")
     if [ ${JSON.stringify(paneFailure)} = "split-missing" ]; then
       printf '%s\n' '{"error":{"code":"pane_not_found","message":"anchor closed"},"id":"cli:pane:split"}' >&2
@@ -415,12 +419,19 @@ case "$1 $2" in
     done
     if [ "$5" = "claude" ]; then touch ${JSON.stringify(claudeMarker)}; fi ;;
   "agent read")
-    cat ${JSON.stringify(logPath)} 2>/dev/null || true ;;
+    if [ ${JSON.stringify(promptFailure)} = "stall-once-hidden" ] && [ -f ${JSON.stringify(stallMarker)} ] && [ ! -f ${JSON.stringify(promptVisibleMarker)} ]; then
+      grep -v -e '^agent prompt ' -e 'orchestrate-delivery:' ${JSON.stringify(logPath)} 2>/dev/null || true
+    else
+      cat ${JSON.stringify(logPath)} 2>/dev/null || true
+    fi ;;
   "agent prompt")
-    if [ ${JSON.stringify(promptFailure)} = "stall-once" ] && [ ! -f ${JSON.stringify(stallMarker)} ]; then
+    if { [ ${JSON.stringify(promptFailure)} = "stall-once" ] || [ ${JSON.stringify(promptFailure)} = "stall-once-hidden" ]; } && [ ! -f ${JSON.stringify(stallMarker)} ]; then
       touch ${JSON.stringify(stallMarker)}
       printf '%s\n' '{"error":{"code":"agent_prompt_stalled","message":"agent prompt produced no observed state change within 5000 ms; status is idle"},"id":"cli:agent:prompt"}' >&2
       exit 1
+    fi
+    if [ ${JSON.stringify(promptFailure)} = "stall-once-hidden" ]; then
+      touch ${JSON.stringify(promptVisibleMarker)}
     fi
     if [ ${JSON.stringify(promptFailure)} = "always" ]; then
       printf '%s\n' '{"error":{"code":"agent_prompt_failed","message":"delivery uncertain"},"id":"cli:agent:prompt"}' >&2
@@ -1290,6 +1301,163 @@ describe("herdr surface", () => {
     expect(observation.pane).toMatchObject({ group: "session-group", surface: "tab" })
   })
 
+  test("verifies and replaces a live participant seat inside its declared workroom", async () => {
+    const node = {
+      ...agent(),
+      workroom: "review-room",
+      seat: "reviewer"
+    } satisfies AgentNode
+    const existing: PaneReference = {
+      workspaceId: "w1",
+      tabId: "review-tab",
+      paneId: "reviewer-pane",
+      group: "orchestrate/run/review-room/1",
+      surface: "tab"
+    }
+    await writeShim(true, false, true, "none", null, false, "none", false, [
+      herdrPane(existing.paneId, existing.workspaceId, existing.tabId)
+    ])
+    const spec: WorkflowSpec = {
+      ...workflow(node),
+      presentation: {
+        workrooms: [
+          {
+            id: "review-room",
+            label: "Review room",
+            layout: "columns",
+            seats: [{ id: "reviewer", label: "Reviewer" }],
+            settlesOn: ["review"]
+          }
+        ]
+      }
+    }
+    const runState: RunState = {
+      ...state(node.id),
+      workrooms: {
+        "review-room": {
+          id: "review-room",
+          status: "active",
+          workspaceId: existing.workspaceId,
+          tabId: existing.tabId,
+          seats: {
+            reviewer: {
+              id: "reviewer",
+              status: "parked",
+              nodeId: "review",
+              pane: existing
+            }
+          }
+        }
+      }
+    }
+    await new HerdrSurface().spawn({
+      workflow: spec,
+      state: runState,
+      intent: intent(node.id),
+      prompt: "Review again.",
+      placement: {
+        ...placement(node.id),
+        surface: "split",
+        anchorPane: existing,
+        reusePane: existing,
+        splitDirection: "right",
+        workroom: {
+          id: "review-room",
+          seatId: "reviewer",
+          workspaceId: existing.workspaceId,
+          tabId: existing.tabId,
+          seats: [{ id: "reviewer", pane: existing }]
+        }
+      }
+    })
+    const log = await Bun.file(logPath).text()
+    expect(log).toContain("pane list")
+    expect(log).toContain("pane split --pane reviewer-pane --direction right")
+    expect(log).toContain("pane close reviewer-pane")
+    expect(log).not.toContain("tab create")
+  })
+
+  test("leaves a workroom spawn planned when missing-seat occupancy is ambiguous", async () => {
+    const node = command()
+    const missing: PaneReference = {
+      workspaceId: "w1",
+      tabId: "review-tab",
+      paneId: "missing-seat",
+      group: "orchestrate/run/review-room/1",
+      surface: "tab"
+    }
+    await writeShim(true, false, true, "none", null, false, "none", false, [
+      herdrPane("unowned-pane", "w1", "review-tab")
+    ])
+    await expect(
+      new HerdrSurface().spawn({
+        workflow: workflow(node),
+        state: state(node.id),
+        intent: intent(node.id),
+        prompt: null,
+        placement: {
+          ...placement(node.id),
+          surface: "split",
+          anchorPane: null,
+          reusePane: missing,
+          workroom: {
+            id: "review-room",
+            seatId: "reviewer",
+            workspaceId: "w1",
+            tabId: "review-tab",
+            seats: [{ id: "reviewer", pane: missing }]
+          }
+        }
+      })
+    ).rejects.toThrow("unowned live occupants")
+    const log = await Bun.file(logPath).text()
+    expect(log).not.toContain("workspace create")
+    expect(log).not.toContain("tab create")
+    expect(log).not.toContain("pane split")
+  })
+
+  test("does not spill a workroom seat when its verified anchor disappears", async () => {
+    const node = command()
+    const missing: PaneReference = {
+      workspaceId: "w1",
+      tabId: "review-tab",
+      paneId: "missing-seat",
+      group: "orchestrate/run/review-room/1",
+      surface: "split"
+    }
+    const anchor: PaneReference = { ...missing, paneId: "implementer-pane" }
+    await writeShim(true, false, true, "split-missing", null, false, "none", false, [
+      herdrPane(anchor.paneId, anchor.workspaceId, anchor.tabId)
+    ])
+    await expect(
+      new HerdrSurface().spawn({
+        workflow: workflow(node),
+        state: state(node.id),
+        intent: intent(node.id),
+        prompt: null,
+        placement: {
+          ...placement(node.id),
+          surface: "split",
+          anchorPane: anchor,
+          reusePane: missing,
+          workroom: {
+            id: "review-room",
+            seatId: "reviewer",
+            workspaceId: "w1",
+            tabId: "review-tab",
+            seats: [
+              { id: "implementer", pane: anchor },
+              { id: "reviewer", pane: missing }
+            ]
+          }
+        }
+      })
+    ).rejects.toThrow("changed after its occupancy was verified")
+    const log = await Bun.file(logPath).text()
+    expect(log).toContain("pane split --pane implementer-pane")
+    expect(log).not.toContain("tab create")
+  })
+
   test.each(["dedicated", "origin"] as const)(
     "falls back from an explicitly missing split anchor to a fresh %s-workspace tab",
     async (destination) => {
@@ -1797,11 +1965,12 @@ describe("herdr surface", () => {
     const promptLine = log.split("\n").find((line) => line.startsWith("agent prompt")) as string
     expect(promptLine).toContain(`saved it to ${promptFile}`)
     expect(promptLine).toContain("orchestrate launcher")
+    expect(log).toContain("[orchestrate-delivery:token-1]")
     expect(promptLine).not.toContain("Detail. Detail.")
     expect(promptLine.length).toBeLessThan(1_024)
   })
 
-  test("retries a stalled prompt within the accept budget", async () => {
+  test("nudges a visible stalled prompt instead of resending its full text", async () => {
     await writeShim(true, false, true, "none", null, false, "stall-once")
     const node = agent()
     const observation = await new HerdrSurface().spawn({
@@ -1813,9 +1982,29 @@ describe("herdr surface", () => {
     })
     expect(observation.providerSessionId).toBe("session-1")
     const log = await Bun.file(logPath).text()
-    expect(log.split("\n").filter((line) => line.startsWith("agent prompt")).length).toBe(2)
+    expect(log.split("\n").filter((line) => line.startsWith("agent prompt")).length).toBe(1)
+    expect(log).toContain("[orchestrate-delivery:token-1]")
+    expect(log).toContain("agent send-keys p1 enter")
+    expect(log).toContain("agent wait p1 --until working --until done --until blocked --timeout")
     expect(log).not.toContain("pane close p1")
   })
+
+  test("retries a stalled prompt only while its unique marker remains invisible", async () => {
+    await writeShim(true, false, true, "none", null, false, "stall-once-hidden")
+    const node = agent()
+    const observation = await new HerdrSurface().spawn({
+      workflow: workflow(node),
+      state: state(node.id),
+      intent: intent(node.id),
+      prompt: "Prompt",
+      placement: placement(node.id)
+    })
+    expect(observation.providerSessionId).toBe("session-1")
+    const log = await Bun.file(logPath).text()
+    expect(log.split("\n").filter((line) => line.startsWith("agent prompt")).length).toBe(2)
+    expect(log).not.toContain("agent send-keys p1 enter")
+    expect(log).not.toContain("pane close p1")
+  }, 15_000)
 
   test("recovers an ambiguous Claude spawn from its recorded id and a token-valid submission", async () => {
     await writeShim(false, false, true, "none", null, false, "always")

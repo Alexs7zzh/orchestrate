@@ -18,6 +18,7 @@ import {
   transition,
   type TransitionContext
 } from "../src/transition.js"
+import { validateWorkflow } from "../src/validation.js"
 
 const NOW = "2026-08-02T12:00:00.000Z"
 
@@ -205,6 +206,143 @@ function applyPatch(document: unknown, patch: readonly StatePatchOperation[]): u
 }
 
 describe("pure crank transition", () => {
+  test("binds, parks, restores, and settles declared participant seats", () => {
+    const work = agent("work", { workroom: "review-room", seat: "reviewer" })
+    const finish = command("finish", { needs: ["work"], workroom: "review-room" })
+    const spec = workflow([work, finish], {
+      presentation: {
+        workrooms: [
+          {
+            id: "review-room",
+            label: "Review room",
+            layout: "columns",
+            seats: [{ id: "reviewer", label: "Reviewer" }],
+            settlesOn: ["finish"]
+          }
+        ]
+      }
+    })
+    const started = start(spec, context("work", "finish"))
+    expect(started.state.workrooms["review-room"]?.status).toBe("pending")
+
+    const observedWork = observe(started.state, spec, "work")
+    expect(observedWork.state.workrooms["review-room"]?.status).toBe("active")
+    expect(observedWork.state.workrooms["review-room"]?.seats.reviewer).toMatchObject({
+      status: "running",
+      nodeId: "work",
+      pane: { paneId: "pane:work:1" }
+    })
+
+    const parked = crank(
+      observedWork.state,
+      spec,
+      {
+        type: "node-done",
+        nodeId: "work",
+        token: token(observedWork.state, "work"),
+        outcome: "completed",
+        hold: false,
+        result: "done",
+        error: null,
+        providerSessionId: null
+      },
+      context("finish")
+    )
+    expect(parked.state.workrooms["review-room"]?.seats.reviewer?.status).toBe("parked")
+
+    const restored = crank(parked.state, spec, {
+      type: "restore",
+      deadPaneIds: ["pane:work:1"]
+    })
+    expect(restored.events.map((event) => event.type)).toContain("workroom.seat-cleared")
+    expect(restored.state.workrooms["review-room"]?.seats.reviewer).toMatchObject({
+      status: "empty",
+      nodeId: null,
+      pane: null
+    })
+
+    const observedFinish = observe(restored.state, spec, "finish")
+    const settled = crank(observedFinish.state, spec, {
+      type: "node-exit",
+      nodeId: "finish",
+      token: token(observedFinish.state, "finish"),
+      code: 0,
+      error: null
+    })
+    expect(settled.state.status).toBe("completed")
+    expect(settled.state.workrooms["review-room"]?.status).toBe("settled")
+  })
+
+  test("keeps an opened room immutable while allowing an ordered future seat turn", () => {
+    const work = agent("work", { workroom: "review-room", seat: "reviewer" })
+    const finish = command("finish", { needs: ["work"], workroom: "review-room" })
+    const presentation: NonNullable<WorkflowSpec["presentation"]> = {
+      workrooms: [
+        {
+          id: "review-room",
+          label: "Review room",
+          layout: "columns",
+          seats: [{ id: "reviewer", label: "Reviewer" }],
+          settlesOn: ["finish"]
+        }
+      ]
+    }
+    const spec = workflow([work, finish], { presentation })
+    const started = start(spec, context("work"))
+
+    const changedRoom = workflow([work, finish], {
+      presentation: {
+        workrooms: [{ ...presentation.workrooms[0]!, label: "Renamed room" }]
+      }
+    })
+    const proposedChange = crank(started.state, spec, {
+      type: "propose-revision",
+      workflow: changedRoom,
+      digest: "changed-room",
+      summary: ["~ presentation"]
+    })
+    expect(() =>
+      crank(proposedChange.state, spec, {
+        type: "approve-revision",
+        digest: "changed-room"
+      })
+    ).toThrow('already-opened or reserved workroom "review-room"')
+
+    const observed = observe(started.state, spec, "work")
+
+    const future = agent("future", {
+      needs: ["work"],
+      workroom: "review-room",
+      seat: "reviewer"
+    })
+    const safeRevision = workflow(
+      [
+        work,
+        future,
+        command("finish", {
+          needs: ["future"],
+          workroom: "review-room",
+          argv: ["/usr/bin/true"]
+        })
+      ],
+      { presentation }
+    )
+    expect(validateWorkflow(safeRevision).workflow).not.toBeNull()
+    const proposedSafe = crank(observed.state, spec, {
+      type: "propose-revision",
+      workflow: safeRevision,
+      digest: "safe-room",
+      summary: ["+ future"]
+    })
+    const approved = crank(proposedSafe.state, spec, {
+      type: "approve-revision",
+      digest: "safe-room"
+    })
+    expect(approved.workflow).toEqual(safeRevision)
+    expect(approved.state.workrooms["review-room"]?.status).toBe("active")
+    expect(approved.state.nodes.future?.status).toBe("pending")
+  })
+
   test("initializes a versionless run and schedules only dependency-ready nodes up to concurrency", () => {
     const spec = workflow(
       [command("first"), command("dependent", { needs: ["first"] }), command("parallel")],

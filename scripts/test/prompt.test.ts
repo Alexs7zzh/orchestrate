@@ -142,6 +142,7 @@ function state(): RunState {
         completedAt: "2026-08-02T12:01:00.000Z"
       }
     },
+    workrooms: {},
     spawnIntents: {}
   }
 }

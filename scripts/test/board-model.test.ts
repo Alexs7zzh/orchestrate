@@ -147,6 +147,7 @@ function state(nodes: readonly NodeRunState[], overrides: Partial<RunState> = {}
     gates: {},
     holds: {},
     repeats: {},
+    workrooms: {},
     spawnIntents: {},
     ...overrides
   }
@@ -269,7 +270,7 @@ describe("board view model", () => {
     ])
   })
 
-  test("orders needs-you items as gates, revision, maxRounds, held, then stalled", () => {
+  test("orders needs-you items as gates, revision, maxRounds, held, workroom, then stalled", () => {
     const gated = node("gated", "awaiting-approval")
     const held = node("held", "completed")
     const running = node("running", "running")
@@ -311,6 +312,22 @@ describe("board view model", () => {
         },
         holds: {
           held: { target: "held", scope: "instance", setAt: START }
+        },
+        workrooms: {
+          "review-room": {
+            id: "review-room",
+            status: "active",
+            workspaceId: null,
+            tabId: null,
+            seats: {
+              reviewer: {
+                id: "reviewer",
+                status: "attention",
+                nodeId: "running",
+                pane: null
+              }
+            }
+          }
         }
       }),
       [],
@@ -325,6 +342,7 @@ describe("board view model", () => {
       "revision",
       "max-rounds",
       "downstream-held",
+      "workroom",
       "stalled-pane"
     ])
     expect(model.needsYou.map((item) => item.command)).toEqual([
@@ -332,8 +350,14 @@ describe("board view model", () => {
       "orchestrate approve run-1 --revision revision-digest",
       "orchestrate resume run-1 --accept-repeat review-loop",
       "orchestrate release run-1 held",
+      "orchestrate reconcile run-1",
       "orchestrate node-done run-1 running --token token-1 --outcome completed"
     ])
+    expect(model.needsYou[4]).toMatchObject({
+      workroomId: "review-room",
+      seatId: "reviewer",
+      title: "review-room: seat reviewer needs occupancy attention"
+    })
   })
 
   test("shows the explicit fuse override instead of offering ordinary resume", () => {

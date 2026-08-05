@@ -46,6 +46,12 @@ function schemaIssueCode(issuePath: readonly unknown[] | undefined): string {
   if (/^repeats\.\d+\.until\.pointer$/.test(joined)) {
     return "repeat-until"
   }
+  if (/^presentation\.workrooms\.\d+\.seats/.test(joined)) {
+    return "workroom-seats"
+  }
+  if (joined.startsWith("presentation.workrooms")) {
+    return "workroom"
+  }
   return "schema"
 }
 const NODE_ID = /^[a-z0-9][a-z0-9-]*$/
@@ -961,6 +967,13 @@ function validateSessions(
         "session-order",
         `Node "${node.id}" session source "${source.id}" must be an ancestor dependency.`
       )
+    } else if (source.workroom !== node.workroom || source.seat !== node.seat) {
+      addIssue(
+        issues,
+        "error",
+        "session-presentation",
+        `Node "${node.id}" cannot continue session source "${source.id}" across workrooms or seats in V1.`
+      )
     }
   }
 
@@ -1009,6 +1022,226 @@ function validateSessions(
             "error",
             "session-fanout",
             `Nodes "${left.id}" and "${right.id}" resume the same mutable session without an ordering dependency; use a linear chain or fork.`
+          )
+        }
+      }
+    }
+  }
+}
+
+function repeatAwareAncestors(
+  workflow: WorkflowSpec,
+  memberToRepeat: ReadonlyMap<string, string>
+): {
+  readonly ancestors: ReadonlyMap<string, ReadonlySet<string>>
+  readonly cycles: readonly (readonly string[])[]
+} {
+  const repeatById = new Map(workflow.repeats.map((repeat) => [repeat.id, repeat]))
+  const dependencies = new Map(
+    workflow.nodes.map((node) => {
+      const nodeRepeat = memberToRepeat.get(node.id)
+      const expanded = node.needs.flatMap((dependency) => {
+        const dependencyRepeat = memberToRepeat.get(dependency)
+        if (dependencyRepeat === undefined || dependencyRepeat === nodeRepeat) {
+          return [dependency]
+        }
+        return repeatById.get(dependencyRepeat)?.members ?? [dependency]
+      })
+      return [node.id, [...new Set(expanded)]] as const
+    })
+  )
+  const memo = new Map<string, Set<string>>()
+  const active = new Set<string>()
+  const stack: string[] = []
+  const cycleKeys = new Set<string>()
+  const cycles: string[][] = []
+  const visit = (nodeId: string): Set<string> => {
+    const cached = memo.get(nodeId)
+    if (cached !== undefined) {
+      return cached
+    }
+    if (active.has(nodeId)) {
+      const start = stack.indexOf(nodeId)
+      const cycle = [...stack.slice(start), nodeId]
+      const key = [...new Set(cycle.slice(0, -1))].toSorted().join("\u0000")
+      if (!cycleKeys.has(key)) {
+        cycleKeys.add(key)
+        cycles.push(cycle)
+      }
+      return new Set()
+    }
+    active.add(nodeId)
+    stack.push(nodeId)
+    const result = new Set<string>()
+    for (const dependency of dependencies.get(nodeId) ?? []) {
+      result.add(dependency)
+      for (const ancestor of visit(dependency)) {
+        result.add(ancestor)
+      }
+    }
+    stack.pop()
+    active.delete(nodeId)
+    memo.set(nodeId, result)
+    return result
+  }
+  for (const node of workflow.nodes) {
+    visit(node.id)
+  }
+  return { ancestors: memo, cycles }
+}
+
+function validatePresentation(
+  workflow: WorkflowSpec,
+  issues: ValidationIssue[],
+  byId: ReadonlyMap<string, WorkflowNode>,
+  memberToRepeat: ReadonlyMap<string, string>
+): void {
+  const workrooms = workflow.presentation?.workrooms ?? []
+  const workroomById = new Map<string, (typeof workrooms)[number]>()
+  const seatToWorkroom = new Map<string, string>()
+
+  for (const workroom of workrooms) {
+    if (workroomById.has(workroom.id)) {
+      addIssue(issues, "error", "workroom-id", `Workroom id "${workroom.id}" is duplicated.`)
+    } else {
+      workroomById.set(workroom.id, workroom)
+    }
+    if (new Set(workroom.settlesOn).size !== workroom.settlesOn.length) {
+      addIssue(
+        issues,
+        "error",
+        "workroom-settlement",
+        `Workroom "${workroom.id}" repeats a settlesOn node.`
+      )
+    }
+    for (const anchor of workroom.settlesOn) {
+      if (!byId.has(anchor)) {
+        addIssue(
+          issues,
+          "error",
+          "workroom-settlement",
+          `Workroom "${workroom.id}" settles on unknown node "${anchor}".`
+        )
+      } else if (memberToRepeat.has(anchor)) {
+        addIssue(
+          issues,
+          "error",
+          "workroom-settlement",
+          `Workroom "${workroom.id}" settlesOn node "${anchor}" must not be a repeat member.`
+        )
+      }
+    }
+    for (const seat of workroom.seats) {
+      const owner = seatToWorkroom.get(seat.id)
+      if (owner !== undefined) {
+        addIssue(
+          issues,
+          "error",
+          "seat-id",
+          `Seat id "${seat.id}" is declared by both workroom "${owner}" and "${workroom.id}".`
+        )
+      } else {
+        seatToWorkroom.set(seat.id, workroom.id)
+      }
+    }
+  }
+
+  const nodesBySeat = new Map<string, WorkflowNode[]>()
+  for (const node of workflow.nodes) {
+    if (node.type === "command" && node.seat !== undefined) {
+      addIssue(
+        issues,
+        "error",
+        "node-seat",
+        `Command node "${node.id}" cannot occupy participant seat "${node.seat}" in V1.`
+      )
+      continue
+    }
+    if (node.seat !== undefined && node.workroom === undefined) {
+      addIssue(
+        issues,
+        "error",
+        "node-seat",
+        `Node "${node.id}" assigns seat "${node.seat}" without naming its workroom.`
+      )
+      continue
+    }
+    if (node.workroom === undefined) {
+      continue
+    }
+    if (!workroomById.has(node.workroom)) {
+      addIssue(
+        issues,
+        "error",
+        "node-workroom",
+        `Node "${node.id}" names unknown workroom "${node.workroom}".`
+      )
+      continue
+    }
+    if (node.seat === undefined) {
+      continue
+    }
+    const seatWorkroom = seatToWorkroom.get(node.seat)
+    if (seatWorkroom === undefined) {
+      addIssue(issues, "error", "node-seat", `Node "${node.id}" names unknown seat "${node.seat}".`)
+      continue
+    }
+    if (seatWorkroom !== node.workroom) {
+      addIssue(
+        issues,
+        "error",
+        "node-seat",
+        `Node "${node.id}" assigns seat "${node.seat}" from workroom "${seatWorkroom}", not "${node.workroom}".`
+      )
+      continue
+    }
+    nodesBySeat.set(node.seat, [...(nodesBySeat.get(node.seat) ?? []), node])
+  }
+
+  const repeatAwareGraph = repeatAwareAncestors(workflow, memberToRepeat)
+  const ancestors = repeatAwareGraph.ancestors
+  for (const cycle of repeatAwareGraph.cycles) {
+    addIssue(
+      issues,
+      "error",
+      "repeat-boundary-cycle",
+      `Repeat-aware dependency expansion creates a cycle: ${cycle.join(" -> ")}.`,
+      [...new Set(cycle)]
+    )
+  }
+  for (const workroom of workrooms) {
+    const anchors = workroom.settlesOn.filter(
+      (anchor) => byId.has(anchor) && !memberToRepeat.has(anchor)
+    )
+    const assigned = workflow.nodes.filter((node) => node.workroom === workroom.id)
+    for (const anchor of anchors) {
+      for (const node of assigned) {
+        if (node.id !== anchor && ancestors.get(anchor)?.has(node.id) !== true) {
+          addIssue(
+            issues,
+            "error",
+            "workroom-settlement",
+            `Workroom "${workroom.id}" settlesOn node "${anchor}" must be downstream of workroom node "${node.id}".`
+          )
+        }
+      }
+    }
+  }
+
+  for (const [seat, nodes] of nodesBySeat) {
+    for (let leftIndex = 0; leftIndex < nodes.length; leftIndex += 1) {
+      const left = nodes[leftIndex] as WorkflowNode
+      for (let rightIndex = leftIndex + 1; rightIndex < nodes.length; rightIndex += 1) {
+        const right = nodes[rightIndex] as WorkflowNode
+        if (
+          ancestors.get(left.id)?.has(right.id) !== true &&
+          ancestors.get(right.id)?.has(left.id) !== true
+        ) {
+          addIssue(
+            issues,
+            "error",
+            "seat-order",
+            `Nodes "${left.id}" and "${right.id}" share seat "${seat}" without a total dependency order.`
           )
         }
       }
@@ -1105,6 +1338,7 @@ export function validateWorkflow(input: unknown): ValidationResult {
   }
   const memberToRepeat = validateRepeats(workflow, issues, byId, ancestors)
   validateConditions(workflow, issues, byId, memberToRepeat)
+  validatePresentation(workflow, issues, byId, memberToRepeat)
   const unrolled = unrolledRoundGroups(workflow)
   if (unrolled.length >= 2) {
     const sample = (unrolled[0] as readonly string[]).slice(0, 2)

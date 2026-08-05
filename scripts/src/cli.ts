@@ -410,6 +410,28 @@ function previewPlan(workflow: WorkflowSpec, digest: string, issues: readonly Va
   const depths = dependencyDepths(
     Object.fromEntries(workflow.nodes.map((entry) => [entry.id, entry]))
   )
+  const floorPlan =
+    workflow.presentation === undefined
+      ? null
+      : {
+          activeSeatsOverrideCloseSuccess: true,
+          workrooms: workflow.presentation.workrooms.map((workroom) => ({
+            id: workroom.id,
+            label: workroom.label,
+            layout: workroom.layout,
+            settlesOn: workroom.settlesOn,
+            seats: workroom.seats.map((seat) => ({
+              id: seat.id,
+              label: seat.label,
+              nodes: workflow.nodes
+                .filter((node) => node.workroom === workroom.id && node.seat === seat.id)
+                .map((node) => node.id)
+            })),
+            unseatedNodes: workflow.nodes
+              .filter((node) => node.workroom === workroom.id && node.seat === undefined)
+              .map((node) => node.id)
+          }))
+        }
   return {
     digest,
     name: workflow.name,
@@ -420,6 +442,7 @@ function previewPlan(workflow: WorkflowSpec, digest: string, issues: readonly Va
     callback: previewCallback(workflow),
     milestones: workflow.milestones,
     writeConflicts: workflow.writeConflicts,
+    floorPlan,
     nodes: workflow.nodes.map((node) => ({
       id: node.id,
       type: node.type,
@@ -428,6 +451,8 @@ function previewPlan(workflow: WorkflowSpec, digest: string, issues: readonly Va
       needs: node.needs,
       gate: node.gate,
       when: node.when ?? null,
+      workroom: node.workroom ?? null,
+      seat: node.seat ?? null,
       provider: node.type === "agent" ? node.provider : null,
       permissions: node.type === "agent" ? node.permissions : null,
       workspace: node.workspace,
@@ -448,8 +473,25 @@ function previewText(plan: ReturnType<typeof previewPlan>): string {
           node.permissions === null
             ? ""
             : ` escalation=${node.permissions.escalation} execution=${JSON.stringify(node.permissions.execution)}`
-        }`
+        }${node.workroom === null ? "" : ` workroom=${node.workroom}${node.seat === null ? "" : ` seat=${node.seat}`}`}`
     )
+  const floorPlan =
+    plan.floorPlan === null
+      ? []
+      : [
+          "Floor plan:",
+          "  Active seats override close-success: true",
+          ...plan.floorPlan.workrooms.flatMap((workroom) => [
+            `  ${workroom.id} ${JSON.stringify(workroom.label)} layout=${workroom.layout} settlesOn=${workroom.settlesOn.join(",")}`,
+            ...workroom.seats.map(
+              (seat) =>
+                `    seat ${seat.id} ${JSON.stringify(seat.label)} nodes=${seat.nodes.join(",") || "-"}`
+            ),
+            ...(workroom.unseatedNodes.length === 0
+              ? []
+              : [`    unseated nodes=${workroom.unseatedNodes.join(",")}`])
+          ])
+        ]
   return [
     `${plan.name}: ${plan.objective}`,
     `Digest: ${plan.digest}`,
@@ -459,6 +501,7 @@ function previewText(plan: ReturnType<typeof previewPlan>): string {
     `Callback: ${JSON.stringify(plan.callback)}`,
     `Milestones: ${plan.milestones}`,
     `Write conflicts: ${plan.writeConflicts}`,
+    ...floorPlan,
     "Nodes:",
     ...rows,
     ...(plan.repeats.length === 0
@@ -678,7 +721,8 @@ function statusValue(state: RunState, observedAttention = runNeedsAttention(stat
     }),
     gates: Object.values(state.gates).filter((gate) => gate.approvedAt === null),
     holds: Object.values(state.holds),
-    repeats: Object.values(state.repeats)
+    repeats: Object.values(state.repeats),
+    workrooms: Object.values(state.workrooms)
   }
 }
 
@@ -706,7 +750,15 @@ function statusText(
       .filter((hold) => holdBlocksDependencies(state, hold))
       .map(
         (hold) => `  downstream held ${hold.target}: orchestrate release ${state.id} ${hold.target}`
-      )
+      ),
+    ...value.workrooms.flatMap((workroom) =>
+      Object.values(workroom.seats)
+        .filter((seat) => seat.status === "attention")
+        .map(
+          (seat) =>
+            `  workroom ${workroom.id} seat ${seat.id}: inspect Herdr occupancy, then orchestrate reconcile ${state.id}`
+        )
+    )
   ]
   const recovery = Object.values(state.nodes).flatMap((node) => {
     const attempt = node.attempts.at(-1)
@@ -915,6 +967,7 @@ export function structuralDiff(before: WorkflowSpec, after: WorkflowSpec): reado
     "milestones",
     "limits",
     "writeConflicts",
+    "presentation",
     "repeats"
   ] as const) {
     if (!isDeepStrictEqual(before[key], after[key])) {
@@ -1200,7 +1253,7 @@ async function handleUi(parsed: ParsedArgs, json: boolean): Promise<number> {
     const surface = new HerdrSurface()
     await surface.connect()
     const snapshot = await surface.paneSnapshot()
-    const dead: string[] = []
+    const dead = new Set<string>()
     for (const node of Object.values(state.nodes)) {
       const pane = node.attempts.at(-1)?.pane
       if (
@@ -1209,17 +1262,28 @@ async function handleUi(parsed: ParsedArgs, json: boolean): Promise<number> {
         pane !== undefined &&
         !snapshot.has(pane.paneId)
       ) {
-        dead.push(pane.paneId)
+        dead.add(pane.paneId)
       }
     }
-    const result = await crankRun(runDir, { type: "restore", deadPaneIds: dead }, { surface })
+    for (const workroom of Object.values(state.workrooms)) {
+      if (workroom.status !== "active") {
+        continue
+      }
+      for (const seat of Object.values(workroom.seats)) {
+        if (seat.pane !== null && !snapshot.has(seat.pane.paneId)) {
+          dead.add(seat.pane.paneId)
+        }
+      }
+    }
+    const deadPaneIds = [...dead]
+    const result = await crankRun(runDir, { type: "restore", deadPaneIds }, { surface })
     if (!json) {
       await surface.openBoard(state.id, await readUiSnapshot(runDir)).catch(() => undefined)
     }
     output(
       json,
-      { runId: state.id, deadPaneIds: dead, status: result.state.status },
-      `Restored ${state.id}; ${dead.length} vanished pane(s) reconciled.`
+      { runId: state.id, deadPaneIds, status: result.state.status },
+      `Restored ${state.id}; ${deadPaneIds.length} vanished pane(s) reconciled.`
     )
     return EXIT_OK
   }

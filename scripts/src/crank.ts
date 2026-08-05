@@ -109,6 +109,7 @@ export interface CrankSurface {
   openBoard?(runId: string, preferences: UiPreferences): Promise<void>
   prepareBoard?(preferences: UiPreferences): Promise<string | null>
   focusRuntime?(type: WorkflowNode["type"], pane: PaneReference): Promise<void>
+  renamePane?(paneId: string, label: string): Promise<void>
 }
 
 export interface CrankOptions {
@@ -283,6 +284,23 @@ function spawnRequest(
   }
   const template = templateFor(workflow, state, runtimeNode.id)
   const previousPane = runtimeNode.attempts.at(-2)?.pane ?? null
+  const workroomSpec =
+    template.workroom === undefined
+      ? undefined
+      : workflow.presentation?.workrooms.find((candidate) => candidate.id === template.workroom)
+  const seatIndex =
+    template.seat === undefined
+      ? -1
+      : (workroomSpec?.seats.findIndex((candidate) => candidate.id === template.seat) ?? -1)
+  const workroomState =
+    template.workroom === undefined ? undefined : state.workrooms[template.workroom]
+  const seatPane =
+    template.seat === undefined ? null : (workroomState?.seats[template.seat]?.pane ?? null)
+  const workroomAnchor =
+    workroomSpec?.seats
+      .filter((seat) => seat.id !== template.seat)
+      .map((seat) => workroomState?.seats[seat.id]?.pane ?? null)
+      .find((pane) => pane !== null) ?? null
   const sessionPane =
     template.type === "agent" &&
     template.session.mode === "resume" &&
@@ -321,7 +339,25 @@ function spawnRequest(
       runId: state.id,
       live,
       retryPane: previousPane,
-      sessionPane
+      sessionPane,
+      workroom:
+        workroomSpec === undefined || template.seat === undefined || seatIndex < 0
+          ? null
+          : {
+              id: workroomSpec.id,
+              label: workroomSpec.label,
+              layout: workroomSpec.layout,
+              seatId: template.seat,
+              seatIndex,
+              workspaceId: workroomState?.workspaceId ?? null,
+              tabId: workroomState?.tabId ?? null,
+              seats: workroomSpec.seats.map((seat) => ({
+                id: seat.id,
+                pane: workroomState?.seats[seat.id]?.pane ?? null
+              })),
+              seatPane,
+              anchorPane: workroomAnchor
+            }
     })
   }
 }
@@ -355,7 +391,8 @@ const ORIGIN_HANDOFF_EVENTS = new Set([
   "gate.opened",
   "hold.set",
   "revision.proposed",
-  "repeat.max-rounds"
+  "repeat.max-rounds",
+  "workroom.attention"
 ])
 
 function eventPauseKind(event: EventRecord): string | null {
@@ -417,6 +454,7 @@ async function presentActions(
   ui: UiPreferences,
   surface: CrankSurface
 ): Promise<void> {
+  const settledWorkrooms = new Set<string>()
   for (const action of actions) {
     if (action.type === "close-pane") {
       await surface.closePane(action.paneId).catch(() => undefined)
@@ -432,6 +470,17 @@ async function presentActions(
   const routedWorkflow = callbackWorkflow(workflow)
   for (const event of events) {
     await dispatchEventNotification(event, routedUi, surface, routedWorkflow)
+    if (
+      event.nodeId !== undefined &&
+      (event.type === "node.completed" || event.type === "node.skipped")
+    ) {
+      const templateId = state.nodes[event.nodeId]?.templateId ?? event.nodeId
+      for (const spec of workflow.presentation?.workrooms ?? []) {
+        if (spec.settlesOn.includes(templateId) && state.workrooms[spec.id]?.status === "settled") {
+          settledWorkrooms.add(spec.id)
+        }
+      }
+    }
     if (
       ui.focus === "attention" &&
       classifyEvent(event.type) === "attention" &&
@@ -463,9 +512,62 @@ async function presentActions(
     if (event.nodeId !== undefined && event.type === "node.completed") {
       const node = state.nodes[event.nodeId]
       const pane = node?.attempts.at(-1)?.pane
+      const template =
+        node === undefined
+          ? undefined
+          : workflow.nodes.find((candidate) => candidate.id === node.templateId)
+      const workroom =
+        template?.workroom === undefined ? undefined : state.workrooms[template.workroom]
+      const seat = template?.seat === undefined ? undefined : workroom?.seats[template.seat]
+      if (pane !== null && pane !== undefined && seat?.pane?.paneId === pane.paneId) {
+        if (workroom?.status === "active") {
+          const seatLabel =
+            workflow.presentation?.workrooms
+              .find((candidate) => candidate.id === workroom.id)
+              ?.seats.find((candidate) => candidate.id === seat.id)?.label ?? seat.id
+          if (surface.renamePane !== undefined) {
+            await surface
+              .renamePane(
+                pane.paneId,
+                `${seatLabel} · parked · last: ${node?.title ?? event.nodeId}`.slice(0, 80)
+              )
+              .catch(() => undefined)
+          }
+          continue
+        }
+        if (workroom?.status === "settled") {
+          settledWorkrooms.add(workroom.id)
+          continue
+        }
+      }
       const policy = node?.type === "agent" ? ui.completedPanes.agent : ui.completedPanes.command
       if (policy === "close-success" && pane !== null && pane !== undefined) {
         await surface.closePane(pane.paneId).catch(() => undefined)
+      }
+    }
+  }
+  const presentedSeatPanes = new Set<string>()
+  for (const workroomId of settledWorkrooms) {
+    const workroom = state.workrooms[workroomId]
+    const spec = workflow.presentation?.workrooms.find((candidate) => candidate.id === workroomId)
+    if (workroom === undefined || spec === undefined) {
+      continue
+    }
+    for (const seatSpec of spec.seats) {
+      const pane = workroom.seats[seatSpec.id]?.pane
+      if (pane === null || pane === undefined) {
+        continue
+      }
+      if (presentedSeatPanes.has(pane.paneId)) {
+        continue
+      }
+      presentedSeatPanes.add(pane.paneId)
+      if (ui.completedPanes.agent === "close-success") {
+        await surface.closePane(pane.paneId).catch(() => undefined)
+      } else if (surface.renamePane !== undefined) {
+        await surface
+          .renamePane(pane.paneId, `${seatSpec.label} · settled`.slice(0, 80))
+          .catch(() => undefined)
       }
     }
   }
@@ -526,10 +628,19 @@ async function reconcilePlannedSpawns(
   let currentState = state
   const deferred: HerdrObservationError[] = []
   const deferredIntentIds = new Set<string>()
+  const deferredWorkroomIds = new Set<string>()
   while (currentState.status === "running" && currentState.pendingRevision === null) {
-    const intent = Object.values(currentState.spawnIntents).find(
-      (candidate) => candidate.status === "planned" && !deferredIntentIds.has(candidate.id)
-    )
+    const intent = Object.values(currentState.spawnIntents).find((candidate) => {
+      if (candidate.status !== "planned" || deferredIntentIds.has(candidate.id)) {
+        return false
+      }
+      const template = templateFor(currentWorkflow, currentState, candidate.nodeId)
+      return (
+        template.workroom === undefined ||
+        template.seat === undefined ||
+        !deferredWorkroomIds.has(template.workroom)
+      )
+    })
     if (intent === undefined) {
       break
     }
@@ -548,9 +659,31 @@ async function reconcilePlannedSpawns(
       }
     } catch (error) {
       if (error instanceof HerdrObservationError) {
-        // An ambiguous observation is that node's attention, not a barrier:
-        // the intent stays planned for the next reconcile, independent
-        // planned work still starts, and the error is rethrown afterwards.
+        // A seated observation failure leaves the room's physical occupancy
+        // unresolved. Keep the intent planned, mark durable attention, and do
+        // not launch another seat in that room during this reconcile. Work in
+        // other rooms and unseated work may still proceed.
+        const template = templateFor(currentWorkflow, currentState, intent.nodeId)
+        const seat =
+          template.workroom === undefined || template.seat === undefined
+            ? undefined
+            : currentState.workrooms[template.workroom]?.seats[template.seat]
+        if (seat !== undefined && template.workroom !== undefined) {
+          deferredWorkroomIds.add(template.workroom)
+          if (error.requiresAttention && seat.status !== "attention") {
+            const attention = transition(
+              currentState,
+              currentWorkflow,
+              { type: "spawn-attention", nodeId: intent.nodeId, intentId: intent.id },
+              now(options),
+              transitionContext(runDir, null, true)
+            )
+            await commitTransition(runDir, attention, ui, surface)
+            collected.push(...attention.events)
+            currentWorkflow = attention.workflow
+            currentState = attention.state
+          }
+        }
         deferredIntentIds.add(intent.id)
         deferred.push(error)
         continue
