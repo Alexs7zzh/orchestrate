@@ -33,6 +33,7 @@ import {
   workflowWorktreePath
 } from "./herdr-surface.js"
 import {
+  emptyUiPreferenceLayer,
   readPreferences,
   replaceUiPreferenceLayer,
   setUiPreference,
@@ -414,7 +415,6 @@ function previewPlan(workflow: WorkflowSpec, digest: string, issues: readonly Va
     workflow.presentation === undefined
       ? null
       : {
-          activeSeatsOverrideCloseSuccess: true,
           workrooms: workflow.presentation.workrooms.map((workroom) => ({
             id: workroom.id,
             label: workroom.label,
@@ -427,7 +427,7 @@ function previewPlan(workflow: WorkflowSpec, digest: string, issues: readonly Va
                 .filter((node) => node.workroom === workroom.id && node.seat === seat.id)
                 .map((node) => node.id)
             })),
-            unseatedNodes: workflow.nodes
+            seatlessNodes: workflow.nodes
               .filter((node) => node.workroom === workroom.id && node.seat === undefined)
               .map((node) => node.id)
           }))
@@ -454,10 +454,20 @@ function previewPlan(workflow: WorkflowSpec, digest: string, issues: readonly Va
       workroom: node.workroom ?? null,
       seat: node.seat ?? null,
       provider: node.type === "agent" ? node.provider : null,
-      permissions: node.type === "agent" ? node.permissions : null,
+      permissions:
+        node.type === "agent"
+          ? {
+              execution: node.permissions.execution,
+              escalation: node.permissions.escalation,
+              extraArgs: node.permissions.extraArgs,
+              inheritEnv: node.permissions.inheritEnv
+            }
+          : null,
       workspace: node.workspace,
       environmentKeys:
-        node.type === "agent" ? Object.keys(node.permissions.env) : Object.keys(node.env)
+        node.type === "agent"
+          ? Object.keys(node.permissions.env).toSorted()
+          : Object.keys(node.env).toSorted()
     })),
     repeats: workflow.repeats,
     issues
@@ -473,23 +483,23 @@ function previewText(plan: ReturnType<typeof previewPlan>): string {
           node.permissions === null
             ? ""
             : ` escalation=${node.permissions.escalation} execution=${JSON.stringify(node.permissions.execution)}`
-        }${node.workroom === null ? "" : ` workroom=${node.workroom}${node.seat === null ? "" : ` seat=${node.seat}`}`}`
+        } workspace=${node.workspace.mode} path=${JSON.stringify(node.workspace.path)} writes=${JSON.stringify(node.workspace.writes)} exclusiveResources=${JSON.stringify(node.workspace.exclusiveResources)} envKeys=${JSON.stringify(node.environmentKeys)}${node.workroom === null ? "" : ` workroom=${node.workroom}${node.seat === null ? "" : ` seat=${node.seat}`}`}`
     )
   const floorPlan =
     plan.floorPlan === null
       ? []
       : [
           "Floor plan:",
-          "  Active seats override close-success: true",
+          "  Seat panes stay parked while active; settled panes follow completed-pane preferences.",
           ...plan.floorPlan.workrooms.flatMap((workroom) => [
             `  ${workroom.id} ${JSON.stringify(workroom.label)} layout=${workroom.layout} settlesOn=${workroom.settlesOn.join(",")}`,
             ...workroom.seats.map(
               (seat) =>
                 `    seat ${seat.id} ${JSON.stringify(seat.label)} nodes=${seat.nodes.join(",") || "-"}`
             ),
-            ...(workroom.unseatedNodes.length === 0
+            ...(workroom.seatlessNodes.length === 0
               ? []
-              : [`    unseated nodes=${workroom.unseatedNodes.join(",")}`])
+              : [`    seatless nodes=${workroom.seatlessNodes.join(",")}`])
           ])
         ]
   return [
@@ -673,7 +683,7 @@ function dependencyDepths(
   return depths
 }
 
-function statusValue(state: RunState, observedAttention = runNeedsAttention(state)) {
+export function statusValue(state: RunState, observedAttention = runNeedsAttention(state)) {
   const runtimeNodes = Object.fromEntries(
     Object.values(state.nodes).map((node) => [
       node.id,
@@ -726,49 +736,60 @@ function statusValue(state: RunState, observedAttention = runNeedsAttention(stat
   }
 }
 
-function statusText(
+export function statusText(
   state: RunState,
   approvalGateTemplates: ReadonlySet<string> = new Set()
 ): string {
   const value = statusValue(state)
-  const needs = [
-    ...value.gates.map(
-      (gate) =>
-        `  gate ${gate.nodeId}: orchestrate approve ${state.id} --gate ${gate.nodeId} --digest ${gate.digest}`
-    ),
-    ...(state.pendingRevision === null
-      ? []
-      : [`  revision: orchestrate approve ${state.id} --revision ${state.pendingRevision.digest}`]),
-    ...(state.pause?.kind === "max-rounds" && state.pause.repeatId !== null
-      ? [
-          `  max rounds: orchestrate resume ${state.id} --continue-rounds 1`,
-          `              orchestrate resume ${state.id} --accept-repeat ${state.pause.repeatId}`
-        ]
-      : []),
-    ...(state.pause?.kind === "condition" ? [`  condition: ${state.pause.message}`] : []),
-    ...value.holds
-      .filter((hold) => holdBlocksDependencies(state, hold))
-      .map(
-        (hold) => `  downstream held ${hold.target}: orchestrate release ${state.id} ${hold.target}`
-      ),
-    ...value.workrooms.flatMap((workroom) =>
-      Object.values(workroom.seats)
-        .filter((seat) => seat.status === "attention")
-        .map(
-          (seat) =>
-            `  workroom ${workroom.id} seat ${seat.id}: inspect Herdr occupancy, then orchestrate reconcile ${state.id}`
+  const terminal =
+    state.status === "completed" || state.status === "failed" || state.status === "stopped"
+  const needs = terminal
+    ? []
+    : [
+        ...value.gates.map(
+          (gate) =>
+            `  gate ${gate.nodeId}: orchestrate approve ${state.id} --gate ${gate.nodeId} --digest ${gate.digest}`
+        ),
+        ...(state.pendingRevision === null
+          ? []
+          : [
+              `  revision: orchestrate approve ${state.id} --revision ${state.pendingRevision.digest}`
+            ]),
+        ...(state.pause?.kind === "max-rounds" && state.pause.repeatId !== null
+          ? [
+              `  max rounds: orchestrate resume ${state.id} --continue-rounds 1`,
+              `              orchestrate resume ${state.id} --accept-repeat ${state.pause.repeatId}`
+            ]
+          : []),
+        ...(state.pause?.kind === "condition" ? [`  condition: ${state.pause.message}`] : []),
+        ...value.holds
+          .filter((hold) => holdBlocksDependencies(state, hold))
+          .map(
+            (hold) =>
+              `  downstream held ${hold.target}: orchestrate release ${state.id} ${hold.target}`
+          ),
+        ...value.workrooms.flatMap((workroom) =>
+          workroom.status !== "active"
+            ? []
+            : Object.values(workroom.seats)
+                .filter((seat) => seat.status === "attention")
+                .map(
+                  (seat) =>
+                    `  workroom ${workroom.id} seat ${seat.id}: inspect the workroom tab, then orchestrate reconcile ${state.id}`
+                )
         )
-    )
-  ]
-  const recovery = Object.values(state.nodes).flatMap((node) => {
-    const attempt = node.attempts.at(-1)
-    if (node.type !== "agent" || node.status !== "running" || attempt === undefined) {
-      return []
-    }
-    return [
-      `  ${node.id}: orchestrate node-done ${state.id} ${node.id} --token ${attempt.token} --outcome failed`
-    ]
-  })
+      ]
+  const recovery = terminal
+    ? []
+    : Object.values(state.nodes).flatMap((node) => {
+        const attempt = node.attempts.at(-1)
+        if (node.type !== "agent" || node.status !== "running" || attempt === undefined) {
+          return []
+        }
+        return [
+          `  ${node.id}: orchestrate node-done ${state.id} ${node.id} --token ${attempt.token} --outcome failed`
+        ]
+      })
   return [
     `${state.workflowName} (${state.id})`,
     `Status: ${state.status}${value.needsAttention ? " — needs attention" : ""}`,
@@ -1019,24 +1040,13 @@ async function confirmStop(runId: string): Promise<boolean> {
   }
 }
 
-function emptyUiLayer(): UiPreferenceLayer {
-  return {
-    board: null,
-    placement: null,
-    completedPanes: { agent: null, command: null },
-    focus: null,
-    continuation: null,
-    notifications: { attention: null, milestone: null, progress: null }
-  }
-}
-
 async function editUiLayer(project: string | null): Promise<void> {
   const preferences = await readPreferences()
   const resolved = project === null ? null : path.resolve(project)
   const layer =
     resolved === null
       ? preferences.global.ui
-      : (preferences.projects[resolved]?.ui ?? emptyUiLayer())
+      : (preferences.projects[resolved]?.ui ?? emptyUiPreferenceLayer())
   const temporary = await mkdtemp(path.join(os.tmpdir(), "orchestrate-ui-"))
   const file = path.join(temporary, "ui.json")
   await writeFile(file, `${JSON.stringify(layer, null, 2)}\n`)
@@ -1277,13 +1287,15 @@ async function handleUi(parsed: ParsedArgs, json: boolean): Promise<number> {
     }
     const deadPaneIds = [...dead]
     const result = await crankRun(runDir, { type: "restore", deadPaneIds }, { surface })
+    let boardDegraded: string | null = null
     if (!json) {
-      await surface.openBoard(state.id, await readUiSnapshot(runDir)).catch(() => undefined)
+      boardDegraded = await surface.openBoard(state.id, await readUiSnapshot(runDir))
     }
+    const message = `Restored ${state.id}; ${deadPaneIds.length} vanished pane(s) reconciled.`
     output(
       json,
       { runId: state.id, deadPaneIds, status: result.state.status },
-      `Restored ${state.id}; ${deadPaneIds.length} vanished pane(s) reconciled.`
+      boardDegraded === null ? message : `${message} Board placement changed: ${boardDegraded}`
     )
     return EXIT_OK
   }
@@ -1846,7 +1858,7 @@ export async function runCli(
     })
     if (!result.dryRun && !result.remove) {
       if (has(parsed, "defaults")) {
-        await replaceUiPreferenceLayer(emptyUiLayer(), null)
+        await replaceUiPreferenceLayer(emptyUiPreferenceLayer(), null)
       } else if (
         !json &&
         !has(parsed, "no-wizard") &&

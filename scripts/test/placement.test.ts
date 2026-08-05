@@ -19,6 +19,7 @@ import {
   placementGroupKey,
   resolveAutoContinue,
   resolvePlacement,
+  workroomPlacementGroupKey,
   type LivePlacement
 } from "../src/placement.js"
 
@@ -215,7 +216,6 @@ describe("placement rule resolution", () => {
       context()
     )
     expect(resolved.surface).toBe("split")
-    expect(resolved.matchedRuleIndex).toBe(0)
   })
 
   test.each([
@@ -320,8 +320,7 @@ describe("declared workroom placement", () => {
 
     expect(resolved).toMatchObject({
       surface: "split",
-      matchedRuleIndex: -1,
-      group: placementGroupKey("run-a", "review-room", 1),
+      group: workroomPlacementGroupKey("run-a", "review-room"),
       groupLabel: "Review room",
       reusePane: parked,
       anchorPane: implementer,
@@ -331,7 +330,7 @@ describe("declared workroom placement", () => {
   })
 
   test("uses a retry pane before the durable seat and starts the first seat as the room tab", () => {
-    const retry = pane(placementGroupKey("run-a", "review-room", 1), "retry", "tab")
+    const retry = pane(workroomPlacementGroupKey("run-a", "review-room"), "retry", "tab")
     const resolved = resolvePlacement(spec, runtimeNode("review"), preferences(rules), {
       ...context("run-a", [], retry),
       workroom: {
@@ -350,6 +349,37 @@ describe("declared workroom placement", () => {
     expect(resolved.reusePane).toEqual(retry)
     expect(resolved.surface).toBe("tab")
     expect(resolved.splitDirection).toBe("down")
+  })
+
+  test("does not resurrect a cleared seat from a stale session pane", () => {
+    const resolved = resolvePlacement(spec, runtimeNode("review"), preferences(rules), {
+      ...context(),
+      sessionPane: pane("session", "vanished-session-pane", "tab"),
+      workroom: {
+        id: "review-room",
+        label: "Review room",
+        layout: "columns",
+        seatId: "reviewer",
+        seatIndex: 0,
+        workspaceId: null,
+        tabId: null,
+        seats: [{ id: "reviewer", pane: null }],
+        seatPane: null,
+        anchorPane: null
+      }
+    })
+
+    expect(resolved.reusePane).toBeNull()
+    expect(resolved.surface).toBe("tab")
+  })
+
+  test("namespaces workroom groups away from matcher-selected groups", () => {
+    expect(workroomPlacementGroupKey("run-a", "review-room")).toBe(
+      "orchestrate/run-a/workroom/review-room/1"
+    )
+    expect(workroomPlacementGroupKey("run-a", "review-room")).not.toBe(
+      placementGroupKey("run-a", "review-room", 1)
+    )
   })
 })
 

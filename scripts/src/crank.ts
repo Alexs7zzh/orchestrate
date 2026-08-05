@@ -39,6 +39,7 @@ import {
   atomicWriteJson,
   commitRun,
   completionSubmissionPath,
+  hasResolvedHistory,
   listRunStates,
   persistNewRun,
   readRunState,
@@ -50,12 +51,9 @@ import {
 } from "./state.js"
 import { createInitialRunState, transition, type TransitionContext } from "./transition.js"
 import { validateWorkflow } from "./validation.js"
+import { seatSpecFor, templateForRuntimeNode, workroomSpecFor } from "./workflow-lookup.js"
 
 export const MAX_RESULT_BYTES = 1024 * 1024
-
-function hasResolvedHistory(node: RunState["nodes"][string]): boolean {
-  return node.attempts.length > 0 || node.status === "skipped"
-}
 
 export async function readBoundedResult(file: string, label: string): Promise<string> {
   const flags = constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0)
@@ -106,7 +104,7 @@ export interface CrankSurface {
   notify(title: string, body: string, sound: "none" | "done" | "request"): Promise<void>
   promptOrigin?(origin: RunOrigin, prompt: string): Promise<void>
   waitForAgentStatus?(paneId: string, status: string, timeoutMs: number): Promise<boolean>
-  openBoard?(runId: string, preferences: UiPreferences): Promise<void>
+  openBoard?(runId: string, preferences: UiPreferences): Promise<string | null | void>
   prepareBoard?(preferences: UiPreferences): Promise<string | null>
   focusRuntime?(type: WorkflowNode["type"], pane: PaneReference): Promise<void>
   renamePane?(paneId: string, label: string): Promise<void>
@@ -258,15 +256,6 @@ function transitionWithRevisionReconciliation(
   }
 }
 
-function templateFor(workflow: WorkflowSpec, state: RunState, runtimeId: string): WorkflowNode {
-  const templateId = state.nodes[runtimeId]?.templateId
-  const template = workflow.nodes.find((candidate) => candidate.id === templateId)
-  if (template === undefined) {
-    throw new Error(`Runtime node "${runtimeId}" has no workflow template.`)
-  }
-  return template
-}
-
 function spawnRequest(
   workflow: WorkflowSpec,
   state: RunState,
@@ -282,12 +271,10 @@ function spawnRequest(
   if (runtimeNode === undefined || attempt === undefined) {
     throw new Error(`Spawn intent "${intentId}" has no matching attempt.`)
   }
-  const template = templateFor(workflow, state, runtimeNode.id)
+  const template = templateForRuntimeNode(workflow, state, runtimeNode.id)
   const previousPane = runtimeNode.attempts.at(-2)?.pane ?? null
   const workroomSpec =
-    template.workroom === undefined
-      ? undefined
-      : workflow.presentation?.workrooms.find((candidate) => candidate.id === template.workroom)
+    template.workroom === undefined ? undefined : workroomSpecFor(workflow, template.workroom)
   const seatIndex =
     template.seat === undefined
       ? -1
@@ -453,8 +440,8 @@ async function presentActions(
   state: RunState,
   ui: UiPreferences,
   surface: CrankSurface
-): Promise<void> {
-  const settledWorkrooms = new Set<string>()
+): Promise<readonly string[]> {
+  const degraded: string[] = []
   for (const action of actions) {
     if (action.type === "close-pane") {
       await surface.closePane(action.paneId).catch(() => undefined)
@@ -463,24 +450,28 @@ async function presentActions(
       process.env.ORCHESTRATE_DISABLE_UI !== "1" &&
       surface.openBoard !== undefined
     ) {
-      await surface.openBoard(state.id, ui).catch(() => undefined)
+      try {
+        const reason = await surface.openBoard(state.id, ui)
+        if (typeof reason === "string") {
+          degraded.push(reason)
+        }
+      } catch (error) {
+        const reason = `Could not open the run board: ${herdrError(error)}`
+        degraded.push(reason)
+        await surface
+          .notify(
+            `${workflow.name} · board unavailable`,
+            `${reason} Open it manually with: orchestrate board ${state.id}`,
+            "request"
+          )
+          .catch(() => undefined)
+      }
     }
   }
   const routedUi = presentationPreferences(ui)
   const routedWorkflow = callbackWorkflow(workflow)
   for (const event of events) {
     await dispatchEventNotification(event, routedUi, surface, routedWorkflow)
-    if (
-      event.nodeId !== undefined &&
-      (event.type === "node.completed" || event.type === "node.skipped")
-    ) {
-      const templateId = state.nodes[event.nodeId]?.templateId ?? event.nodeId
-      for (const spec of workflow.presentation?.workrooms ?? []) {
-        if (spec.settlesOn.includes(templateId) && state.workrooms[spec.id]?.status === "settled") {
-          settledWorkrooms.add(spec.id)
-        }
-      }
-    }
     if (
       ui.focus === "attention" &&
       classifyEvent(event.type) === "attention" &&
@@ -513,18 +504,13 @@ async function presentActions(
       const node = state.nodes[event.nodeId]
       const pane = node?.attempts.at(-1)?.pane
       const template =
-        node === undefined
-          ? undefined
-          : workflow.nodes.find((candidate) => candidate.id === node.templateId)
+        node === undefined ? undefined : templateForRuntimeNode(workflow, state, node.id)
       const workroom =
         template?.workroom === undefined ? undefined : state.workrooms[template.workroom]
       const seat = template?.seat === undefined ? undefined : workroom?.seats[template.seat]
       if (pane !== null && pane !== undefined && seat?.pane?.paneId === pane.paneId) {
         if (workroom?.status === "active") {
-          const seatLabel =
-            workflow.presentation?.workrooms
-              .find((candidate) => candidate.id === workroom.id)
-              ?.seats.find((candidate) => candidate.id === seat.id)?.label ?? seat.id
+          const seatLabel = seatSpecFor(workflow, workroom.id, seat.id)?.label ?? seat.id
           if (surface.renamePane !== undefined) {
             await surface
               .renamePane(
@@ -536,7 +522,6 @@ async function presentActions(
           continue
         }
         if (workroom?.status === "settled") {
-          settledWorkrooms.add(workroom.id)
           continue
         }
       }
@@ -546,11 +531,13 @@ async function presentActions(
       }
     }
   }
+  // Settlement is durable state, not an event-delivery cursor. Reapply the
+  // idempotent close/rename policy on every presentation pass so revision-time
+  // settlement and a crash after commit but before presentation are repaired.
   const presentedSeatPanes = new Set<string>()
-  for (const workroomId of settledWorkrooms) {
-    const workroom = state.workrooms[workroomId]
-    const spec = workflow.presentation?.workrooms.find((candidate) => candidate.id === workroomId)
-    if (workroom === undefined || spec === undefined) {
+  for (const spec of workflow.presentation?.workrooms ?? []) {
+    const workroom = state.workrooms[spec.id]
+    if (workroom?.status !== "settled") {
       continue
     }
     for (const seatSpec of spec.seats) {
@@ -586,6 +573,7 @@ async function presentActions(
         .catch(() => undefined)
     }
   }
+  return degraded
 }
 
 async function commitTransition(
@@ -634,7 +622,7 @@ async function reconcilePlannedSpawns(
       if (candidate.status !== "planned" || deferredIntentIds.has(candidate.id)) {
         return false
       }
-      const template = templateFor(currentWorkflow, currentState, candidate.nodeId)
+      const template = templateForRuntimeNode(currentWorkflow, currentState, candidate.nodeId)
       return (
         template.workroom === undefined ||
         template.seat === undefined ||
@@ -659,11 +647,10 @@ async function reconcilePlannedSpawns(
       }
     } catch (error) {
       if (error instanceof HerdrObservationError) {
-        // A seated observation failure leaves the room's physical occupancy
-        // unresolved. Keep the intent planned, mark durable attention, and do
-        // not launch another seat in that room during this reconcile. Work in
-        // other rooms and unseated work may still proceed.
-        const template = templateFor(currentWorkflow, currentState, intent.nodeId)
+        // Keep every observation failure planned for a later reconcile. A
+        // seatful failure also defers sibling seats in that room; only a
+        // confirmed occupancy contradiction becomes durable attention.
+        const template = templateForRuntimeNode(currentWorkflow, currentState, intent.nodeId)
         const seat =
           template.workroom === undefined || template.seat === undefined
             ? undefined
@@ -766,7 +753,7 @@ export async function startWorkflowRun(
     heldState = held.state
   }
   await persistNewRun(workflow, ui, heldState, initialEvents)
-  await presentActions(
+  const presentationDegradations = await presentActions(
     recoveryActions(initialEvents, heldState),
     initialEvents,
     workflow,
@@ -774,6 +761,18 @@ export async function startWorkflowRun(
     ui,
     surface
   )
+  for (const reason of presentationDegradations) {
+    const degraded = transition(
+      heldState,
+      workflow,
+      { type: "ui-degraded", reason },
+      now(options),
+      transitionContext(runDir)
+    )
+    await commitTransition(runDir, degraded, ui, surface)
+    heldState = degraded.state
+    initialEvents.push(...degraded.events)
+  }
   const reconciled = await reconcileRun(runDir, { ...options, surface })
   return { ...reconciled, events: [...initialEvents, ...reconciled.events] }
 }
@@ -1085,7 +1084,7 @@ export async function crankRun(
 }
 
 function agentTemplate(workflow: WorkflowSpec, state: RunState, nodeId: string): AgentNode {
-  const node = templateFor(workflow, state, nodeId)
+  const node = templateForRuntimeNode(workflow, state, nodeId)
   if (node.type !== "agent") {
     throw new Error(`Node "${nodeId}" is not an agent.`)
   }

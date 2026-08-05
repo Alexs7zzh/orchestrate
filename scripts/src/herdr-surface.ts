@@ -51,6 +51,7 @@ import {
   orchestrateAuthorityPaths,
   resolveThroughExistingAncestor
 } from "./validation.js"
+import { seatSpecFor, templateForRuntimeNode } from "./workflow-lookup.js"
 
 declare const ORCHESTRATE_BUILD_EMBEDDED: string
 
@@ -407,7 +408,7 @@ export async function removeWorkflowWorktrees(
 ): Promise<readonly string[]> {
   const removed: string[] = []
   for (const runtime of Object.values(state.nodes)) {
-    const node = templateFor(workflow, state, runtime.id)
+    const node = templateForRuntimeNode(workflow, state, runtime.id)
     if (node.workspace.mode !== "git-worktree" || !node.workspace.git.removeOnClean) {
       continue
     }
@@ -450,15 +451,6 @@ function attemptFor(state: RunState, intent: SpawnIntent): AttemptState {
     throw new Error(`Spawn intent "${intent.id}" has no matching attempt state.`)
   }
   return attempt
-}
-
-function templateFor(workflow: WorkflowSpec, state: RunState, runtimeId: string): WorkflowNode {
-  const templateId = state.nodes[runtimeId]?.templateId
-  const node = workflow.nodes.find((candidate) => candidate.id === templateId)
-  if (node === undefined) {
-    throw new Error(`Runtime node "${runtimeId}" has no workflow template.`)
-  }
-  return node
 }
 
 function sourceSession(node: AgentNode, state: RunState): string | null {
@@ -1049,7 +1041,7 @@ async function createSplit(
   cwd: string,
   environment: Readonly<Record<string, string>>,
   group: string,
-  direction: "right" | "down" = "down",
+  direction: "right" | "down",
   ratio: number | null = null
 ): Promise<PaneReference> {
   const created = decodeHerdrJson(
@@ -1332,15 +1324,6 @@ export class HerdrSurface {
       )
     }
 
-    const target = live.find((seat) => seat.id === workroom.seatId)?.pane ?? null
-    if (target !== null) {
-      return { replacementPane: target, anchorPane: target }
-    }
-    const anchor = live.find((seat) => seat.id !== workroom.seatId)?.pane ?? null
-    if (anchor !== null) {
-      return { replacementPane: null, anchorPane: anchor }
-    }
-
     if (workroom.workspaceId !== null && workroom.tabId !== null) {
       const referencedPaneIds = new Set(referenced.map((seat) => seat.pane.paneId))
       const unknownOccupant = listed.result.panes.find(
@@ -1357,13 +1340,21 @@ export class HerdrSurface {
         )
       }
     }
+    const target = live.find((seat) => seat.id === workroom.seatId)?.pane ?? null
+    if (target !== null) {
+      return { replacementPane: target, anchorPane: target }
+    }
+    const anchor = live.find((seat) => seat.id !== workroom.seatId)?.pane ?? null
+    if (anchor !== null) {
+      return { replacementPane: null, anchorPane: anchor }
+    }
     return { replacementPane: null, anchorPane: null }
   }
 
   async spawn(request: SpawnRequest): Promise<SpawnObservation> {
     const { workflow, state, intent } = request
     const runtimeNode = state.nodes[intent.nodeId]
-    const node = templateFor(workflow, state, intent.nodeId)
+    const node = templateForRuntimeNode(workflow, state, intent.nodeId)
     const attempt = attemptFor(state, intent)
     const intendedCwd =
       node.workspace.mode === "git-worktree"
@@ -1481,7 +1472,7 @@ export class HerdrSurface {
           providerCwd,
           environment,
           replacementPane?.group ?? request.placement.group,
-          request.placement.splitDirection ?? "down"
+          request.placement.splitDirection
         )
         pane =
           replacementPane === null
@@ -1529,11 +1520,9 @@ export class HerdrSurface {
     let launchSessionId: string | null = null
     try {
       const seatLabel =
-        node.seat === undefined
+        node.workroom === undefined || node.seat === undefined
           ? null
-          : (workflow.presentation?.workrooms
-              .flatMap((workroom) => workroom.seats)
-              .find((seat) => seat.id === node.seat)?.label ?? node.seat)
+          : (seatSpecFor(workflow, node.workroom, node.seat)?.label ?? node.seat)
       await runHerdr([
         "pane",
         "rename",
@@ -1665,7 +1654,7 @@ export class HerdrSurface {
             providerSessionId: recorded.providerSessionId
           }
         }
-        const node = templateFor(request.workflow, request.state, request.intent.nodeId)
+        const node = templateForRuntimeNode(request.workflow, request.state, request.intent.nodeId)
         if (
           node.type === "agent" &&
           (await hasTokenValidSubmission(request.state, request.intent, attempt))
@@ -1724,7 +1713,7 @@ export class HerdrSurface {
           new Error(recorded.detail ?? "incomplete spawn")
         )
       }
-      const node = templateFor(request.workflow, request.state, request.intent.nodeId)
+      const node = templateForRuntimeNode(request.workflow, request.state, request.intent.nodeId)
       const promptOrCommandMayHaveRun = recorded.status !== "created"
       if (promptOrCommandMayHaveRun) {
         const submitted = await hasTokenValidSubmission(request.state, request.intent, attempt)
@@ -1807,29 +1796,57 @@ export class HerdrSurface {
       : null
   }
 
-  async openBoard(runId: string, preferences: UiPreferences): Promise<void> {
+  async openBoard(runId: string, preferences: UiPreferences): Promise<string | null> {
     const runDir = runDirectory(runId)
     const state = await readRunState(runDir)
     const workflow = await readWorkflow(runDir)
     const command = [orchestrateExecutable(), "board", state.id]
     const current = this.boardCurrent === undefined ? await this.currentPane() : this.boardCurrent
+    let degraded: string | null = null
 
-    let pane: PaneReference
-    if (preferences.board === "split-right" && current !== null) {
-      pane = await createSplit(current, workflow.cwd, {}, "board", "right", 0.35)
-    } else {
+    const freshBoardTab = async (forceRunWorkspace = false): Promise<PaneReference> => {
       let workspaceId: string
-      if (preferences.board === "current-workspace" && current !== null) {
+      if (!forceRunWorkspace && preferences.board === "current-workspace" && current !== null) {
         workspaceId = current.workspaceId
       } else {
         this.workspaceId ??= await findWorkspace(workflow, state.id)
         workspaceId =
           this.workspaceId ?? (await this.createRunWorkspace(workflow, state.id, workflow.cwd, {}))
       }
-      pane = await this.freshTab(workspaceId, "Board", workflow.cwd, {}, "board")
+      return this.freshTab(workspaceId, "Board", workflow.cwd, {}, "board")
     }
-    await runHerdr(["pane", "rename", pane.paneId, `${workflow.name}: board`])
-    await runHerdr(["pane", "run", pane.paneId, ...command])
+
+    let pane: PaneReference
+    if (preferences.board === "split-right" && current !== null) {
+      try {
+        pane = await createSplit(current, workflow.cwd, {}, "board", "right", 0.35)
+      } catch (error) {
+        if (!isPaneNotFound(error)) {
+          throw error
+        }
+        degraded =
+          "The launching Herdr pane disappeared before the board split opened; the board opened in the run workspace."
+        pane = await freshBoardTab()
+      }
+    } else {
+      pane = await freshBoardTab()
+    }
+    const startBoard = async (target: PaneReference): Promise<void> => {
+      await runHerdr(["pane", "rename", target.paneId, `${workflow.name}: board`])
+      await runHerdr(["pane", "run", target.paneId, ...command])
+    }
+    try {
+      await startBoard(pane)
+    } catch (error) {
+      if (!isPaneNotFound(error) || degraded !== null) {
+        throw error
+      }
+      degraded =
+        "The new board pane disappeared before the board command started; the board reopened in the run workspace."
+      pane = await freshBoardTab(true)
+      await startBoard(pane)
+    }
+    return degraded
   }
 
   async closePane(paneId: string): Promise<void> {

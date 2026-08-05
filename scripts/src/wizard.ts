@@ -4,12 +4,11 @@ import type {
   NodeMatcher,
   NotificationChannel,
   PlacementRule,
-  UiPreferenceLayer,
   UiPreferences
 } from "./types.js"
 
 import { EVENT_SEVERITIES } from "./notifications.js"
-import { DEFAULT_UI_PREFERENCES, replaceUiPreferenceLayer } from "./preferences.js"
+import { DEFAULT_UI_PREFERENCES, patchUiPreferenceLayer } from "./preferences.js"
 
 // The wizard renders with attribute codes only (bold/dim/inverse, no colour
 // codes), so output is already NO_COLOR-safe.
@@ -55,7 +54,7 @@ export const NOTIFICATION_PRESETS: readonly NotificationPresetOption[] = [
  */
 export const SEVERITY_EXPLAINERS: Readonly<Record<EventSeverity, string>> = {
   attention:
-    "The run needs you: an approval gate opened, the run failed, or a repeat loop hit its round limit.",
+    "The run needs you: an approval or revision is waiting, workroom occupancy needs repair, the run failed, or a repeat loop hit its round limit.",
   milestone:
     "Something finished: a node completed or failed; the run completed, paused, or stopped.",
   progress: "Routine motion: nodes starting, gates approved, repeat rounds advancing."
@@ -383,8 +382,10 @@ export interface WizardSelections extends PlacementChoices {
   readonly notifications: NotificationSelection
 }
 
+export type WizardPreferencePatch = Pick<UiPreferences, "board" | "placement" | "notifications">
+
 export interface WizardPlan {
-  readonly layer: UiPreferenceLayer
+  readonly patch: WizardPreferencePatch
   readonly commands: readonly string[]
 }
 
@@ -444,7 +445,7 @@ export function wizardPlan(selections: WizardSelections, project: string | null)
     milestone: selections.notifications.milestone,
     progress: selections.notifications.progress
   }
-  const layer: UiPreferenceLayer = {
+  const patch: WizardPreferencePatch = {
     board: selections.board,
     placement: {
       workspace: selections.workspace,
@@ -452,23 +453,15 @@ export function wizardPlan(selections: WizardSelections, project: string | null)
       grouping,
       maxSplitsPerTab: 4
     },
-    completedPanes: {
-      agent: DEFAULT_UI_PREFERENCES.completedPanes.agent,
-      command: DEFAULT_UI_PREFERENCES.completedPanes.command
-    },
-    focus: DEFAULT_UI_PREFERENCES.focus,
-    continuation: DEFAULT_UI_PREFERENCES.continuation,
     notifications
   }
-  const suffix = project === null ? "" : ` --project ${project}`
+  const suffix = project === null ? "" : ` --project ${shellQuote(project)}`
   const commands = [
-    `orchestrate ui set placement.workspace '${JSON.stringify(selections.workspace)}'${suffix}`,
-    `orchestrate ui set placement.rules '${JSON.stringify(rules)}'${suffix}`,
-    `orchestrate ui set placement.grouping '${JSON.stringify(grouping)}'${suffix}`,
-    `orchestrate ui set board '${JSON.stringify(selections.board)}'${suffix}`,
-    `orchestrate ui set notifications '${JSON.stringify(notifications)}'${suffix}`
+    `orchestrate ui set board ${shellQuote(JSON.stringify(patch.board))}${suffix}`,
+    `orchestrate ui set placement ${shellQuote(JSON.stringify(patch.placement))}${suffix}`,
+    `orchestrate ui set notifications ${shellQuote(JSON.stringify(patch.notifications))}${suffix}`
   ]
-  return { layer, commands }
+  return { patch, commands }
 }
 
 export type WizardKey = "up" | "down" | "enter" | "escape" | "none"
@@ -481,7 +474,14 @@ export interface WizardIo {
   readKey(): Promise<WizardKey>
 }
 
-export type ApplyUiLayer = (layer: UiPreferenceLayer, projectCwd: string | null) => Promise<unknown>
+export type ApplyUiPatch = (
+  patch: WizardPreferencePatch,
+  projectCwd: string | null
+) => Promise<unknown>
+
+function shellQuote(value: string): string {
+  return `'${value.replaceAll("'", `'"'"'`)}'`
+}
 
 export function parseWizardKey(sequence: string): WizardKey {
   if (sequence === "\u0003" || sequence === "\u001B" || sequence === "\u001B\u001B") {
@@ -656,7 +656,7 @@ const BOARD_OPTIONS = [
 
 const WORKSPACE_OPTIONS = [
   {
-    label: "Your current workspace (default) — run tabs open beside your own",
+    label: "Your current workspace (recommended) — run panes and workrooms open beside your own",
     value: "origin"
   },
   {
@@ -667,14 +667,17 @@ const WORKSPACE_OPTIONS = [
 
 const LAYOUT_OPTIONS = [
   {
-    label: `A node with its sub-nodes (default) — "api--test" tucks into the "api" tab`,
+    label: `Ordinary panes: a node with its sub-nodes (recommended) — "api--test" tucks into the "api" tab`,
     value: "nested"
   },
   {
-    label: "All related nodes — descendants of one entry node, 4 splits per tab",
+    label: "Ordinary panes: all related nodes — descendants of one entry node, 4 splits per tab",
     value: "grouped"
   },
-  { label: "A single node — every node opens its own tab", value: "per-node" }
+  {
+    label: "Ordinary panes: a single node — every ordinary/seatless node opens its own tab",
+    value: "per-node"
+  }
 ] as const
 
 async function askPlacement<T extends PlacementChoices[keyof PlacementChoices]>(
@@ -710,7 +713,7 @@ async function askPlacement<T extends PlacementChoices[keyof PlacementChoices]>(
 export async function runWizardWithIo(
   project: string | null,
   io: WizardIo,
-  apply: ApplyUiLayer = replaceUiPreferenceLayer
+  apply: ApplyUiPatch = patchUiPreferenceLayer
 ): Promise<void> {
   // Screen 1 — layout: three questions in the order a run reaches the user:
   // the board (the first thing they see), then where the run's panes live,
@@ -740,10 +743,10 @@ export async function runWizardWithIo(
   const afterWorkspace = await askPlacement(
     io,
     "workspace",
-    "Where should the workflow itself run?",
+    "Where should run panes and workrooms appear?",
     boardInRunWorkspace
-      ? "Each node opens in its own herdr pane. Your board choice already gives each run its own workspace."
-      : "Each node opens in its own herdr pane, grouped into tabs.",
+      ? "This changes Herdr presentation only. Your board choice already gives each run its own Herdr workspace."
+      : "This changes the Herdr UI destination only; provider cwd and filesystem workspace stay workflow-defined.",
     WORKSPACE_OPTIONS,
     (value) => ({ ...choices, workspace: value }),
     boardInRunWorkspace ? 1 : 0
@@ -757,7 +760,7 @@ export async function runWizardWithIo(
     io,
     "layout",
     "What goes into one tab?",
-    `A sub-node is named "parent--sub"; an entry node has no "needs".`,
+    `This applies to ordinary/seatless panes; declared seats stay in their approved workroom. A sub-node is named "parent--sub"; an entry node has no "needs".`,
     LAYOUT_OPTIONS,
     (value) => ({ ...choices, layout: value })
   )
@@ -804,7 +807,7 @@ export async function runWizardWithIo(
     io.print(CANCELLED_MESSAGE)
     return
   }
-  await apply(plan.layer, project)
+  await apply(plan.patch, project)
   io.print(
     [
       project === null

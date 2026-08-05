@@ -383,6 +383,38 @@ describe("board view model", () => {
     expect(mapBoardInput(model, null, { type: "key", key: "r" })).toEqual({ type: "none" })
   })
 
+  test("does not offer active recovery commands for terminal runs", () => {
+    for (const status of ["completed", "failed", "stopped"] as const) {
+      const model = buildBoardModel(
+        state([node("failed", "failed")], {
+          status,
+          workrooms: {
+            "review-room": {
+              id: "review-room",
+              status: "aborted",
+              workspaceId: null,
+              tabId: null,
+              seats: {
+                reviewer: {
+                  id: "reviewer",
+                  status: "attention",
+                  nodeId: "failed",
+                  pane: null
+                }
+              }
+            }
+          },
+          holds: { failed: { target: "failed", scope: "instance", setAt: START } }
+        }),
+        [],
+        { now: NOW }
+      )
+      expect(model.needsYou).toEqual([])
+      expect(mapBoardInput(model, "failed", { type: "key", key: "h" })).toEqual({ type: "none" })
+      expect(mapBoardInput(model, "failed", { type: "key", key: "s" })).toEqual({ type: "none" })
+    }
+  })
+
   test("derives elapsed time per attempt from journal events", () => {
     const work = node("work", "running", {
       attempts: [
@@ -852,6 +884,7 @@ describe("board input mapping", () => {
         "",
         "NEEDS YOU",
         "  ! held: completed; downstream held",
+        "    Release the hold to allow dependents to proceed; the terminal outcome is unchanged.",
         "    orchestrate release run-1 held",
         "",
         "WORKFLOW",

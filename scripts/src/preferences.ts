@@ -48,7 +48,7 @@ export const DEFAULT_UI_PREFERENCES: UiPreferences = {
   }
 }
 
-function emptyUiLayer(): UiPreferenceLayer {
+export function emptyUiPreferenceLayer(): UiPreferenceLayer {
   return {
     board: null,
     placement: null,
@@ -62,7 +62,7 @@ function emptyUiLayer(): UiPreferenceLayer {
 function emptyScope(updatedAt: string): PreferenceScope {
   return {
     updatedAt,
-    ui: emptyUiLayer()
+    ui: emptyUiPreferenceLayer()
   }
 }
 
@@ -417,6 +417,34 @@ export async function replaceUiPreferenceLayer(
     const baseScope =
       cwd === null ? current.global : (current.projects[cwd] ?? { cwd, ...emptyScope(now) })
     const scope = { ...baseScope, updatedAt: now, ui: layer }
+    const next: PreferencesFile =
+      cwd === null
+        ? { ...current, updatedAt: now, global: scope }
+        : {
+            ...current,
+            updatedAt: now,
+            projects: { ...current.projects, [cwd]: { ...scope, cwd } }
+          }
+    await writePreferences(next)
+    return next
+  })
+}
+
+export async function patchUiPreferenceLayer(
+  patch: Partial<UiPreferenceLayer>,
+  projectCwd: string | null
+): Promise<PreferencesFile> {
+  if (preferencesDisabled()) {
+    throw new Error("Preferences are disabled by ORCHESTRATE_DISABLE_PREFS=1.")
+  }
+  return withPreferencesLock(async () => {
+    const now = new Date().toISOString()
+    const current = await readPreferences(new Date(now))
+    const cwd = projectCwd === null ? null : path.resolve(projectCwd)
+    const baseScope =
+      cwd === null ? current.global : (current.projects[cwd] ?? { cwd, ...emptyScope(now) })
+    const ui = { ...structuredClone(baseScope.ui), ...structuredClone(patch) }
+    const scope = { ...baseScope, updatedAt: now, ui }
     const next: PreferencesFile =
       cwd === null
         ? { ...current, updatedAt: now, global: scope }

@@ -4,7 +4,20 @@ This file describes implementation mechanics. The normative product contract is
 [`guarantees.md`](guarantees.md), and it does not inherit stronger crash or delivery guarantees from
 the mechanisms described here.
 
+## In this reference
+
+- [State and crank](#state-and-crank)
+- [Scheduling](#scheduling)
+- [Repeats and limits](#repeats-and-limits)
+- [Conditional nodes and skipped outcomes](#conditional-nodes-and-skipped-outcomes)
+- [Gates and revisions](#gates-and-revisions)
+- [Herdr presentation](#herdr-presentation)
+- [Installation and upgrades](#installation-and-upgrades), [build identity](#build-identity),
+  [cleanup](#cleanup), and [preference storage](#preference-storage)
+
 ## State and crank
+
+### Durable state
 
 A run lives under `$ORCHESTRATE_STATE_DIR/runs/<id>` or the platform state directory. It contains
 the approved workflow, `state.json`, an atomically replaced versionless `events.json` event array,
@@ -14,6 +27,8 @@ submission tree outside authoritative state. A kernel-held advisory lock seriali
 Every event contains an RFC
 6902 patch; `state.json` is the journal's current materialization, and replay is authoritative
 recovery for a missing or torn snapshot.
+
+### Spawn intents and prompt delivery
 
 Before a pane starts, Orchestrate persists an intent and attempt token. The surface records one
 small receipt after Herdr creates a pane and marks it `ready` only after command start or agent
@@ -37,8 +52,8 @@ delivery, may still be retried in place. Every other live incomplete or ambiguou
 agent-assisted inspection. Reconcile does not infer prompt acceptance from provider lifecycle
 status or close label-matched tabs. One node's ambiguous or pending spawn is surfaced after
 independent planned intents of the same reconciliation have started; it never starves ready work
-outside that node's declared workroom. A seated observation failure blocks later seat launches in
-the same room for that reconciliation because the room's physical occupancy is unresolved.
+outside that node's declared workroom. A seatful observation failure blocks later seat launches in
+the same workroom for that reconciliation because the workroom's physical occupancy is unresolved.
 
 New agent panes may briefly exist before their interactive shell is ready; the surface retries only
 Herdr's explicit `agent_pane_busy` readiness response within a fixed bound. Other unambiguous start
@@ -46,7 +61,9 @@ errors enter the workflow retry policy. A crash between a Herdr action and its l
 produce a duplicate after explicit reconciliation; this is part of the documented at-least-once
 external-action boundary.
 
-`run` captures the launching session, persists the run, presents its initial events, starts initial
+### Master wake-up and live observation
+
+`run` captures the launching master, persists the run, presents its initial events, starts initial
 ready work, and returns. It does not create a detached controller, credential, lease, presentation
 cursor, filesystem watcher, or delivery outbox. The launching master is the scheduler after that
 point. When Herdr reports a workflow agent as blocked or done, the installed Orchestrate plugin event
@@ -60,8 +77,10 @@ wake-up is a latency hint; the master or human can safely run `orchestrate recon
 The bridge also consumes `pane.closed` and `pane.exited`: a pane vanishing under a durably running
 node without a valid submission prompts the master with the `ui restore` command, while teardown
 after a valid submission stays silent. A plugin startup hook raises one attention notification
-after a herdr server restart or handoff when any run needs inspection. Board refresh and restore
+after a Herdr server restart or handoff when any run needs inspection. Board refresh and restore
 observe all panes and agent statuses through one snapshot call rather than per-node probes.
+
+### Locking and completion transport
 
 Every authoritative mutation, including reconcile and destructive cleanup, is serialized by a
 kernel-held per-run lock. Concurrent invocations wait and then observe the latest committed state.
@@ -83,6 +102,8 @@ While no master is active, already-running panes may finish and leave submission
 tree. The run is dormant until a later explicit reconcile consumes them. `status --wait` and
 `events --follow` observe filesystem changes but do not schedule work.
 
+### Provider sandbox boundary
+
 Agent launch creates one implicit channel rooted at the exact token-addressed attempt submission
 directory. Codex expresses that allowance as a launcher-owned permission profile. Claude expresses
 it as a launcher-owned settings file inside the attempt transport directory — provider
@@ -102,18 +123,24 @@ symlink component is rejected before any Herdr workspace, tab, or pane creation.
 worktree targets are reused only when their canonical top level, common repository, and exact
 expanded branch all match the runtime declaration.
 
-When launch occurs inside a herdr agent pane, the run records the pane plus the provider session
-ID. Herdr provides lifecycle event dispatch and the prompt transport for the trusted plugin wake.
+### Origin handoff
+
+When launch occurs inside a Herdr agent pane, the run records the origin pane plus the launching
+master's provider session ID. Herdr provides lifecycle event dispatch and the prompt transport for
+the trusted plugin wake.
 The provider node receives neither Herdr control authority nor authoritative state access. A
-foreground reconcile may also prompt that exact launching session
+foreground reconcile may also prompt that exact launching master session
 when the workflow completes or reaches actionable non-human attention: exhausted failure, gate,
-downstream hold set at completion, revision, fuse, or round limit. Human pause and stop are intentionally silent
-because their initiator already knows. The handoff contains only bounded orchestrator-generated
-status and commands; node failure text remains in durable results. This direct prompt and its
-notification fallback are best effort. There is no delivery outbox or exactly-once guarantee, so a
+downstream hold set at completion, revision, fuse, or round limit. Human pause and stop are
+intentionally silent because their initiator already knows. The handoff contains only bounded
+orchestrator-generated status and commands; node failure text remains in durable results. This
+direct prompt and its notification fallback are best effort. There is no delivery outbox or
+exactly-once guarantee, so a
 crash may lose or duplicate presentation without changing authoritative run state.
 
 ## Scheduling
+
+### Readiness and dependency release
 
 A node becomes ready when every dependency has status `completed` or `skipped` and no matching
 instance or template hold blocks dependency release, its condition selects it, its gate is
@@ -129,6 +156,9 @@ dependencies.
 A template hold applies to each matching repeat instance; an instance hold applies only to that
 runtime instance. Historical-round instance holds do not block a settled repeat's final-round
 dependency release. Gates, restore, revision reconciliation, and replay consume the same two axes.
+
+### Pause, restore, and live status
+
 Herdr agent status `done` is only a live observation: while durable status is `running`, it means
 the authenticated result is missing and requires action; it never implies durable completion.
 Interactive board refresh, `board --json`, and `runs --needs-attention` use the same classifier and
@@ -141,6 +171,8 @@ event so handoff replay does not infer intent from later state. `resume` continu
 recorded panes: live panes are adopted, explicitly missing in-flight attempts fail, and retry policy
 is cranked. Herdr transport/service failures abort restore without treating a live pane as missing.
 
+### Retries and provider sessions
+
 Retries reuse their placement slot after the old pane is closed. Command exit codes outside
 `allowedExitCodes` fail an ordinary node. In a repeat condition, an allowed exit settles the repeat;
 another numeric exit begins the next round. Provider failures use the same bounded retry path.
@@ -150,10 +182,13 @@ leaves the parent head unchanged. A retry therefore forks the same committed par
 provider conversation lineage; it does not roll back source-workspace mutations performed by a
 failed attempt.
 
+### Workroom seat reuse
+
 For a seatful node, the reusable placement slot is its declared workroom seat. Later repeat
-instances inherit the same seat. An active room parks a successful seat pane rather than applying
-`close-success` to that individual turn. A failed attempt remains actionable in the same seat, and
-its retry returns there; neither failure nor retry advances room settlement. Workroom presentation
+instances inherit the same seat. An active workroom parks a successful seat pane rather than applying
+`close-success` to that individual turn. An ordinary failed attempt leaves a live pane parked, or an
+absent pane empty, and its automatic retry returns to that seat; failure alone does not mark
+occupancy attention. Neither failure nor retry advances workroom settlement. Workroom presentation
 does not alter the provider lineage contract and does not automatically replace an unavailable
 resume with a fresh provider session.
 
@@ -173,8 +208,8 @@ next. The verdict member cannot be conditional, so every settled round has an ac
 `until`.
 
 Repeat instances retain their template's workroom and seat. A workroom settlement anchor is a
-non-repeat node downstream of all room work, including its repeat; reaching `maxRounds` therefore
-pauses without settling that room.
+non-repeat node downstream of every other node assigned to the workroom, including repeat members;
+reaching `maxRounds` therefore pauses without settling that workroom.
 
 The condition is either a command result or a JSON pointer into a schema-validated agent result.
 At `maxRounds`, the run pauses. Resume requires `--continue-rounds <n>` or
@@ -227,65 +262,95 @@ template becomes immutable after its first attempt or skip, so approval cannot r
 provider lineage between rounds. Thus newly inserted barriers affect scheduling as well as board
 edges.
 
-Once any node opens a workroom, revision approval also freezes that room's id, label, layout,
-ordered seats, and `settlesOn` anchors. The revised workflow must preserve every live pane's unique
-room and seat assignment. A revision that would move an occupant, assign two live occupants to one
-seat, or leave a live seat outside the room is rejected rather than repaired by placement guesses.
+Once an assigned attempt reserves a workroom, revision approval freezes its workroom ID and label,
+layout, seat IDs, seat labels, seat order, and `settlesOn` anchors. The revised workflow must preserve
+every live pane's unique workroom and seat assignment. A revision that would move an occupant,
+assign two live occupants to one seat, or leave a live seat outside the workroom is rejected rather
+than repaired by placement guesses.
 
 ## Herdr presentation
 
-Every node is a real herdr pane. Optional approved workrooms provide stable tabs with ordered
-`columns` or `rows` seats. A node assigned a seat bypasses matcher-selected tab/split grouping and
-uses that declared room and seat; only one live attempt may occupy it. A node that names a workroom
-without a seat remains supporting, transient work. Command nodes are always seatless in V1 and
-continue to execute in transient Herdr panes rather than a background process.
+### Placement and workroom tabs
 
-Workrooms inherit the effective `placement.workspace`: the dedicated run workspace or the launching
-origin workspace. Origin placement verifies that the recorded origin pane still belongs to its
-workspace and falls back to the dedicated run workspace when it does not. Ordinary seatless nodes
+Every started node executes in a real Herdr pane; a scheduler-skipped node creates no pane. Optional
+approved workrooms provide stable workroom tabs with ordered `columns` or `rows` seats. A seatful
+node bypasses matcher-selected tab/split grouping and uses its declared workroom and seat; only one
+live attempt may occupy it. A seatless node that names a workroom remains supporting, transient
+work. Command nodes are always seatless in V1 and continue to execute in transient Herdr panes
+rather than a background process.
+
+Workrooms inherit the effective UI `placement.workspace` preference: the dedicated run workspace or
+the launching origin workspace. Origin placement verifies that the recorded origin pane belongs to
+its workspace and falls back to the dedicated run workspace when it does not. Ordinary seatless nodes
 continue to use the ordered placement rules that choose tabs or splits, group related nodes, cap
 splits per tab, and define retry reuse.
 
-While a room is active, successful seat panes park and ignore the ordinary agent `close-success`
-policy so later turns can reuse the stable seats. The room settles after every `settlesOn` anchor is
-durably `completed` or scheduler-owned `skipped`; failed, paused, gated, or exhausted-repeat anchors
-that have not reached either status leave it active. A downstream hold remains a separate fact and
+### Workroom settlement
+
+While a workroom is active, successful seat panes park and ignore the ordinary agent `close-success`
+policy so later turns can reuse the stable seats. The workroom settles after every `settlesOn`
+anchor is durably `completed` or scheduler-owned `skipped`; failed, paused, gated, or exhausted-repeat
+anchors that have not reached either status leave it active. A downstream hold remains a separate fact and
 does not rewrite a completed anchor. At settlement, the effective agent completion preference
-applies once to the parked room: `keep-open` leaves an archived room and `close-success` closes its
-seat panes.
+applies to the parked workroom: `keep-open` leaves its panes open and relabels them settled;
+`close-success` closes its seat panes.
 Seatless nodes retain their normal per-node completion behavior.
 
-A recorded workroom pane and its remaining live occupants are verified immediately before reuse or
-restoration. An explicitly missing seat pane is recreated in the declared room only when that
+### Occupancy recovery
+
+A recorded workroom tab and its remaining live occupants are verified immediately before reuse or
+restoration. An explicitly missing seat pane is recreated in the declared workroom only when that
 observation identifies the vacant seat unambiguously. Contradictory occupants, duplicate candidates,
 or ambiguous Herdr state produce human attention; Orchestrate does not spill a seatful node into a
 fresh matcher-selected tab. A transient occupancy-verification transport failure defers the seat
 without durable attention, while a genuine contradiction durably marks it for attention. Both
-cases block sibling seat launches in the room until reconciliation can observe the occupancy;
-unrelated rooms and unseated work may continue. The planned intent stays intact and consumes no
+cases block sibling seat launches in the workroom until reconciliation can observe the occupancy;
+unrelated workrooms and seatless work may continue. The planned intent stays intact and consumes no
 retry. Automatic fresh-provider fallback and alias rebinding are outside V1.
 
 The declared layout and seat order determine split intent and preview order. Herdr owns the actual
 tab and split geometry, so recovery guarantees logical seat identity and co-location inside the
-declared room, not pixel-perfect reconstruction of an earlier arrangement.
+declared workroom tab, not pixel-perfect reconstruction of an earlier arrangement.
+
+### Board and notifications
 
 Board policy separately chooses a right split, the current workspace, or a dedicated workspace.
 Focus policy may focus only attention events or every start.
 
 The interactive board refreshes on a bounded clock as well as journal writes, so elapsed time and
-herdr garnish remain live. Herdr `idle` and `unknown` startup samples are transient. For a durably
+Herdr garnish remain live. Herdr `idle` and `unknown` startup samples are transient. For a durably
 running agent, `done` proves the provider finished without submitting `node-done`; the board shows
 that node once in NEEDS YOU with its authenticated recovery command. `blocked` and an explicitly
 missing pane also produce pane-related human attention.
 
-Notifications are classified as attention, milestone, or progress and routed to herdr, the board,
+Notifications are classified as attention, milestone, or progress and routed to Herdr, the board,
 or silence. Workflow callbacks can be a command, webhook, platform notification, or none. Callback
 failure is reported but never rolls back state. These presentation routes are independent from the
 launching-agent handoff.
 
-Use a local herdr session unless a named remote can access identical checkout, state, provider,
+Use a local Herdr session unless a named remote can access identical checkout, state, provider,
 and CLI paths. `ORCHESTRATE_DISABLE_UI=1` disables board auto-open and presentation notifications,
 not pane execution.
+
+## Installation and upgrades
+
+`setup` stages one matching CLI, skill, and Herdr plugin under
+`~/.local/share/orchestrate/current`, links the CLI into `~/.local/bin`, and optionally runs the UI
+preference wizard. Plugin registration is required. A link failure removes the new stage and leaves
+the prior installation selected; an unlink failure makes removal fail rather than reporting success.
+If Herdr cannot confirm link or rollback, the versioned stage remains as a recoverable plugin target
+while stable CLI and skill links remain unchanged. `doctor` reports missing or unqueryable
+registration as unhealthy.
+
+`brew upgrade orchestrate` installs a new formula build. The next eligible interactive command may
+migrate the staged installation automatically, but migration waits while any run is unsettled and
+never starts from node completion, plugin event handling, shell completion, `doctor`, or other
+non-interactive invocation. Plain `orchestrate setup` is always the explicit migration path. The
+newest installation wins: an older binary never replaces a newer staged build, and a staged wrapper
+delegates setup to a newer formula executable found later on `PATH` rather than restaging itself.
+
+Before uninstalling the Homebrew formula, run `orchestrate setup --remove` so the skill and plugin
+are unlinked through the matching staged build.
 
 ## Build identity
 
@@ -298,12 +363,10 @@ subprocess cannot make one build read state created by another build.
 `clean --dry-run` lists panes, opted-in worktrees, and the run directory. Without dry-run it takes
 the run lock, refuses an unsettled run, closes recorded panes, removes each Git worktree whose
 declaration has `removeOnClean: true` only after revalidating its repository and exact expanded
-branch, then removes run files. `setup --remove` first requires successful Herdr plugin unlink, then removes staged
-product assets and owned links while retaining run state and preferences. Setup links the staged
-plugin before flipping stable CLI/skill links; a link failure removes the new stage and leaves the
-prior installation selected after confirmed rollback. If Herdr cannot confirm rollback, the
-versioned stage remains so any partially registered plugin target is recoverable, while stable links
-remain unchanged. `doctor` treats a missing/unqueryable plugin registration as unhealthy.
+branch, then removes run files. `setup --remove` behavior is described under
+[Installation and upgrades](#installation-and-upgrades).
+
+## Preference storage
 
 Preferences contain UI state only. Stored files are validated exactly against
 `preferences.schema.json`; missing required fields, unknown design fields, and other schema-invalid

@@ -181,19 +181,6 @@ export interface RepeatSpec {
   readonly maxRounds: number
 }
 
-export interface SeatSpec {
-  readonly id: string
-  readonly label: string
-}
-
-export interface WorkroomSpec {
-  readonly id: string
-  readonly label: string
-  readonly layout: "columns" | "rows"
-  readonly seats: readonly SeatSpec[]
-  readonly settlesOn: readonly string[]
-}
-
 // A dependency from outside a repeat to one of its members is a dependency on
 // the whole repeat. It releases only when the repeat settles, and an input from
 // that member resolves to its final-round instance.
@@ -244,21 +231,6 @@ export interface PaneReference {
   readonly paneId: string
   readonly group: string
   readonly surface: "tab" | "split"
-}
-
-export interface SeatRunState {
-  readonly id: string
-  readonly status: "empty" | "running" | "parked" | "attention"
-  readonly nodeId: string | null
-  readonly pane: PaneReference | null
-}
-
-export interface WorkroomRunState {
-  readonly id: string
-  readonly status: "pending" | "active" | "settled" | "aborted"
-  readonly workspaceId: string | null
-  readonly tabId: string | null
-  readonly seats: Readonly<Record<string, SeatRunState>>
 }
 
 export interface AttemptState {
@@ -441,6 +413,7 @@ export interface PreferencesFile {
 export type CrankEvent =
   | { readonly type: "run" }
   | { readonly type: "reconcile" }
+  | { readonly type: "ui-degraded"; readonly reason: string }
   | {
       readonly type: "node-done"
       readonly nodeId: string

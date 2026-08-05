@@ -11,6 +11,7 @@ import type {
 } from "../src/types.js"
 
 import { reconcileApprovedRevisionState } from "../src/crank.js"
+import { runNeedsAttention } from "../src/state.js"
 import {
   createInitialRunState,
   resolveConditionSourceId,
@@ -271,6 +272,276 @@ describe("pure crank transition", () => {
     })
     expect(settled.state.status).toBe("completed")
     expect(settled.state.workrooms["review-room"]?.status).toBe("settled")
+  })
+
+  test("settles a workroom when its settlement anchor is conditionally skipped", () => {
+    const work = agent("work", { workroom: "review-room", seat: "reviewer" })
+    const verdict = agent("verdict", { needs: ["work"] })
+    const finish = command("finish", {
+      needs: ["verdict"],
+      workroom: "review-room",
+      when: {
+        type: "agent-output",
+        node: "verdict",
+        pointer: "/finish",
+        equals: true
+      }
+    })
+    const spec = workflow([work, verdict, finish], {
+      presentation: {
+        workrooms: [
+          {
+            id: "review-room",
+            label: "Review room",
+            layout: "columns",
+            seats: [{ id: "reviewer", label: "Reviewer" }],
+            settlesOn: ["finish"]
+          }
+        ]
+      }
+    })
+    const observedWork = observe(start(spec, context("work")).state, spec, "work")
+    const afterWork = crank(
+      observedWork.state,
+      spec,
+      {
+        type: "node-done",
+        nodeId: "work",
+        token: token(observedWork.state, "work"),
+        outcome: "completed",
+        hold: false,
+        result: "done",
+        error: null,
+        providerSessionId: null
+      },
+      context("verdict")
+    )
+    const observedVerdict = observe(afterWork.state, spec, "verdict")
+    const settled = crank(observedVerdict.state, spec, {
+      type: "node-done",
+      nodeId: "verdict",
+      token: token(observedVerdict.state, "verdict"),
+      outcome: "completed",
+      hold: false,
+      result: { finish: false },
+      error: null,
+      providerSessionId: null
+    })
+
+    expect(settled.state.nodes.finish?.status).toBe("skipped")
+    expect(settled.state.workrooms["review-room"]?.status).toBe("settled")
+  })
+
+  test("leaves settled seat panes to the completion policy when unrelated work fails", () => {
+    const work = agent("work", { workroom: "review-room", seat: "reviewer" })
+    const settle = command("settle", { needs: ["work"], workroom: "review-room" })
+    const failing = command("failing", { needs: ["settle"] })
+    const spec = workflow([work, settle, failing], {
+      presentation: {
+        workrooms: [
+          {
+            id: "review-room",
+            label: "Review room",
+            layout: "columns",
+            seats: [{ id: "reviewer", label: "Reviewer" }],
+            settlesOn: ["settle"]
+          }
+        ]
+      }
+    })
+    const observedWork = observe(start(spec, context("work")).state, spec, "work")
+    const afterWork = crank(
+      observedWork.state,
+      spec,
+      {
+        type: "node-done",
+        nodeId: "work",
+        token: token(observedWork.state, "work"),
+        outcome: "completed",
+        hold: false,
+        result: "done",
+        error: null,
+        providerSessionId: null
+      },
+      context("settle")
+    )
+    const observedSettle = observe(afterWork.state, spec, "settle")
+    const afterSettle = crank(
+      observedSettle.state,
+      spec,
+      {
+        type: "node-exit",
+        nodeId: "settle",
+        token: token(observedSettle.state, "settle"),
+        code: 0,
+        error: null
+      },
+      context("failing")
+    )
+    expect(afterSettle.state.workrooms["review-room"]?.status).toBe("settled")
+
+    const observedFailing = observe(afterSettle.state, spec, "failing")
+    const failed = crank(observedFailing.state, spec, {
+      type: "node-exit",
+      nodeId: "failing",
+      token: token(observedFailing.state, "failing"),
+      code: 1,
+      error: null
+    })
+    const closed = failed.actions.flatMap((action) =>
+      action.type === "close-pane" ? [action.paneId] : []
+    )
+
+    expect(failed.state.status).toBe("failed")
+    expect(failed.state.workrooms["review-room"]?.status).toBe("settled")
+    expect(closed).toContain("pane:failing:1")
+    expect(closed).not.toContain("pane:work:1")
+  })
+
+  test("reserves seat attention for occupancy ambiguity and records its declared identity", () => {
+    const work = agent("work", {
+      workroom: "review-room",
+      seat: "reviewer",
+      retry: { maxAttempts: 2 }
+    })
+    const spec = workflow([work, command("finish", { needs: ["work"], workroom: "review-room" })], {
+      presentation: {
+        workrooms: [
+          {
+            id: "review-room",
+            label: "Review room",
+            layout: "columns",
+            seats: [{ id: "reviewer", label: "Reviewer" }],
+            settlesOn: ["finish"]
+          }
+        ]
+      }
+    })
+    const started = start(spec, context("work"))
+    const attention = crank(started.state, spec, {
+      type: "spawn-attention",
+      nodeId: "work",
+      intentId: "work:a1"
+    })
+
+    expect(attention.state.workrooms["review-room"]?.seats.reviewer?.status).toBe("attention")
+    expect(attention.events).toContainEqual(
+      expect.objectContaining({
+        type: "workroom.attention",
+        nodeId: "work",
+        data: {
+          intentId: "work:a1",
+          workroomId: "review-room",
+          seatId: "reviewer"
+        }
+      })
+    )
+    expect(runNeedsAttention(attention.state)).toBe(true)
+  })
+
+  test("parks or empties participant seats after ordinary failures without occupancy attention", () => {
+    const work = agent("work", {
+      workroom: "review-room",
+      seat: "reviewer",
+      retry: { maxAttempts: 2 }
+    })
+    const spec = workflow([work, command("finish", { needs: ["work"], workroom: "review-room" })], {
+      presentation: {
+        workrooms: [
+          {
+            id: "review-room",
+            label: "Review room",
+            layout: "columns",
+            seats: [{ id: "reviewer", label: "Reviewer" }],
+            settlesOn: ["finish"]
+          }
+        ]
+      }
+    })
+
+    const initiallyFailed = crank(
+      start(spec, context("work")).state,
+      spec,
+      { type: "spawn-failed", nodeId: "work", intentId: "work:a1", error: "unavailable" },
+      context("work")
+    )
+    expect(initiallyFailed.state.workrooms["review-room"]?.status).toBe("pending")
+    expect(initiallyFailed.state.workrooms["review-room"]?.seats.reviewer).toMatchObject({
+      status: "empty",
+      nodeId: null,
+      pane: null
+    })
+
+    const observed = observe(start(spec, context("work")).state, spec, "work")
+    const retried = crank(
+      observed.state,
+      spec,
+      {
+        type: "node-done",
+        nodeId: "work",
+        token: token(observed.state, "work"),
+        outcome: "failed",
+        hold: false,
+        result: null,
+        error: "bad result",
+        providerSessionId: null
+      },
+      context("work")
+    )
+    expect(retried.state.workrooms["review-room"]?.seats.reviewer).toMatchObject({
+      status: "parked",
+      nodeId: "work",
+      pane: { paneId: "pane:work:1" }
+    })
+    expect(retried.events.map((event) => event.type)).not.toContain("workroom.attention")
+    expect(runNeedsAttention(retried.state)).toBe(false)
+  })
+
+  test("stopped runs retire workroom attention while failed runs remain actionable", () => {
+    const work = agent("work", { workroom: "review-room", seat: "reviewer" })
+    const spec = workflow([work, command("finish", { needs: ["work"], workroom: "review-room" })], {
+      presentation: {
+        workrooms: [
+          {
+            id: "review-room",
+            label: "Review room",
+            layout: "columns",
+            seats: [{ id: "reviewer", label: "Reviewer" }],
+            settlesOn: ["finish"]
+          }
+        ]
+      }
+    })
+    const started = start(spec, context("work"))
+    const attention = crank(started.state, spec, {
+      type: "spawn-attention",
+      nodeId: "work",
+      intentId: "work:a1"
+    })
+    const stopped = crank(attention.state, spec, { type: "stop" })
+    expect(stopped.state.status).toBe("stopped")
+    expect(stopped.state.workrooms["review-room"]?.status).toBe("aborted")
+    expect(stopped.state.workrooms["review-room"]?.seats.reviewer).toMatchObject({
+      status: "empty",
+      nodeId: null
+    })
+    expect(runNeedsAttention(stopped.state)).toBe(false)
+    expect(runNeedsAttention({ ...attention.state, status: "completed" })).toBe(false)
+
+    const running = observe(start(spec, context("work")).state, spec, "work")
+    const failed = crank(running.state, spec, {
+      type: "node-done",
+      nodeId: "work",
+      token: token(running.state, "work"),
+      outcome: "failed",
+      hold: false,
+      result: null,
+      error: "terminal failure",
+      providerSessionId: null
+    })
+    expect(failed.state.status).toBe("failed")
+    expect(failed.state.workrooms["review-room"]?.seats.reviewer?.status).toBe("parked")
+    expect(runNeedsAttention(failed.state)).toBe(true)
   })
 
   test("keeps an opened room immutable while allowing an ordered future seat turn", () => {
@@ -657,6 +928,25 @@ describe("pure crank transition", () => {
     })
     expect(result.events.map((event) => event.type)).toContain("ui.degraded")
     expect(result.state.nodes.work?.status).toBe("running")
+  })
+
+  test("durably records a trusted UI degradation after the run has started", () => {
+    const spec = workflow([command("work")])
+    const started = start(spec, { ...context("work"), deferScheduling: true })
+    expect(started.state.nodes.work?.status).toBe("pending")
+    const degraded = crank(started.state, spec, {
+      type: "ui-degraded",
+      reason: "Board open failed after the initial commit."
+    })
+
+    expect(degraded.state.status).toBe(started.state.status)
+    expect(degraded.state.nodes).toEqual(started.state.nodes)
+    expect(degraded.events).toHaveLength(1)
+    expect(degraded.events[0]).toMatchObject({
+      type: "ui.degraded",
+      message: "Board open failed after the initial commit.",
+      data: { reason: "Board open failed after the initial commit." }
+    })
   })
 
   test.each([

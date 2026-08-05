@@ -217,7 +217,10 @@ export function renderBoardFrame(
     lines.push("NEEDS YOU")
     for (const item of model.needsYou) {
       lines.push(`  ! ${item.title}`)
-      lines.push(`    ${item.command ?? item.detail}`)
+      lines.push(`    ${item.detail}`)
+      if (item.command !== null) {
+        lines.push(`    ${item.command}`)
+      }
     }
     lines.push("")
   }
@@ -265,7 +268,13 @@ export function renderBoardFrame(
       `${prefix} ${"  ".repeat(row.depth)}${node.glyph} ${node.id}  ${node.status}${dependencyRelease}  ${duration(node.elapsedMs)}${skipped}${stalled}`
     )
   }
-  lines.push("", "↑/↓ select  enter open  p pause/resume  h hold/release  s stop  q quit")
+  const controls =
+    model.run.status === "completed" ||
+    model.run.status === "failed" ||
+    model.run.status === "stopped"
+      ? "↑/↓ select  enter open  q quit"
+      : "↑/↓ select  enter open  p pause/resume  h hold/release  s stop  q quit"
+  lines.push("", controls)
   if (detail !== null) {
     lines.push("", "DETAIL", detail)
   }

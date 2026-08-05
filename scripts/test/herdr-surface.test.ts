@@ -171,12 +171,12 @@ function placement(id: string, destination: "dedicated" | "origin" = "dedicated"
   return {
     workspace: destination,
     surface: "tab" as const,
-    matchedRuleIndex: 0,
     group: id,
     groupLabel: id,
     groupOrdinal: 1,
     anchorPane: null,
-    reusePane: null
+    reusePane: null,
+    splitDirection: "down" as const
   }
 }
 
@@ -308,23 +308,38 @@ function herdrResponse(result: Readonly<Record<string, unknown>>): string {
   return JSON.stringify({ id: `cli:test:${String(result["type"])}`, result })
 }
 
-async function writeShim(
+interface WriteShimOptions {
+  readonly reportSession?: boolean
+  readonly busyOnce?: boolean
+  readonly originLive?: boolean
+  readonly paneFailure?: "none" | "transport" | "split-missing" | "split-transport"
+  readonly missingPane?: string | null
+  readonly reportSessionLate?: boolean
+  readonly promptFailure?: "none" | "stall-once" | "stall-once-hidden" | "always"
+  readonly bootDelayOnce?: boolean
+  readonly listedPanes?: readonly ReturnType<typeof herdrPane>[]
+  readonly boardPaneDisappearsOnce?: boolean
+}
+
+async function writeShim({
   reportSession = true,
   busyOnce = false,
   originLive = true,
-  paneFailure: "none" | "transport" | "split-missing" | "split-transport" = "none",
-  missingPane: string | null = null,
+  paneFailure = "none",
+  missingPane = null,
   reportSessionLate = false,
-  promptFailure: "none" | "stall-once" | "stall-once-hidden" | "always" = "none",
+  promptFailure = "none",
   bootDelayOnce = false,
-  listedPanes: readonly ReturnType<typeof herdrPane>[] = []
-): Promise<void> {
+  listedPanes = [],
+  boardPaneDisappearsOnce = false
+}: WriteShimOptions = {}): Promise<void> {
   const busyMarker = path.join(temporaryRoot, "agent-start-busy-once")
   const claudeMarker = path.join(temporaryRoot, "agent-is-claude")
   const sessionLateMarker = path.join(temporaryRoot, "agent-session-reported-late")
   const stallMarker = path.join(temporaryRoot, "agent-prompt-stalled-once")
   const promptVisibleMarker = path.join(temporaryRoot, "agent-prompt-visible-after-retry")
   const bootMarker = path.join(temporaryRoot, "agent-boot-finished")
+  const boardPaneMarker = path.join(temporaryRoot, "board-pane-disappeared")
   const codexSession = {
     agent: "codex",
     kind: "id",
@@ -385,6 +400,12 @@ case "$1 $2" in
     fi
     printf '%s\n' '${paneSplit}' ;;
   "pane current") printf '%s\n' '${currentPane}' ;;
+  "pane rename")
+    if ${boardPaneDisappearsOnce ? "true" : "false"} && [ "$3" = "p1" ] && [ ! -f ${JSON.stringify(boardPaneMarker)} ]; then
+      touch ${JSON.stringify(boardPaneMarker)}
+      printf '%s\n' '{"error":{"code":"pane_not_found","message":"pane missing"},"id":"cli:pane:rename"}' >&2
+      exit 1
+    fi ;;
   "pane get")
     if [ ${JSON.stringify(paneFailure)} = "transport" ]; then
       printf '%s\n' '{"error":{"code":"server_unavailable","message":"service outage"},"id":"cli:pane:get"}' >&2
@@ -605,7 +626,7 @@ describe("herdr surface", () => {
   })
 
   test("falls back to a dedicated run workspace when no live origin exists", async () => {
-    await writeShim(true, false, false)
+    await writeShim({ originLive: false })
     const node = command()
     const runState: RunState = {
       ...state(node.id),
@@ -739,10 +760,48 @@ describe("herdr surface", () => {
     expect(log).toContain("pane run p1 /tmp/orchestrate board 20260802120000-1234abcd")
   })
 
+  test("falls back to the run workspace when the launching pane vanishes before board split", async () => {
+    const spec = workflow(command())
+    await persistRun(spec)
+    await writeShim({ paneFailure: "split-missing" })
+    const surface = new HerdrSurface()
+    await expect(
+      surface.prepareBoard({ ...DEFAULT_UI_PREFERENCES, board: "split-right" })
+    ).resolves.toBeNull()
+
+    const degraded = await surface.openBoard("20260802120000-1234abcd", {
+      ...DEFAULT_UI_PREFERENCES,
+      board: "split-right"
+    })
+
+    expect(degraded).toContain("launching Herdr pane disappeared")
+    const log = await Bun.file(logPath).text()
+    expect(log).toContain("pane split --pane origin-pane --direction right")
+    expect(log).toContain("workspace create")
+    expect(log).toContain("pane run p1 /tmp/orchestrate board 20260802120000-1234abcd")
+  })
+
+  test("moves a current-workspace board fallback into the run workspace when its new pane vanishes", async () => {
+    const spec = workflow(command())
+    await persistRun(spec)
+    await writeShim({ boardPaneDisappearsOnce: true })
+
+    const degraded = await new HerdrSurface().openBoard("20260802120000-1234abcd", {
+      ...DEFAULT_UI_PREFERENCES,
+      board: "current-workspace"
+    })
+
+    expect(degraded).toContain("new board pane disappeared")
+    const log = await Bun.file(logPath).text()
+    expect(log).toContain("tab create --workspace origin-workspace")
+    expect(log).toContain("workspace create")
+    expect(log).toContain("pane run p1 /tmp/orchestrate board 20260802120000-1234abcd")
+  })
+
   test("distinguishes explicit pane absence from herdr transport failure", async () => {
-    await writeShim(true, false, false)
+    await writeShim({ originLive: false })
     await expect(new HerdrSurface().paneExists("origin-pane")).resolves.toBe(false)
-    await writeShim(true, false, true, "transport")
+    await writeShim({ paneFailure: "transport" })
     await expect(new HerdrSurface().paneExists("p1")).rejects.toThrow("server_unavailable")
   })
 
@@ -793,7 +852,7 @@ describe("herdr surface", () => {
   })
 
   test("does not require a provider session id when no lineage alias is saved", async () => {
-    await writeShim(false)
+    await writeShim({ reportSession: false })
     const node = {
       ...agent(),
       session: { mode: "fresh" as const, from: null, saveAs: null }
@@ -1163,7 +1222,7 @@ describe("herdr surface", () => {
   })
 
   test("retries a newly created pane until its interactive shell is ready", async () => {
-    await writeShim(true, true)
+    await writeShim({ busyOnce: true })
     const node = agent()
     await new HerdrSurface().spawn({
       workflow: workflow(node),
@@ -1314,9 +1373,9 @@ describe("herdr surface", () => {
       group: "orchestrate/run/review-room/1",
       surface: "tab"
     }
-    await writeShim(true, false, true, "none", null, false, "none", false, [
-      herdrPane(existing.paneId, existing.workspaceId, existing.tabId)
-    ])
+    await writeShim({
+      listedPanes: [herdrPane(existing.paneId, existing.workspaceId, existing.tabId)]
+    })
     const spec: WorkflowSpec = {
       ...workflow(node),
       presentation: {
@@ -1377,6 +1436,126 @@ describe("herdr surface", () => {
     expect(log).not.toContain("tab create")
   })
 
+  test("rejects one pane recorded for two declared workroom seats before mutating Herdr", async () => {
+    const node = {
+      ...agent(),
+      workroom: "review-room",
+      seat: "reviewer"
+    } satisfies AgentNode
+    const shared: PaneReference = {
+      workspaceId: "w1",
+      tabId: "review-tab",
+      paneId: "shared-pane",
+      group: "orchestrate/run/workroom/review-room/1",
+      surface: "tab"
+    }
+
+    const failure = await new HerdrSurface()
+      .spawn({
+        workflow: workflow(node),
+        state: state(node.id),
+        intent: intent(node.id),
+        prompt: "Review again.",
+        placement: {
+          ...placement(node.id),
+          surface: "split",
+          anchorPane: shared,
+          reusePane: shared,
+          splitDirection: "right",
+          workroom: {
+            id: "review-room",
+            seatId: "reviewer",
+            workspaceId: shared.workspaceId,
+            tabId: shared.tabId,
+            seats: [
+              { id: "reviewer", pane: shared },
+              { id: "implementer", pane: shared }
+            ]
+          }
+        }
+      })
+      .catch((error: unknown) => error)
+
+    expect(failure).toBeInstanceOf(HerdrObservationError)
+    expect((failure as HerdrObservationError).requiresAttention).toBe(true)
+    expect((failure as Error).message).toContain(
+      'records pane "shared-pane" for both seats "reviewer" and "implementer"'
+    )
+    const log = await Bun.file(logPath)
+      .text()
+      .catch(() => "")
+    expect(log).not.toContain("pane list")
+    expect(log).not.toContain("workspace create")
+    expect(log).not.toContain("tab create")
+    expect(log).not.toContain("pane split")
+    expect(log).not.toContain("pane close")
+    expect(log).not.toContain("agent start")
+  })
+
+  test("rejects live declared workroom seats observed in two tabs before spawning", async () => {
+    const node = {
+      ...agent(),
+      workroom: "review-room",
+      seat: "reviewer"
+    } satisfies AgentNode
+    const reviewer: PaneReference = {
+      workspaceId: "w1",
+      tabId: "review-tab",
+      paneId: "reviewer-pane",
+      group: "orchestrate/run/workroom/review-room/1",
+      surface: "tab"
+    }
+    const implementer: PaneReference = {
+      ...reviewer,
+      tabId: "implementation-tab",
+      paneId: "implementer-pane",
+      surface: "split"
+    }
+    await writeShim({
+      listedPanes: [
+        herdrPane(reviewer.paneId, reviewer.workspaceId, reviewer.tabId),
+        herdrPane(implementer.paneId, implementer.workspaceId, implementer.tabId)
+      ]
+    })
+
+    const failure = await new HerdrSurface()
+      .spawn({
+        workflow: workflow(node),
+        state: state(node.id),
+        intent: intent(node.id),
+        prompt: "Review again.",
+        placement: {
+          ...placement(node.id),
+          surface: "split",
+          anchorPane: implementer,
+          reusePane: reviewer,
+          splitDirection: "right",
+          workroom: {
+            id: "review-room",
+            seatId: "reviewer",
+            workspaceId: null,
+            tabId: null,
+            seats: [
+              { id: "reviewer", pane: reviewer },
+              { id: "implementer", pane: implementer }
+            ]
+          }
+        }
+      })
+      .catch((error: unknown) => error)
+
+    expect(failure).toBeInstanceOf(HerdrObservationError)
+    expect((failure as HerdrObservationError).requiresAttention).toBe(true)
+    expect((failure as Error).message).toContain("has live seats in more than one Herdr tab")
+    const log = await Bun.file(logPath).text()
+    expect(log).toContain("pane list")
+    expect(log).not.toContain("workspace create")
+    expect(log).not.toContain("tab create")
+    expect(log).not.toContain("pane split")
+    expect(log).not.toContain("pane close")
+    expect(log).not.toContain("agent start")
+  })
+
   test("leaves a workroom spawn planned when missing-seat occupancy is ambiguous", async () => {
     const node = command()
     const missing: PaneReference = {
@@ -1386,9 +1565,7 @@ describe("herdr surface", () => {
       group: "orchestrate/run/review-room/1",
       surface: "tab"
     }
-    await writeShim(true, false, true, "none", null, false, "none", false, [
-      herdrPane("unowned-pane", "w1", "review-tab")
-    ])
+    await writeShim({ listedPanes: [herdrPane("unowned-pane", "w1", "review-tab")] })
     await expect(
       new HerdrSurface().spawn({
         workflow: workflow(node),
@@ -1416,6 +1593,62 @@ describe("herdr surface", () => {
     expect(log).not.toContain("pane split")
   })
 
+  test("rejects an unowned occupant even when another declared seat remains live", async () => {
+    const node = command()
+    const missing: PaneReference = {
+      workspaceId: "w1",
+      tabId: "review-tab",
+      paneId: "missing-reviewer",
+      group: "orchestrate/run/workroom/review-room/1",
+      surface: "split"
+    }
+    const anchor: PaneReference = {
+      ...missing,
+      paneId: "implementer-pane",
+      surface: "tab"
+    }
+    await writeShim({
+      listedPanes: [
+        herdrPane(anchor.paneId, anchor.workspaceId, anchor.tabId),
+        herdrPane("unowned-pane", anchor.workspaceId, anchor.tabId)
+      ]
+    })
+
+    const failure = await new HerdrSurface()
+      .spawn({
+        workflow: workflow(node),
+        state: state(node.id),
+        intent: intent(node.id),
+        prompt: null,
+        placement: {
+          ...placement(node.id),
+          surface: "split",
+          anchorPane: anchor,
+          reusePane: missing,
+          workroom: {
+            id: "review-room",
+            seatId: "reviewer",
+            workspaceId: "w1",
+            tabId: "review-tab",
+            seats: [
+              { id: "implementer", pane: anchor },
+              { id: "reviewer", pane: missing }
+            ]
+          }
+        }
+      })
+      .catch((error: unknown) => error)
+
+    expect(failure).toBeInstanceOf(HerdrObservationError)
+    expect((failure as HerdrObservationError).requiresAttention).toBe(true)
+    expect((failure as Error).message).toContain("unowned live occupants")
+    const log = await Bun.file(logPath).text()
+    expect(log).toContain("pane list")
+    expect(log).not.toContain("pane split")
+    expect(log).not.toContain("pane close")
+    expect(log).not.toContain("agent start")
+  })
+
   test("does not spill a workroom seat when its verified anchor disappears", async () => {
     const node = command()
     const missing: PaneReference = {
@@ -1426,9 +1659,10 @@ describe("herdr surface", () => {
       surface: "split"
     }
     const anchor: PaneReference = { ...missing, paneId: "implementer-pane" }
-    await writeShim(true, false, true, "split-missing", null, false, "none", false, [
-      herdrPane(anchor.paneId, anchor.workspaceId, anchor.tabId)
-    ])
+    await writeShim({
+      paneFailure: "split-missing",
+      listedPanes: [herdrPane(anchor.paneId, anchor.workspaceId, anchor.tabId)]
+    })
     await expect(
       new HerdrSurface().spawn({
         workflow: workflow(node),
@@ -1461,7 +1695,7 @@ describe("herdr surface", () => {
   test.each(["dedicated", "origin"] as const)(
     "falls back from an explicitly missing split anchor to a fresh %s-workspace tab",
     async (destination) => {
-      await writeShim(true, false, true, "none", "stale-anchor")
+      await writeShim({ missingPane: "stale-anchor" })
       const node = command()
       const runState: RunState = {
         ...state(node.id),
@@ -1511,7 +1745,7 @@ describe("herdr surface", () => {
   )
 
   test("propagates split-anchor transport errors without creating a fallback pane", async () => {
-    await writeShim(true, false, true, "transport")
+    await writeShim({ paneFailure: "transport" })
     const node = command()
     await expect(
       new HerdrSurface().spawn({
@@ -1538,7 +1772,7 @@ describe("herdr surface", () => {
   })
 
   test("falls back exactly once when a verified split anchor closes before the split", async () => {
-    await writeShim(true, false, true, "split-missing")
+    await writeShim({ paneFailure: "split-missing" })
     const node = command()
     const runState = state(node.id)
     const observation = await new HerdrSurface().spawn({
@@ -1571,7 +1805,7 @@ describe("herdr surface", () => {
   })
 
   test("preserves split intent when the split itself has a transport error", async () => {
-    await writeShim(true, false, true, "split-transport")
+    await writeShim({ paneFailure: "split-transport" })
     const node = command()
     await expect(
       new HerdrSurface().spawn({
@@ -1667,7 +1901,7 @@ describe("herdr surface", () => {
     await new HerdrSurface().spawn(request)
     const receipt = path.join(temporaryRoot, "spawn.json")
     const before = await Bun.file(receipt).text()
-    await writeShim(true, false, true, "transport")
+    await writeShim({ paneFailure: "transport" })
 
     const failure = await new HerdrSurface()
       .recoverOrSpawn(request)
@@ -1926,7 +2160,7 @@ describe("herdr surface", () => {
   })
 
   test("holds the prompt until the agent reports interactive readiness", async () => {
-    await writeShim(true, false, true, "none", null, false, "none", true)
+    await writeShim({ bootDelayOnce: true })
     const node = agent()
     const observation = await new HerdrSurface().spawn({
       workflow: workflow(node),
@@ -1946,7 +2180,7 @@ describe("herdr surface", () => {
   })
 
   test("delivers an over-budget prompt as a pointer to the durable prompt file", async () => {
-    await writeShim(true)
+    await writeShim()
     const node = agent()
     const longPrompt = `Review everything. ${"Detail. ".repeat(600)}`
     const runState = state(node.id)
@@ -1971,7 +2205,7 @@ describe("herdr surface", () => {
   })
 
   test("nudges a visible stalled prompt instead of resending its full text", async () => {
-    await writeShim(true, false, true, "none", null, false, "stall-once")
+    await writeShim({ promptFailure: "stall-once" })
     const node = agent()
     const observation = await new HerdrSurface().spawn({
       workflow: workflow(node),
@@ -1990,7 +2224,7 @@ describe("herdr surface", () => {
   })
 
   test("retries a stalled prompt only while its unique marker remains invisible", async () => {
-    await writeShim(true, false, true, "none", null, false, "stall-once-hidden")
+    await writeShim({ promptFailure: "stall-once-hidden" })
     const node = agent()
     const observation = await new HerdrSurface().spawn({
       workflow: workflow(node),
@@ -2007,7 +2241,7 @@ describe("herdr surface", () => {
   }, 15_000)
 
   test("recovers an ambiguous Claude spawn from its recorded id and a token-valid submission", async () => {
-    await writeShim(false, false, true, "none", null, false, "always")
+    await writeShim({ reportSession: false, promptFailure: "always" })
     const node = {
       ...claudeAgent(),
       session: { mode: "fresh" as const, from: null, saveAs: "claude-session" }
@@ -2048,7 +2282,7 @@ describe("herdr surface", () => {
       }),
       { createPath: false }
     )
-    await writeShim(false, false, true, "none", "p1", false, "always")
+    await writeShim({ reportSession: false, missingPane: "p1", promptFailure: "always" })
     const before = await Bun.file(logPath).text()
     const observation = await surface.recoverOrSpawn(request)
     expect(observation.providerSessionId).toBe(receipt.providerSessionId)
@@ -2059,7 +2293,7 @@ describe("herdr surface", () => {
   })
 
   test("fails a dead prompt-bearing receipt instead of cross-wiring its completion token", async () => {
-    await writeShim(false, false, true, "none", null, false, "always")
+    await writeShim({ reportSession: false, promptFailure: "always" })
     const node = agent()
     const runState = state(node.id)
     const activeIntent = intent(node.id)
@@ -2086,7 +2320,7 @@ describe("herdr surface", () => {
       })}\n`,
       { createPath: false }
     )
-    await writeShim(true, false, true, "none", "p1")
+    await writeShim({ missingPane: "p1" })
     const before = await Bun.file(logPath).text()
 
     await expect(surface.recoverOrSpawn(request)).rejects.toThrow(
@@ -2104,7 +2338,7 @@ describe("herdr surface", () => {
   test("chooses the Claude session id at launch instead of observing herdr", async () => {
     // herdr never reports a claude session (safe-mode disables the hook that
     // would); the launcher-chosen id must make that irrelevant.
-    await writeShim(false)
+    await writeShim({ reportSession: false })
     const node = {
       ...claudeAgent(),
       session: { mode: "fresh" as const, from: null, saveAs: "claude-session" }
@@ -2139,7 +2373,7 @@ describe("herdr surface", () => {
   })
 
   test("records session-pending when herdr never reports a lineage session id", async () => {
-    await writeShim(false)
+    await writeShim({ reportSession: false })
     setAgentSessionTimeoutForTests(300)
     const node = agent()
     const surface = new HerdrSurface()
@@ -2162,7 +2396,7 @@ describe("herdr surface", () => {
     // Reconcile retries only the session capture on the live pane: once the
     // provider reports its id, the receipt promotes to ready without a second
     // prompt delivery.
-    await writeShim(true)
+    await writeShim()
     const observation = await surface.recoverOrSpawn(request)
     expect(observation.providerSessionId).toBe("session-1")
     expect(observation.pane.paneId).toBe("p1")
@@ -2175,7 +2409,7 @@ describe("herdr surface", () => {
   })
 
   test("keeps polling a working agent until the late session id arrives", async () => {
-    await writeShim(true, false, true, "none", null, true)
+    await writeShim({ reportSessionLate: true })
     const node = agent()
     const observation = await new HerdrSurface().spawn({
       workflow: workflow(node),

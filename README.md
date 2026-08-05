@@ -1,56 +1,57 @@
 # Orchestrate
 
-Orchestrate turns a multi-agent task into an explicit, reviewable workflow: you describe a DAG of
-agent and command nodes in one JSON file, approve its exact digest, and run it as real
-[herdr](https://herdr.dev) panes you can watch, pause, and steer.
+Orchestrate turns multi-agent work into an explicit, reviewable workflow. Agents normally author
+and drive the graph; humans approve its exact digest, watch real [Herdr](https://herdr.dev) panes,
+and make the decisions that should remain human.
 
-Execution is interactive and
-master-driven: `run` starts the initial ready work, node agents submit authenticated results, and
-the launching master uses `orchestrate reconcile` to commit those results and start newly ready
-nodes. Herdr's trusted plugin event hook prompts that master when a workflow agent becomes blocked
-or done; the sandboxed `node-done` path only writes its authenticated submission. Wake-ups reduce
-latency, but reconciliation is safe at any time and does not depend on a wake being delivered. There
-is no per-run background controller.
+Use it for role-to-role feedback loops, bounded review/fix rounds, conditional cross-provider
+handoffs, and branching work whose dependencies or mutation boundaries deserve explicit review.
+The CLI can run simpler DAGs too, but a linear chain or one fan-out/fan-in stage rarely justifies
+agent-orchestrated setup.
 
 ## Install
+
+Requires macOS ARM64 (Apple silicon), Herdr 0.7.5 or newer, and Codex and/or Claude for the providers
+a workflow uses. Git is needed only when a workflow selects `git-worktree` isolation.
 
 ```bash
 brew tap alexs7zzh/tap
 brew install orchestrate
 orchestrate setup
+orchestrate doctor
 ```
 
-`setup` atomically stages the CLI, skill, and herdr plugin under
-`~/.local/share/orchestrate/current`, links the CLI into `~/.local/bin`, and offers a UI preference
-wizard. Use `setup --dry-run`, `setup --defaults`, `setup --no-wizard`, or `setup --remove` as
-needed. Herdr plugin registration is required: if the plugin link fails, setup removes the new
-stage and leaves the prior installation selected; if unlink fails, removal fails rather than
-reporting success. `doctor` reports a missing registration as
-unhealthy. If Herdr cannot confirm either link or rollback, the versioned stage is retained as the
-plugin's recoverable target while the stable CLI/skill selection stays unchanged. Run
-`orchestrate doctor` after changing herdr or provider installations.
+`setup` installs the matching CLI, agent skill, and required Herdr plugin, then offers a UI
+preference wizard. `doctor` must report healthy after installation or an upgrade. Use
+`setup --dry-run`, `setup --defaults`, `setup --no-wizard`, or `setup --remove` when needed.
+Staging, migration, rollback, and uninstall behavior is documented under
+[Installation and upgrades](references/runtime-operations.md#installation-and-upgrades).
 
-Release builds are macOS ARM64 and are distributed through Homebrew; Linux is not a supported or
-distributed platform, and no npm package is used. Update with `brew upgrade orchestrate`; the next
-interactive command migrates the staged installation to the new build automatically. Migration
-waits while any run is unsettled and never runs from node completion or plugin event handling,
-shell completion, `doctor`, or non-interactive invocations — the unqualified `orchestrate setup`
-remains the explicit path. The newest installation wins in both directions: an older binary never
-overwrites a newer locally staged build (a Homebrew keg's install receipt is its installation
-clock), and when the staged CLI runs first on `PATH` it adopts a newer formula found later on
-`PATH` by delegating to that formula's own setup. The
-staged wrapper delegates setup to the distinct formula executable later on `PATH`, preventing the
-prior staged build from replacing a newer formula build. Before uninstalling the formula, run
-`orchestrate setup --remove` to unlink the skill and plugin.
+### Upgrade and uninstall
 
-## Requirements
+After `brew upgrade orchestrate`, run `orchestrate setup` if automatic migration has not activated
+the new build; migration waits while any run is unsettled. Before `brew uninstall orchestrate`, run
+`orchestrate setup --remove` so the matching build can unlink its skill and Herdr plugin.
 
-- macOS on Apple silicon
-- herdr 0.7.5 or newer
-- Codex and/or Claude for the providers used by a workflow
-- Git only when a node requests an isolated Git worktree
+Release builds target macOS ARM64 and are distributed through Homebrew. Linux and npm distribution
+are not supported.
+
+## Terms
+
+- **Launching master** — the agent session that invokes `run`, receives trusted Herdr wake-ups, and
+  calls `reconcile`.
+- **Workflow provider session** — a node conversation lineage named by `session.saveAs` and
+  continued through `session.from`; it is distinct from the launching master.
+- **Workroom tab and seat** — workflow-approved presentation identities for stable pane placement.
+  A node with a seat is seatful; supporting work without one is seatless.
+- **UI placement preference** — layered global/project UI state such as `placement.workspace`; it is
+  not a workflow-node field.
 
 ## Run a workflow
+
+An agent usually designs the workflow from the validated examples and semantic authoring rules,
+then presents a prose walkthrough with the exact preview digest. The human approves that digest;
+approval is never inferred from an interactive tool or hidden terminal output.
 
 ```bash
 orchestrate validate workflow.json
@@ -59,41 +60,23 @@ orchestrate run workflow.json --approve <digest>
 orchestrate board <run-id>
 ```
 
-A complete workflow file is shown in [references/examples.md](references/examples.md); the machine
-contract is [references/workflow.schema.json](references/workflow.schema.json).
+Start with the qualifying
+[persistent paired-review example](references/examples.md#persistent-paired-review-with-a-conditional-response),
+or use the [simple fan-out example](references/examples.md#simple-fan-out-and-fan-in-cli-illustration)
+when learning the lower-level CLI. The authoring contract is
+[workflow-format.md](references/workflow-format.md); consult the generated
+[workflow.schema.json](references/workflow.schema.json) only for exact structural detail.
 
-Preview prints the exact digest required by `run`. Preflight verifies the workflow, provider
-commands, herdr, paths, output schemas, worktree prerequisites, and declared write conflicts before
-state or panes are created. `--dry-run` performs the same read-only `herdr --version` preflight as
-a real start, but creates no state, worktrees, workspaces, tabs, or panes.
+Preview is read-only and prints the digest required by `run`. Preflight validates schema and
+cross-field semantics, provider commands, Herdr, paths, output schemas, worktree prerequisites, and
+declared write conflicts before state or panes are created. `run --dry-run` performs the same
+read-only preflight without creating state, worktrees, workspaces, tabs, or panes.
 
-A workflow may also approve stable presentation workrooms. Each workroom has a label, a `columns`
-or `rows` layout, ordered named seats, and explicit `settlesOn` nodes. Nodes name their workroom and
-optionally a seat; preview shows this topology so the human approves stable agent positions and the
-room's settlement boundary with the graph. Workrooms affect Herdr presentation only—they do not
-change dependencies, permissions, workspaces, or provider-session lineage.
-
-Every agent prompt has a stable frame: objective, node contract, declared inputs, result path, and
-the exact `node-done` command. Dynamic inputs are resolved only when dependencies finish. A task
-whose later work cannot be known up front should use a planning node that emits structured output,
-then a digest-bound approval gate before execution—not runtime-generated nodes.
-
-Agent permissions separate the execution boundary from escalation behavior. For example, a cold
-Codex review should use `execution.sandbox: "read-only"` with `escalation: "deny"`: allowed reads
-and commands run without approval dialogs, while anything outside the sandbox fails closed.
-`ask-user` is reserved for intentionally attended nodes; `auto-review` routes eligible Codex
-escalations through its reviewer instead of the human.
-
-Every agent also receives an implicit completion channel to its exact token-addressed attempt
-directory outside authoritative state; that is the only runtime path it can write. `node-done`
-writes an authenticated envelope there, and the next explicit `reconcile` validates the active
-token and result, commits transitions, and starts newly ready work. `node-done --hold` submits a
-successful outcome with a separate downstream hold that release removes without rewriting the
-outcome. The full sandbox rules — Claude workflow nodes require `dontAsk` plus `deny`, and
-validation rejects any mutating node whose sandbox root or write prefix overlaps Orchestrate state
-or installed control assets — are specified in
-[workflow-format.md](references/workflow-format.md) and
-[runtime-operations.md](references/runtime-operations.md).
+Every agent receives a stable prompt frame with the objective, node contract, declared inputs,
+result path, and exact authenticated completion command. Dynamic inputs resolve only after their
+dependencies finish. Work that cannot be enumerated in advance should use a planner with a
+schema-validated result and a digest-bound approval gate before execution, not runtime-generated
+nodes.
 
 ## Operate a run
 
@@ -110,55 +93,28 @@ orchestrate stop <run-id>
 orchestrate clean <run-id> --dry-run
 ```
 
-The interactive board, `board --json`, `runs --needs-attention`, and the Herdr panel sample live pane
-state for durably running nodes. `blocked`, `done`, and gone panes need attention; `done` is shown as
-`result missing`, while `idle`, `unknown`, and `working` remain transient. Observed attention affects
-default selection, so an older result-missing run wins over a newer healthy run and exits with code 2. JSON mode writes one stable value to stdout on success or error; `events --follow --json` is the
-documented newline-delimited streaming exception.
+Orchestrate is interactive and master-driven. `run` starts the initial ready work, node agents write
+authenticated submissions, and the launching master runs `reconcile` to commit them and start newly
+ready nodes. Herdr's trusted plugin prompts that master when a workflow agent becomes blocked or
+done. Wake-ups reduce latency, but correctness never depends on delivery: a dormant submission waits
+durably for the next explicit reconcile. There is no per-run background controller.
 
-Crash semantics, pane receipts, run locking, and the at-least-once boundary for external Herdr
-actions are specified in [runtime-operations.md](references/runtime-operations.md); the normative
-limits are in [guarantees.md](references/guarantees.md). In short: the `events.json` journal is
-authoritative and replayable, a kernel-held per-run lock serializes every mutation, `node-done`
-only writes its token-addressed envelope, dormant submissions wait for the next explicit
-`orchestrate reconcile`, and master wake-ups, callbacks, and notifications are best effort.
+The board, `board --json`, and `runs --needs-attention` combine durable run state with live Herdr
+observations. A provider that is blocked, done without a result, or missing its pane needs attention;
+startup `idle` and `unknown` states remain transient. `status --wait` and `events --follow` observe
+changes but do not schedule work.
 
-Repeats are declared, bounded subgraphs. Their completion condition is either an allowed command
-exit or a schema-validated JSON value. Reaching the round limit pauses for an explicit extension or
-acceptance. `limits.maxStarts` is a separate execution fuse; starts already planned within its
-budget are reconciled before a later candidate pauses the run. Repeat Git worktrees must include
-`{{nodeId}}` in the branch template and in every explicit path; both are expanded with the runtime
-round ID. Default targets live in a run-unique temporary worktree root outside authoritative state.
-Any pre-existing target must be the canonical worktree root for the expected repository and exact
-expanded branch or launch fails before pane creation.
+Repeats are bounded subgraphs with an objective command or schema-validated JSON condition. Reaching
+their bound pauses for an explicit extension or acceptance. A node `when` can select an approved
+branch from a direct JSON dependency: false records scheduler-owned `skipped`, while a missing pointer
+pauses as malformed control data. Persistent repeat sessions advance only after schema-valid success.
+See [Runtime operations](references/runtime-operations.md) for the detailed lifecycle and recovery
+model.
 
-Nodes may declare a scheduler-owned `when` over a direct schema-validated JSON dependency. A false
-condition records a first-class zero-attempt `skipped` state; a missing pointer pauses as a contract
-error instead of silently choosing a branch, and resume requires an approved condition change. In
-repeats, conditions bind to the same-round source and are reevaluated each round. Persistent repeat
-sessions use copy-on-write provider forks: only a successful result advances the alias, so a failed
-retry cannot contaminate the next attempt or round.
+## Workrooms and UI
 
-Compilation embeds the build identity used by run state. Ambient environment variables cannot
-change `--version`, and a different binary refuses that state.
-
-Concurrency limits simultaneous active node attempts, not retained completed panes. Treat it as a
-human-attention budget; the default recommendation is 3. Write sets and exclusive resources prevent
-unsafe parallel starts.
-
-## UI and notifications
-
-The OpenTUI board shows dependencies, pane state, elapsed time, repeat rounds, stalled work, and
-items needing attention. Its bounded clock refresh advances elapsed time and resamples herdr even
-when no workflow file changes. For a durably running agent, herdr `done` means the provider finished
-without submitting `node-done`; the board reports it once in `NEEDS YOU` with the authenticated
-recovery command. `idle` and `unknown` startup samples remain transient. Blocked agents and
-explicitly vanished panes are also actionable. Mouse and keyboard controls focus panes, open
-results, pause/resume, hold/release nodes, and stop the run. Gate approvals and vanished-pane
-recovery remain explicit commands shown by the board.
-
-Preferences contain UI state only and layer built-in defaults, global choices, then project choices.
-Schema-invalid or unknown fields fail. Inspect origins or edit them with:
+UI preferences layer built-in defaults, global choices, then project choices. Inspect or change them
+with:
 
 ```bash
 orchestrate ui show --origin
@@ -167,57 +123,47 @@ orchestrate ui set placement.workspace '"origin"' --project "$PWD"
 orchestrate ui wizard --project "$PWD"
 ```
 
-`placement.workspace` is `"dedicated"` by default or `"origin"` to create node tabs in the
-launching workspace. It is independent of ordered `placement.rules[].surface` tab/split choices.
-If the recorded origin pane is no longer live, origin placement safely falls back to the dedicated
-run workspace. A recorded split anchor is verified immediately before use: explicit absence creates
-a fresh tab in the selected workspace. If the pane closes between that check and split, one
-`pane_not_found` falls back exactly once to a fresh tab without consuming the attempt; transport
-errors preserve the planned intent as observation failures.
+The UI `placement.workspace` preference chooses the dedicated run workspace or the launching
+workspace independently from ordinary tab/split matching. It is not a workflow-node field. If the
+recorded origin is unavailable, placement falls back to the dedicated run workspace.
 
-Seatful workroom nodes are the exception to matcher-selected tab/split placement: they use the
-declared workroom and ordered seat while inheriting the same effective `placement.workspace`.
-Retries and repeat rounds return to that seat. A false `when` has no attempt or pane and does not
-disturb its parked occupant. While a room is active, successful seat panes remain parked even if
-ordinary agent panes use `close-success`. After every `settlesOn` node completes or is
-scheduler-skipped, that preference applies to the room: `keep-open` leaves it archived and
-`close-success` closes its seat panes.
+Optional workflow workrooms express presentation intent with scheduler-enforced occupancy
+invariants. A workroom has one ordered set of seats in a stable workroom tab. Seatful nodes use their
+declared seat instead of ordinary matcher placement; seatless supporting nodes and all command nodes
+remain ordinary Herdr panes. Nodes sharing a seat must be dependency-ordered, and settlement anchors
+must be non-repeat nodes downstream of every other node assigned to the workroom.
 
-A node may support a workroom without occupying a seat. Commands are always seatless in V1 and
-remain transient Herdr panes; successful command-pane cleanup is unchanged, and workrooms do not
-provide headless background execution. If a seat pane disappears, Orchestrate restores it in the
-declared room only when live Herdr state makes the vacancy unambiguous. Conflicting occupancy needs
-human attention rather than silently opening the agent elsewhere. While occupancy is unresolved,
-Orchestrate holds other seat launches in that room but may continue unrelated work; planned intents
-and retry budgets remain intact. A transient Herdr verification failure defers without paging the
-human; contradictory occupancy raises durable attention. Workrooms also do not add automatic
-fresh-provider fallback: unavailable resumes continue through the existing explicit recovery path.
+While a workroom is active, a successful seat pane remains parked for later turns even when ordinary
+agent panes use `close-success`. After every settlement anchor is durably completed or
+scheduler-skipped, `keep-open` leaves those panes open and relabels them settled; `close-success`
+closes them. Missing-seat recovery preserves logical seat identity when live occupancy is
+unambiguous and requests attention instead of guessing when it is not. Herdr owns physical split
+geometry, so reconstruction is best effort.
 
-Seat order and the workroom's `columns` or `rows` layout determine split intent and preview order.
-Herdr owns physical geometry, so a recovered room preserves logical seat identity and co-location
-when observation is unambiguous, not pixel-perfect reconstruction of its former splits.
-
-Agent and command nodes always execute through herdr. `ORCHESTRATE_DISABLE_UI=1` suppresses board
-auto-open and presentation notifications, but never changes execution. A named herdr remote must
-have access to the same checkout and state paths; otherwise use the local herdr session.
+Agent and command nodes always execute through Herdr. `ORCHESTRATE_DISABLE_UI=1` suppresses board
+auto-open and presentation notifications, not execution. A named Herdr remote must have access to
+the same checkout, state, provider, and CLI paths.
 
 ## Documentation
 
-- [guarantees.md](references/guarantees.md) — the normative reliability and ownership contract; it
-  wins over any stronger mechanism described elsewhere.
-- [workflow-format.md](references/workflow-format.md) — the workflow file: node kinds, workspaces,
-  permissions, sessions, and repeats.
-- [runtime-operations.md](references/runtime-operations.md) — state, scheduling, crash semantics,
-  and presentation mechanics.
-- [cli-spec.md](references/cli-spec.md) — the command table and the JSON and exit-code contract.
-- [examples.md](references/examples.md) — a complete workflow file and UI preference examples.
+| Need                                | Canonical source                                          | Authority                             |
+| ----------------------------------- | --------------------------------------------------------- | ------------------------------------- |
+| Learn or adapt a pattern            | [examples.md](references/examples.md)                     | Illustrative, validated examples      |
+| Author fields and cross-field rules | [workflow-format.md](references/workflow-format.md)       | Normative semantic authoring contract |
+| Look up exact workflow structure    | [workflow.schema.json](references/workflow.schema.json)   | Generated structural machine contract |
+| Check reliability or ownership      | [guarantees.md](references/guarantees.md)                 | Normative product guarantees          |
+| Operate, debug, or recover          | [runtime-operations.md](references/runtime-operations.md) | Explanatory implementation mechanics  |
+| Check commands, JSON, or exit codes | [cli-spec.md](references/cli-spec.md)                     | Normative public CLI contract         |
 
-The machine contracts are [workflow.schema.json](references/workflow.schema.json),
+The other generated machine contracts are
 [preferences.schema.json](references/preferences.schema.json),
 [state.schema.json](references/state.schema.json), and
 [event.schema.json](references/event.schema.json).
 
 ## Development
+
+Read [AGENTS.md](AGENTS.md) before changing the repository. It owns provider-neutral contributor
+rules, documentation authority, generated-file policy, and synchronization requirements.
 
 ```bash
 cd scripts
@@ -227,36 +173,18 @@ bun run build:compile
 ./dist/orchestrate setup
 ```
 
-`./dist/orchestrate setup` installs the local build through the same staged layout as the formula
-install.
-
 The checked Herdr response decoders are generated from the checked-in socket schema snapshot. After
-raising or changing the supported Herdr API contract, run `bun run schema:herdr` with that Herdr
-version installed; this refreshes the narrowed snapshot from `herdr api schema --json` and
-regenerates `src/herdr-api.generated.ts`.
+raising the supported Herdr API contract, run `bun run schema:herdr` with that Herdr version
+installed.
 
-Normal pushes to `main` run CI but do not build or publish a release. Start a release by pushing an
-annotated or signed strict-SemVer tag that points to a commit on `main`:
+Normal pushes to `main` run CI but do not publish. A release starts from an annotated or signed
+strict-SemVer tag on `main`:
 
 ```bash
 git tag -a v0.2.0 -m "Orchestrate 0.2.0"
 git push origin v0.2.0
 ```
 
-The tag workflow derives one version from `v<semver>`, verifies the exact tagged source,
-builds the macOS ARM64 payload, and creates a draft GitHub Release with the archive, checksum,
-Homebrew bottle, and rendered formula attached. The formula's bottle stanza points at the release
-assets, so `brew install` pours the bottle instead of requiring build tools on user machines. Review those assets and generated notes in GitHub, then publish
-the draft manually. Release binaries and the generated `scripts/orchestrate.mjs` bundle are not
-committed to this repository; CI generates both from source. The formula can optionally be copied to
-`Formula/orchestrate.rb` in a separate Homebrew tap by automation running after the release is
-published.
-
-Release derivation, compilation, and assembly share one strict SemVer 2.0 validator. Leading-zero
-core/numeric prerelease identifiers and empty prerelease identifiers are rejected. Release build
-metadata is deliberately unsupported because the compiled identity appends its own build hash. The
-release build runs on native ARM64 `macos-15` and asserts `uname -m=arm64`. The release contract
-rejects binary, plugin, or formula version disagreement, pins the exact payload (binary, root
-license, complete third-party notices, skill, agent metadata, plugin, and all nine reference files),
-rejects unexpected extras, independently recomputes the archive checksum sidecar, and exercises the
-unpacked formula-shaped install tree without changing Homebrew or the host installation.
+The tag workflow verifies the source, builds the macOS ARM64 payload, and creates a draft GitHub
+Release with the archive, checksum, Homebrew bottle, formula, and generated notes. Review and publish
+the draft manually. Generated bundles and release archives are not committed.

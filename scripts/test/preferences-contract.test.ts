@@ -5,6 +5,7 @@ import path from "node:path"
 
 import {
   DEFAULT_UI_PREFERENCES,
+  patchUiPreferenceLayer,
   preferencesPath,
   readPreferences,
   setUiPreference,
@@ -96,6 +97,53 @@ describe("UI preferences contract", () => {
     const merged = await uiPreferencesWithOrigins("/tmp/project")
     expect(merged.value.placement.maxSplitsPerTab).toBe(7)
     expect(merged.origins.placement).toBe("global")
+  })
+
+  test("patches wizard-owned fields without resetting unshown preferences", async () => {
+    const matchAll = DEFAULT_UI_PREFERENCES.placement.rules[0]?.match
+    if (matchAll === undefined) {
+      throw new Error("Expected the default placement rules to include a match-all rule.")
+    }
+    await setUiPreference("completedPanes", { agent: "close-success", command: "keep-open" }, null)
+    await setUiPreference("focus", "never", null)
+    await setUiPreference(
+      "continuation",
+      {
+        rules: [{ match: { ...matchAll }, autoContinue: false }]
+      },
+      null
+    )
+
+    await patchUiPreferenceLayer(
+      {
+        board: "current-workspace",
+        placement: { ...DEFAULT_UI_PREFERENCES.placement, workspace: "origin" },
+        notifications: { attention: "board", milestone: "silent", progress: "silent" }
+      },
+      null
+    )
+
+    const stored = await readPreferences()
+    expect(stored.global.ui.completedPanes).toStrictEqual({
+      agent: "close-success",
+      command: "keep-open"
+    })
+    expect(stored.global.ui.focus).toBe("never")
+    expect(stored.global.ui.continuation).toStrictEqual({
+      rules: [
+        {
+          match: matchAll,
+          autoContinue: false
+        }
+      ]
+    })
+    expect(stored.global.ui.board).toBe("current-workspace")
+    expect(stored.global.ui.placement?.workspace).toBe("origin")
+    expect(stored.global.ui.notifications).toStrictEqual({
+      attention: "board",
+      milestone: "silent",
+      progress: "silent"
+    })
   })
 
   test("validates and merges the node workspace independently of surface rules", async () => {

@@ -698,10 +698,34 @@
                   "minLength": 1
                 }
               ]
+            },
+            "workroomId": {
+              "type": "string",
+              "allOf": [
+                {
+                  "minLength": 1
+                },
+                {
+                  "pattern": "^(?!.*--r[1-9][0-9]*$)[a-z0-9][a-z0-9-]*$"
+                }
+              ]
+            },
+            "seatId": {
+              "type": "string",
+              "allOf": [
+                {
+                  "minLength": 1
+                },
+                {
+                  "pattern": "^(?!.*--r[1-9][0-9]*$)[a-z0-9][a-z0-9-]*$"
+                }
+              ]
             }
           },
           "required": [
-            "intentId"
+            "intentId",
+            "workroomId",
+            "seatId"
           ],
           "additionalProperties": false
         }

@@ -3,6 +3,14 @@
 This document is the normative reliability and ownership contract for Orchestrate. If another
 document describes a stronger implementation mechanism, this document wins.
 
+## In this reference
+
+- [Operating model](#operating-model)
+- [Ownership](#ownership)
+- [Guaranteed behavior](#guaranteed-behavior)
+- [External side effects and crashes](#external-side-effects-and-crashes)
+- [Background operation](#background-operation)
+
 ## Operating model
 
 Orchestrate is an interactive, master-driven DAG coordinator for Herdr. Herdr is assumed to remain
@@ -59,20 +67,21 @@ time is safe, and correctness never depends on receiving a wake-up.
   its declared seat instead of ordinary matcher placement; retries and repeat instances reuse that
   seat, and a scheduler-owned skipped node never consumes or changes it. Active seat panes park
   until every anchor is durably completed or skipped, after which the effective completion
-  preference archives or closes them.
-- Workrooms inherit the effective `placement.workspace`. Seatless supporting commands remain real,
-  transient Herdr panes; presentation metadata does not create a headless execution path.
+  preference either keeps them open and relabels them settled or closes them.
+- Workrooms inherit the effective UI `placement.workspace` preference. Seatless supporting commands
+  remain real, transient Herdr panes; presentation metadata does not create a headless execution
+  path.
 - A dead prompt-bearing receipt is never re-prompted under its old completion token. Reconciliation
   adopts its submission only with exact child-session attribution; otherwise retry uses a fresh
   token and the unchanged committed parent.
 - Reconciliation adopts an unambiguous observed Herdr resource, defers a transient observation
   failure without consuming the intent, or reports human attention for contradictory occupancy.
   It does not silently guess after an ambiguous failure.
-- An explicitly missing seat pane is restored inside its declared workroom only when live Herdr
-  state identifies that room and seat unambiguously. Conflicting or ambiguous occupancy reports
+- An explicitly missing seat pane is restored inside its declared workroom tab only when live Herdr
+  state identifies that workroom and seat unambiguously. Conflicting or ambiguous occupancy reports
   attention rather than moving the node through ordinary placement. Restoration preserves logical
   seat identity and workroom co-location; Herdr-owned physical geometry is best effort.
-- While a seated spawn's occupancy is unresolved, reconciliation starts no sibling seat in that
+- While a seatful spawn's occupancy is unresolved, reconciliation starts no sibling seat in that
   workroom. It preserves every planned intent and retry budget while unrelated work may proceed.
 - Explicit human pause, stop, hold, gate, revision, and repeat-limit decisions remain explicit.
 

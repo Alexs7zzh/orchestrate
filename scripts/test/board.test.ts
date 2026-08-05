@@ -44,6 +44,41 @@ function model(objective: string): BoardViewModel {
 }
 
 describe("OpenTUI board viewport", () => {
+  test("renders both the explanation and command for actionable attention", () => {
+    const attention: BoardViewModel = {
+      ...model("attention details"),
+      needsYou: [
+        {
+          kind: "workroom",
+          workroomId: "review",
+          seatId: "reviewer",
+          title: "review: seat reviewer needs occupancy attention",
+          detail: "Inspect or repair the workroom tab, then reconcile the planned seat.",
+          command: "orchestrate reconcile attention-run"
+        }
+      ]
+    }
+    const text = renderBoardFrame(attention, null).text
+    expect(text).toContain(
+      "review: seat reviewer needs occupancy attention\n    Inspect or repair the workroom tab, then reconcile the planned seat.\n    orchestrate reconcile attention-run"
+    )
+  })
+
+  test.each(["completed", "failed", "stopped"] as const)(
+    "hides mutating controls after a run is %s",
+    (status) => {
+      const terminal: BoardViewModel = {
+        ...model("terminal controls"),
+        run: { ...model("terminal controls").run, status }
+      }
+      const text = renderBoardFrame(terminal, null).text
+      expect(text).toContain("↑/↓ select  enter open  q quit")
+      expect(text).not.toContain("pause/resume")
+      expect(text).not.toContain("hold/release")
+      expect(text).not.toContain("s stop")
+    }
+  )
+
   test("shows bounded result content and reports oversized files instead of loading them", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "orchestrate-board-result-"))
     try {

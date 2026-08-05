@@ -595,7 +595,14 @@ export const EventRecordSchema = Schema.Union([
   nodeEventWithoutData("node.ready"),
   nodeEventWithData("node.spawn-planned", SpawnData),
   nodeEventWithData("node.started", SpawnData),
-  nodeEventWithData("workroom.attention", Schema.Struct({ intentId: NonEmptyString })),
+  nodeEventWithData(
+    "workroom.attention",
+    Schema.Struct({
+      intentId: NonEmptyString,
+      workroomId: NodeId,
+      seatId: NodeId
+    })
+  ),
   nodeEventWithData(
     "node.completed",
     Schema.Union([AttemptData, Schema.Struct({ attempt: PositiveInteger, exitCode: Schema.Int })])

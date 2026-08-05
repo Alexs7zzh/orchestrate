@@ -418,6 +418,9 @@ function buildAttention(
   state: RunState,
   nodes: readonly BoardNodeView[]
 ): readonly BoardAttention[] {
+  if (state.status === "completed" || state.status === "failed" || state.status === "stopped") {
+    return []
+  }
   const order = new Map(nodes.map((node, index) => [node.id, index]))
   const gates: GateAttention[] = Object.values(state.gates)
     .filter((gate) => gate.approvedAt === null)
@@ -501,20 +504,22 @@ function buildAttention(
     })
 
   const workrooms: WorkroomAttention[] = Object.values(state.workrooms).flatMap((workroom) =>
-    Object.values(workroom.seats).flatMap((seat) =>
-      seat.status !== "attention"
-        ? []
-        : [
-            {
-              kind: "workroom" as const,
-              workroomId: workroom.id,
-              seatId: seat.id,
-              title: `${workroom.id}: seat ${seat.id} needs occupancy attention`,
-              detail: "Inspect or repair the Herdr room, then reconcile the planned seat.",
-              command: `orchestrate reconcile ${state.id}`
-            }
-          ]
-    )
+    workroom.status !== "active"
+      ? []
+      : Object.values(workroom.seats).flatMap((seat) =>
+          seat.status !== "attention"
+            ? []
+            : [
+                {
+                  kind: "workroom" as const,
+                  workroomId: workroom.id,
+                  seatId: seat.id,
+                  title: `${workroom.id}: seat ${seat.id} needs occupancy attention`,
+                  detail: "Inspect or repair the workroom tab, then reconcile the planned seat.",
+                  command: `orchestrate reconcile ${state.id}`
+                }
+              ]
+        )
   )
 
   const stalled: StalledPaneAttention[] = nodes.flatMap((node) => {
@@ -999,7 +1004,12 @@ export function mapBoardInput(
   }
   const selected = model.nodes.find((node) => node.id === selectedNodeId)
   if (input.key === "h") {
-    if (selected === undefined) {
+    if (
+      selected === undefined ||
+      model.run.status === "completed" ||
+      model.run.status === "failed" ||
+      model.run.status === "stopped"
+    ) {
       return { type: "none" }
     }
     return selected.downstreamHeld

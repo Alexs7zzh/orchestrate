@@ -1,11 +1,27 @@
 # CLI contract
 
+This document is the normative public command, JSON, streaming, and exit-code contract. Workflow
+authoring semantics live in [workflow-format.md](workflow-format.md); runtime mechanisms live in
+[runtime-operations.md](runtime-operations.md).
+
+## In this reference
+
+- [Output and exit codes](#output-and-exit-codes)
+- [Command shapes](#command-shapes)
+- [Run selection and environment](#run-selection-and-environment)
+- [Live attention and waiting](#live-attention-and-waiting)
+- [Shell completion](#shell-completion) and [durable outcomes](#durable-outcomes)
+- [Master wake-up and submission transport](#master-wake-up-and-submission-transport)
+
+## Output and exit codes
+
 Every command prints human text by default and exactly one JSON value on stdout with `--json`.
 Parse, dispatch, missing-file, and noninteractive errors use
 `{"ok":false,"error":{"code":"<stable-code>","message":"..."}}` on stdout and exit `1` with
 no human stderr. Codes distinguish `usage`, `validation`, `not_found`, `conflict`, `herdr`, and
-`io`; unclassified failures use `command_failed`. `events --json` returns one `{"events":[...]}` value; the explicit streaming
-exception `events --follow --json` emits one event JSON value per line. Exit codes are `0` for
+`io`; unclassified failures use `command_failed`. `events --json` returns one
+`{"events":[...]}` value; the explicit streaming exception `events --follow --json` emits one event
+JSON value per line. Exit codes are `0` for
 success, `1` for error, and `2` when the observed run needs human attention. Run IDs accept a unique
 prefix, except `node-done`, whose sandbox-safe transport path requires the exact full run ID embedded
 in the node prompt. Every command accepts `--help` without performing work; with `--json`, help is a
@@ -16,6 +32,8 @@ such as `--remove=false`, `--yes=false`, and `--dry-run=false` are errors. `--js
 noninteractive: it never opens a selector, confirmation, editor, or wizard. `board --json` selects
 the normal default run even on a TTY, `stop --json` does not prompt, and `ui wizard --json` fails
 with an explicit noninteractive error.
+
+## Command shapes
 
 | Command       | Shape                                                                                       | Purpose                                                                                                   |
 | ------------- | ------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
@@ -49,14 +67,18 @@ with an explicit noninteractive error.
 | `clean`       | `clean --settled [--dry-run] [--json]`                                                      | Clean every settled run.                                                                                  |
 | `completion`  | `completion <fish\|zsh\|bash> [--json]`                                                     | Emit shell completion.                                                                                    |
 | `setup`       | `setup [--dry-run] [--remove] [--defaults\|--no-wizard] [--json]`                           | Stage assets and link detected integrations.                                                              |
-| `doctor`      | `doctor [--json]`                                                                           | Check herdr, providers, state access, and installed build.                                                |
+| `doctor`      | `doctor [--json]`                                                                           | Check Herdr, providers, state access, and installed build.                                                |
+
+## Run selection and environment
 
 Read commands without a run ID select the newest run needing attention, otherwise the newest run.
 Mutating commands always require an ID. `ORCHESTRATE_STATE_DIR` or `XDG_STATE_HOME` selects state
 storage. `ORCHESTRATE_BIN` selects the orchestrate executable injected into node panes; its
 resolved path is protected like other installed control assets. `ORCHESTRATE_DISABLE_PREFS=1`
 disables preferences. `ORCHESTRATE_DISABLE_UI=1` suppresses
-presentation only; node execution remains herdr-backed.
+presentation only; node execution remains Herdr-backed.
+
+## Live attention and waiting
 
 `board`, `board --json`, and `runs --needs-attention` sample live Herdr pane/agent state for durably
 running nodes. Explicit `blocked`, `done`, and `pane_not_found` observations are attention; `done`
@@ -64,28 +86,40 @@ is reported as `result missing`. `idle`, `unknown`, and `working` remain transie
 attention participates in the default board selection, so an older result-missing run is selected
 before a newer healthy run. A nonempty `runs --needs-attention` and an attentive board exit `2`.
 
-`run --dry-run` performs the same read-only `herdr --version` requirement as a real start and rejects
-versions older than the enforced minimum without creating state, worktrees, workspaces, tabs, or panes.
+`run --dry-run` performs the same read-only `herdr --version` requirement as a real start and
+rejects versions older than the enforced minimum without creating state, worktrees, workspaces,
+tabs, or panes.
 `status --wait` and `events --follow` install their filesystem watch before each authoritative scan,
 then rescan, so a terminal state or event cannot be lost between a scan and watch registration.
+
+## Shell completion
 
 Fish, Zsh, and Bash completion routing is generated from the command-shape table used by the CLI.
 Every run-taking form is covered, including `clean`, `node-done`, `node-exit`, and `ui restore`;
 run candidates and node candidates occupy disjoint positions.
+
+## Durable outcomes
 
 Status and board JSON keep outcome and dependency release separate: a successful node has
 `status: "completed"`, while `downstreamHeld`, `holdTargets`, and the top-level durable `holds`
 collection describe its release barrier. `result --json` reports the same axes with the output.
 Scheduler-derived conditions add `status: "skipped"` and `skip` reason metadata with no attempt or
 result path; human result output prints `[skipped]`. Preview JSON includes each node's full `when`,
-and text preview prints its source, pointer, and expected value. A condition-contract pause is
-reported in status as actionable revision-or-stop work; unchanged resume is rejected.
+and text preview prints its source, pointer, and expected value. Both approval views expose each
+node's workspace mode/path, declared writes and exclusive resources, and environment key names
+without revealing environment values. Agent rows also show their execution
+and escalation settings. Workroom previews show the floor plan
+and explain the active-to-settled pane lifecycle. A condition-contract pause is reported in status
+as actionable revision-or-stop work; unchanged resume is rejected.
 The board renders a completion check and a separate `downstream held` indicator. A Herdr agent
 reported as done while durable status is still running is shown as actionable `result missing`.
 Human `status` text and the noninteractive `board` snapshot mark a not-yet-started gated node with
 `approval gate ahead`.
 
-When `run` is invoked from a Herdr agent pane, the exact provider session is captured. Herdr invokes
+## Master wake-up and submission transport
+
+When `run` is invoked from a Herdr agent pane, the launching master's exact provider session is
+captured. Herdr invokes
 the installed plugin bridge when a workflow agent becomes blocked or done. The trusted bridge maps
 the pane to a running attempt and prompts the master to reconcile a valid submission or debug a
 missing one. The provider-sandboxed `node-done` command never calls Herdr. Wake-up affects latency

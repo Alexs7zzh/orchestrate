@@ -58,7 +58,8 @@ function workspace() {
 function command(
   id: string,
   needs: readonly string[] = [],
-  gate: CommandNode["gate"] = "none"
+  gate: CommandNode["gate"] = "none",
+  overrides: Partial<CommandNode> = {}
 ): CommandNode {
   return {
     id,
@@ -74,11 +75,16 @@ function command(
     mutates: false,
     inheritEnv: [],
     env: {},
-    allowedExitCodes: [0]
+    allowedExitCodes: [0],
+    ...overrides
   }
 }
 
-function agent(id: string, needs: readonly string[] = []): AgentNode {
+function agent(
+  id: string,
+  needs: readonly string[] = [],
+  overrides: Partial<AgentNode> = {}
+): AgentNode {
   return {
     id,
     type: "agent",
@@ -109,8 +115,9 @@ function agent(id: string, needs: readonly string[] = []): AgentNode {
         required: ["clean"],
         additionalProperties: false
       }
-    }
-  }
+    },
+    ...overrides
+  } as AgentNode
 }
 
 function workflow(nodes: readonly WorkflowNode[]): WorkflowSpec {
@@ -134,6 +141,7 @@ class FakeSurface implements CrankSurface {
   readonly closed: string[] = []
   readonly renamed: Array<readonly [string, string]> = []
   readonly handoffs: string[] = []
+  readonly notifications: Array<readonly [string, string, "none" | "done" | "request"]> = []
   waitForAgentStatus?: (paneId: string, status: string, timeoutMs: number) => Promise<boolean>
   readonly origin: RunOrigin = {
     workspaceId: "origin-workspace",
@@ -177,7 +185,9 @@ class FakeSurface implements CrankSurface {
     this.renamed.push([paneId, label])
   }
 
-  async notify(_title: string, _body: string, _sound: "none" | "done" | "request"): Promise<void> {}
+  async notify(title: string, body: string, sound: "none" | "done" | "request"): Promise<void> {
+    this.notifications.push([title, body, sound])
+  }
 
   async promptOrigin(origin: RunOrigin, prompt: string): Promise<void> {
     expect(origin).toEqual(this.origin)
@@ -236,6 +246,31 @@ afterEach(async () => {
 })
 
 describe("crank shell", () => {
+  test("records and reports a board-open failure after the run is durable", async () => {
+    class BrokenBoardSurface extends FakeSurface {
+      async openBoard(): Promise<void> {
+        throw new Error("board split failed")
+      }
+    }
+    const surface = new BrokenBoardSurface()
+    const started = await start(workflow([command("build")]), surface)
+
+    expect(started.events).toContainEqual(
+      expect.objectContaining({
+        type: "ui.degraded",
+        message: expect.stringContaining("board split failed")
+      })
+    )
+    expect(surface.notifications).toContainEqual([
+      "crank-test · board unavailable",
+      expect.stringContaining(`orchestrate board ${started.state.id}`),
+      "request"
+    ])
+    expect((await readEvents(runDirectory(started.state.id))).map((event) => event.type)).toContain(
+      "ui.degraded"
+    )
+  })
+
   test("runs a two-command dependency chain and preserves replay", async () => {
     const surface = new FakeSurface()
     const spec = workflow([command("first"), command("second", ["first"])])
@@ -774,11 +809,7 @@ describe("crank shell", () => {
   })
 
   test("journals ambiguous workroom occupancy as durable attention without consuming a retry", async () => {
-    const planned = {
-      ...agent("planned"),
-      workroom: "review-room",
-      seat: "reviewer"
-    } satisfies AgentNode
+    const planned = agent("planned", [], { workroom: "review-room", seat: "reviewer" })
     const spec: WorkflowSpec = {
       ...workflow([planned]),
       presentation: {
@@ -826,20 +857,11 @@ describe("crank shell", () => {
   })
 
   test("blocks sibling seats without durable attention on a transient workroom failure", async () => {
-    const first = {
-      ...agent("first"),
-      workroom: "review-room",
-      seat: "first-seat"
-    } satisfies AgentNode
-    const second = {
-      ...agent("second"),
-      workroom: "review-room",
-      seat: "second-seat"
-    } satisfies AgentNode
-    const settle = {
-      ...command("settle", ["first", "second"]),
+    const first = agent("first", [], { workroom: "review-room", seat: "first-seat" })
+    const second = agent("second", [], { workroom: "review-room", seat: "second-seat" })
+    const settle = command("settle", ["first", "second"], "none", {
       workroom: "review-room"
-    } satisfies CommandNode
+    })
     const spec: WorkflowSpec = {
       ...workflow([first, second, settle]),
       presentation: {
@@ -1364,20 +1386,12 @@ describe("crank shell", () => {
   })
 
   test("keeps active participant seats parked and applies close-success when the room settles", async () => {
-    const first = {
-      ...agent("first"),
+    const first = agent("first", [], { workroom: "review-room", seat: "reviewer" })
+    const second = agent("second", ["first"], {
       workroom: "review-room",
       seat: "reviewer"
-    } satisfies AgentNode
-    const second = {
-      ...agent("second", ["first"]),
-      workroom: "review-room",
-      seat: "reviewer"
-    } satisfies AgentNode
-    const settle = {
-      ...command("settle", ["second"]),
-      workroom: "review-room"
-    } satisfies CommandNode
+    })
+    const settle = command("settle", ["second"], "none", { workroom: "review-room" })
     const spec: WorkflowSpec = {
       ...workflow([first, second, settle]),
       presentation: {
@@ -1441,6 +1455,75 @@ describe("crank shell", () => {
     expect(finished.state.status).toBe("completed")
     expect(finished.state.workrooms["review-room"]?.status).toBe("settled")
     expect(surface.closed).toContain("pane:second:a1")
+  })
+
+  test("retries settled-room presentation from durable state after a lost effect", async () => {
+    class FlakySettlementSurface extends FakeSurface {
+      seatRenameAttempts = 0
+
+      async renamePane(paneId: string, label: string): Promise<void> {
+        if (paneId === "pane:reviewer:a1" && label === "Reviewer · settled") {
+          this.seatRenameAttempts += 1
+          if (this.seatRenameAttempts === 1) {
+            throw new Error("injected rename failure")
+          }
+        }
+        await super.renamePane(paneId, label)
+      }
+    }
+    const reviewer = agent("reviewer", [], {
+      workroom: "review-room",
+      seat: "reviewer-seat"
+    })
+    const settle = command("settle", ["reviewer"], "none", { workroom: "review-room" })
+    const downstream = command("downstream", ["settle"])
+    const spec: WorkflowSpec = {
+      ...workflow([reviewer, settle, downstream]),
+      presentation: {
+        workrooms: [
+          {
+            id: "review-room",
+            label: "Review room",
+            layout: "columns",
+            seats: [{ id: "reviewer-seat", label: "Reviewer" }],
+            settlesOn: ["settle"]
+          }
+        ]
+      }
+    }
+    const surface = new FlakySettlementSurface()
+    const started = await start(spec, surface)
+    const runDir = runDirectory(started.state.id)
+    const reviewerAttempt = started.state.nodes.reviewer?.attempts.at(-1)
+    if (reviewerAttempt === undefined) {
+      throw new Error("missing reviewer attempt")
+    }
+    await mkdir(path.dirname(reviewerAttempt.resultPath), { recursive: true })
+    await Bun.write(reviewerAttempt.resultPath, '{"clean":true}\n', { createPath: false })
+    await submitNodeDone(runDir, "reviewer", reviewerAttempt.token, "completed")
+    const afterReviewer = await reconcileRun(runDir, { surface })
+    const settleAttempt = afterReviewer.state.nodes.settle?.attempts.at(-1)
+    if (settleAttempt === undefined) {
+      throw new Error("missing settle attempt")
+    }
+
+    const afterSettlement = await crankRun(
+      runDir,
+      {
+        type: "node-exit",
+        nodeId: "settle",
+        token: settleAttempt.token,
+        code: 0,
+        error: null
+      },
+      { surface }
+    )
+
+    expect(afterSettlement.state.workrooms["review-room"]?.status).toBe("settled")
+    expect(afterSettlement.state.nodes.downstream?.status).toBe("running")
+    expect(surface.seatRenameAttempts).toBe(2)
+    expect(surface.renamed).toContainEqual(["pane:reviewer:a1", "Reviewer · settled"])
+    expect(surface.closed).not.toContain("pane:reviewer:a1")
   })
 
   test("inherits the committed session head and pane across persistent repeat rounds", async () => {

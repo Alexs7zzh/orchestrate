@@ -9,10 +9,12 @@ Use Orchestrate only when the task is materially clearer or safer as an explicit
 
 ## Workflow
 
-1. Run `orchestrate doctor`; it verifies herdr, the provider commands, state access, and the
+1. Run `orchestrate doctor`; it verifies Herdr, the provider commands, state access, and the
    installed build. Stop and report if anything is unhealthy.
 2. Inspect project instructions and the current working tree before designing writes.
-3. Write a complete workflow JSON document using `references/workflow.schema.json`.
+3. Start from the validated patterns in `references/examples.md` and the semantic rules in
+   `references/workflow-format.md`. Consult `references/workflow.schema.json` only when exact
+   structural detail is needed.
 4. Declare every dependency, input, workspace, write pattern, exclusive resource, permission,
    retry, gate, session relationship, repeat, presentation workroom, and execution limit explicitly.
 5. Prefer concurrency 3. It limits simultaneous active node attempts and is a human-attention budget.
@@ -33,26 +35,13 @@ Use Orchestrate only when the task is materially clearer or safer as an explicit
 10. When a gate, round limit, fuse, write conflict, hold, failure, or revision needs judgment,
     explain the exact decision and use the dedicated command. Approval is always digest-bound.
 
-## Design rules
+## Authoring invariants
 
 - Keep the graph static. If downstream work is unknowable, add a planner that emits
   schema-validated JSON and put an approval gate on the executor that consumes it.
-- Use optional `presentation.workrooms` when several ordered agent turns should occupy stable
-  human-facing seats. Declare one to four ordered seats and non-repeat `settlesOn` nodes downstream
-  of all room work. Assign `workroom` plus `seat` to participant agents; assign only `workroom` to
-  supporting seatless work. Nodes sharing a seat must be totally dependency-ordered, and a resumed
-  or forked provider session must keep its source workroom and seat.
-- Seatful nodes bypass ordinary matcher-selected tab/split placement but inherit
-  `placement.workspace`. Retries and repeat instances reuse the seat; a false `when` creates no
-  pane and does not touch it. Active seats park until every settlement anchor completes or is
-  scheduler-skipped, then the normal agent completion preference archives or closes the room.
-  Command nodes remain seatless transient Herdr panes. Workrooms do not provide automatic fresh
-  session fallback or alias rebinding.
-- Use `session.saveAs` and `session.from` only for intentional provider lineage. A fork preserves
-  the source and creates a new session; resume continues the source. A repeat may resume an
-  unconditional alias seeded outside the repeat when every consumer of that alias is dependency-
-  ordered. Orchestrate executes those repeated resumes as copy-on-write forks and promotes the
-  alias only after schema-valid success, so failed retries cannot poison later rounds.
+- Use `session.saveAs` and `session.from` only for intentional provider lineage. Fork for fan-out;
+  resume for one dependency-ordered continuation. Persistent repeat sessions must resume an
+  unconditional alias seeded outside the repeat.
 - Use `shared` only for safe shared access, `existing` for an explicit directory, and
   `git-worktree` for isolated Git writes. Set `removeOnClean` deliberately.
 - Declare the narrowest honest `workspace.writes` and all exclusive external resources. Never use
@@ -65,48 +54,43 @@ Use Orchestrate only when the task is materially clearer or safer as an explicit
 - Set execution and escalation separately. Use `escalation: "deny"` for unattended nodes so an
   out-of-policy action fails instead of opening a human approval dialog. Use `ask-user` only when
   the approved workflow intentionally requires live human approvals.
-- Do not add Orchestrate state paths to `workspace.writes` or provider arguments. Agent panes
-  automatically receive write access only to a token-addressed attempt submission directory outside
-  authoritative run state. `node-done` writes an envelope there; the launching master validates and
-  commits it with `reconcile`, then schedules newly ready work. Use `node-done --hold` to submit
-  `completed` with a separate downstream hold for one reconciliation transaction.
+- Do not add Orchestrate state paths or installed control assets to `workspace.writes` or provider
+  arguments. The runtime supplies the exact completion channel automatically.
 - Keep every mutating provider cwd, workspace path, sandbox root, and write prefix disjoint from
   Orchestrate state and installed control assets in both ancestor directions. For repeat Git
   worktrees, include `{{nodeId}}` in both the branch and any explicit path.
 - Express iteration as a `repeat`: ordered members, a bounded `maxRounds`, and an objective
   `until` condition — a command's success or a named field in a verdict node's JSON result. Never
-  unroll rounds into copied nodes; declared repeats keep execution and presentation semantics
-  aligned. The board also folds exact connected copies from legacy workflows into one active-round
-  body with a loop-back footer, but that display compatibility does not add runtime repeat semantics.
+  unroll rounds into copied nodes. Use `{{round}}` only when a repeat prompt must name its round.
   A repeat-member `when` binds to the source in the same round and is reevaluated in every round;
-  the verdict member must remain unconditional. Use `{{round}}` in a repeat agent prompt when its
-  terse directive must name the instantiated round. Round extensions and acceptance are explicit
-  human decisions.
+  the verdict member must remain unconditional. Round extensions and acceptance are explicit human
+  decisions.
+- Use optional `presentation.workrooms` for stable human-facing review seats. Seatful nodes name a
+  workroom and seat; seatless supporting nodes may name only the workroom. Nodes sharing a seat must
+  be dependency-ordered, and every settlement anchor must be a non-repeat node downstream of every
+  other workroom node. Workrooms add no dependency edges or permission/session authority, but they
+  constrain validation, revision, and seat launch ordering.
 - Holds control dependency release. Pausing prevents new panes but lets running panes finish.
   Stopping closes live panes and settles the run.
-- A human pause or stop does not prompt the launching agent. Completion, exhausted failure, gates,
-  downstream holds set at completion, revisions, fuses, and round limits do.
 - Do not infer permission to commit, publish, deploy, send messages, or mutate systems outside the
   user-approved workflow.
 
 ## Preferences and setup
 
-Use `orchestrate setup` for the staged CLI, this skill, and the required herdr plugin. Link/unlink
-failure makes setup/removal fail, and `doctor` reports a missing registration as unhealthy. Use `ui show --origin`
-before changing UI behavior. Project preferences override global preferences, which override
-built-in defaults. Node `placement.workspace` selects `dedicated` or `origin` independently from
-the ordered tab/split rules; a missing live origin falls back to the dedicated run workspace.
-`ORCHESTRATE_DISABLE_PREFS=1` disables preference reads and writes.
+Use `orchestrate setup` for the staged CLI, this skill, and the required Herdr plugin. Inspect UI
+preference origins with `ui show --origin` before changing them. The effective UI
+`placement.workspace` preference selects `dedicated` or `origin` independently from ordered
+tab/split rules; it is not a workflow-node field.
 
-Use `ORCHESTRATE_DISABLE_UI=1` only to suppress presentation. Node execution still requires herdr.
-For a named herdr remote, verify that checkout, provider commands, executable path, and state path
+Use `ORCHESTRATE_DISABLE_UI=1` only to suppress presentation. Node execution still requires Herdr.
+For a named Herdr remote, verify that checkout, provider commands, executable path, and state path
 are all reachable from that remote before starting.
 
-## References
+## Reference routing
 
-- `references/workflow.schema.json`
-- `references/guarantees.md`
-- `references/workflow-format.md`
-- `references/runtime-operations.md`
-- `references/cli-spec.md`
-- `references/examples.md`
+- Start or adapt a workflow: `references/examples.md`.
+- Author fields and cross-field semantics: `references/workflow-format.md`.
+- Look up exact generated structure: `references/workflow.schema.json`.
+- Operate or recover a run: `references/runtime-operations.md`.
+- Resolve a reliability or ownership question: `references/guarantees.md`.
+- Check exact commands, JSON, or exit codes: `references/cli-spec.md`.

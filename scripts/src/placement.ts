@@ -39,7 +39,6 @@ export interface PlacementResolution {
   /** Workspace destination, independent of the ordered node surface rule. */
   readonly workspace: UiPreferences["placement"]["workspace"]
   readonly surface: "tab" | "split"
-  readonly matchedRuleIndex: number
   /** Stable, run-scoped identity recorded in PaneReference.group. */
   readonly group: string
   /** Human-facing tab label. */
@@ -49,7 +48,7 @@ export interface PlacementResolution {
   readonly anchorPane: PaneReference | null
   /** An existing pane whose UI slot should be replaced by this attempt. */
   readonly reusePane: PaneReference | null
-  readonly splitDirection?: "right" | "down"
+  readonly splitDirection: "right" | "down"
   /** Durable logical-room identity used to verify live Herdr occupancy before reuse. */
   readonly workroom?: {
     readonly id: string
@@ -243,6 +242,10 @@ export function placementGroupKey(runId: string, baseGroup: string, ordinal: num
   return `orchestrate/${encodedSegment(runId)}/${encodedSegment(baseGroup)}/${ordinal}`
 }
 
+export function workroomPlacementGroupKey(runId: string, workroomId: string): string {
+  return `orchestrate/${encodedSegment(runId)}/workroom/${encodedSegment(workroomId)}/1`
+}
+
 function groupLabel(baseGroup: string, ordinal: number): string {
   return ordinal === 1 ? baseGroup : `${baseGroup} ${ordinal}`
 }
@@ -290,8 +293,11 @@ export function resolvePlacement(
 ): PlacementResolution {
   if (context.workroom !== null && context.workroom !== undefined) {
     const declared = context.workroom
-    const group = placementGroupKey(context.runId, declared.id, 1)
-    const reusePane = context.retryPane ?? declared.seatPane ?? context.sessionPane
+    const group = workroomPlacementGroupKey(context.runId, declared.id)
+    // A declared seat is the durable presentation owner. If occupancy recovery
+    // cleared it, the session source may still reference the same vanished pane;
+    // do not resurrect that stale placement through conversational lineage.
+    const reusePane = context.retryPane ?? declared.seatPane
     const anchorPane = declared.anchorPane
     return {
       workspace: preferences.placement.workspace,
@@ -299,7 +305,6 @@ export function resolvePlacement(
         anchorPane !== null
           ? "split"
           : (reusePane?.surface ?? (declared.seatIndex === 0 ? "tab" : "split")),
-      matchedRuleIndex: -1,
       group,
       groupLabel: declared.label,
       groupOrdinal: 1,
@@ -340,7 +345,6 @@ export function resolvePlacement(
     return {
       workspace: preferences.placement.workspace,
       surface: rule.surface,
-      matchedRuleIndex,
       group: context.retryPane.group,
       groupLabel: groupLabel(baseGroup, ordinal),
       groupOrdinal: ordinal,
@@ -355,7 +359,6 @@ export function resolvePlacement(
     return {
       workspace: preferences.placement.workspace,
       surface: "tab",
-      matchedRuleIndex,
       group,
       groupLabel: baseGroup,
       groupOrdinal: 1,
@@ -374,7 +377,6 @@ export function resolvePlacement(
   return {
     workspace: preferences.placement.workspace,
     surface: "split",
-    matchedRuleIndex,
     group: target.group,
     groupLabel: groupLabel(baseGroup, target.ordinal),
     groupOrdinal: target.ordinal,

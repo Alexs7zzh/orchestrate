@@ -17,6 +17,14 @@ import type {
 } from "./types.js"
 
 import { diffState } from "./state-patch.js"
+import { hasResolvedHistory } from "./state.js"
+import {
+  abortWorkrooms,
+  initialWorkrooms,
+  refreshWorkroomSettlement,
+  updateWorkroomSeat,
+  updateWorkroomSeatAfterFailure
+} from "./workroom-state.js"
 
 export interface PreparedNode {
   readonly token: string
@@ -53,10 +61,6 @@ interface EventOptions {
 
 const TERMINAL_NODE_STATUSES = new Set(["completed", "skipped", "failed", "cancelled"])
 const RELEASING_NODE_STATUSES = new Set(["completed", "skipped"])
-
-function hasResolvedHistory(node: NodeRunState): boolean {
-  return node.attempts.length > 0 || node.status === "skipped"
-}
 
 function sameNodeExceptWhen(before: WorkflowNode, after: WorkflowNode): boolean {
   const { when: _beforeWhen, ...beforeRest } = before
@@ -178,118 +182,6 @@ function workroomMap(workflow: WorkflowSpec) {
   return new Map(
     (workflow.presentation?.workrooms ?? []).map((workroom) => [workroom.id, workroom])
   )
-}
-
-function initialWorkrooms(workflow: WorkflowSpec): RunState["workrooms"] {
-  return Object.fromEntries(
-    (workflow.presentation?.workrooms ?? []).map((workroom) => [
-      workroom.id,
-      {
-        id: workroom.id,
-        status: "pending" as const,
-        workspaceId: null,
-        tabId: null,
-        seats: Object.fromEntries(
-          workroom.seats.map((seat) => [
-            seat.id,
-            {
-              id: seat.id,
-              status: "empty" as const,
-              nodeId: null,
-              pane: null
-            }
-          ])
-        )
-      }
-    ])
-  )
-}
-
-function updateSeat(
-  state: RunState,
-  workflow: WorkflowSpec,
-  node: NodeRunState,
-  status: "running" | "parked" | "attention",
-  pane?: AttemptState["pane"]
-): RunState {
-  const template = templateMap(workflow).get(node.templateId)
-  if (template?.workroom === undefined || template.seat === undefined) {
-    return state
-  }
-  const workroom = state.workrooms[template.workroom]
-  const seat = workroom?.seats[template.seat]
-  if (workroom === undefined || seat === undefined) {
-    throw new Error(
-      `Node "${node.id}" cannot resolve seat "${template.seat}" in workroom "${template.workroom}".`
-    )
-  }
-  const nextPane = pane === undefined ? seat.pane : pane
-  return {
-    ...state,
-    workrooms: {
-      ...state.workrooms,
-      [workroom.id]: {
-        ...workroom,
-        status: workroom.status === "settled" ? "settled" : "active",
-        workspaceId: nextPane?.workspaceId ?? workroom.workspaceId,
-        tabId: nextPane?.tabId ?? workroom.tabId,
-        seats: {
-          ...workroom.seats,
-          [seat.id]: {
-            ...seat,
-            status,
-            nodeId: node.id,
-            pane: nextPane
-          }
-        }
-      }
-    }
-  }
-}
-
-function refreshWorkroomSettlement(state: RunState, workflow: WorkflowSpec): RunState {
-  let updated: Record<string, RunState["workrooms"][string]> | null = null
-  for (const spec of workflow.presentation?.workrooms ?? []) {
-    const workroom = (updated ?? state.workrooms)[spec.id]
-    if (workroom === undefined || workroom.status === "settled" || workroom.status === "aborted") {
-      continue
-    }
-    if (
-      !spec.settlesOn.every((id) => {
-        const anchor = state.nodes[id]
-        return anchor !== undefined && RELEASING_NODE_STATUSES.has(anchor.status)
-      })
-    ) {
-      continue
-    }
-    updated ??= { ...state.workrooms }
-    updated[spec.id] = {
-      ...workroom,
-      status: "settled",
-      seats: Object.fromEntries(
-        Object.entries(workroom.seats).map(([id, seat]) => [
-          id,
-          {
-            ...seat,
-            status: seat.pane === null ? ("empty" as const) : ("parked" as const)
-          }
-        ])
-      )
-    }
-  }
-  return updated === null ? state : { ...state, workrooms: updated }
-}
-
-function abortWorkrooms(state: RunState): RunState {
-  return {
-    ...state,
-    workrooms: Object.fromEntries(
-      Object.entries(state.workrooms).map(([id, workroom]) => [
-        id,
-        workroom.status === "settled" ? workroom : { ...workroom, status: "aborted" as const }
-      ])
-    )
-  }
 }
 
 function repeatForTemplate(workflow: WorkflowSpec, templateId: string): RepeatSpec | undefined {
@@ -675,9 +567,22 @@ export function transition(
   }
 
   const failRun = (message: string): void => {
+    const settledSeatPaneIds = new Set(
+      Object.values(state.workrooms).flatMap((workroom) =>
+        workroom.status !== "settled"
+          ? []
+          : Object.values(workroom.seats).flatMap((seat) =>
+              seat.pane === null ? [] : [seat.pane.paneId]
+            )
+      )
+    )
     const paneIds = new Set(
       Object.values(state.nodes).flatMap((node) =>
-        node.attempts.flatMap((attempt) => (attempt.pane === null ? [] : [attempt.pane.paneId]))
+        node.attempts.flatMap((attempt) =>
+          attempt.pane === null || settledSeatPaneIds.has(attempt.pane.paneId)
+            ? []
+            : [attempt.pane.paneId]
+        )
       )
     )
     for (const paneId of paneIds) {
@@ -744,7 +649,7 @@ export function transition(
               ? current.spawnIntents
               : removeKeys(current.spawnIntents, new Set([removeIntentId]))
         }
-        return updateSeat(failed, workflow, node, "attention", clearSeatPane ? null : undefined)
+        return updateWorkroomSeatAfterFailure(failed, workflow, node, clearSeatPane)
       },
       { nodeId: node.id, data: { attempt: attempt.attempt, exitCode } }
     )
@@ -1042,6 +947,12 @@ export function transition(
     case "reconcile": {
       break
     }
+    case "ui-degraded": {
+      emit("ui.degraded", event.reason, (current) => current, {
+        data: { reason: event.reason }
+      })
+      break
+    }
     case "node-done": {
       const node = state.nodes[event.nodeId]
       if (node === undefined) {
@@ -1123,7 +1034,7 @@ export function transition(
             sessions
           }
           return refreshWorkroomSettlement(
-            updateSeat(withSessions, workflow, node, "parked"),
+            updateWorkroomSeat(withSessions, workflow, node, "parked"),
             workflow
           )
         },
@@ -1180,7 +1091,7 @@ export function transition(
         `Node "${node.id}" exited with code ${event.code}.`,
         (current) =>
           refreshWorkroomSettlement(
-            updateSeat(
+            updateWorkroomSeat(
               replaceNode(current, {
                 ...node,
                 status: "completed",
@@ -1243,7 +1154,7 @@ export function transition(
               [intent.id]: { ...intent, status: "spawned" as const }
             }
           }
-          return updateSeat(started, workflow, node, "running", event.pane)
+          return updateWorkroomSeat(started, workflow, node, "running", event.pane)
         },
         { nodeId: node.id, data: { attempt: attempt.attempt, intentId: intent.id } }
       )
@@ -1289,8 +1200,15 @@ export function transition(
       emit(
         "workroom.attention",
         `Workroom "${template.workroom}" seat "${template.seat}" needs Herdr occupancy attention before node "${node.id}" can start.`,
-        (current) => updateSeat(current, workflow, node, "attention"),
-        { nodeId: node.id, data: { intentId: intent.id } }
+        (current) => updateWorkroomSeat(current, workflow, node, "attention"),
+        {
+          nodeId: node.id,
+          data: {
+            intentId: intent.id,
+            workroomId: template.workroom,
+            seatId: template.seat
+          }
+        }
       )
       break
     }
@@ -1534,6 +1452,7 @@ export function transition(
       if (!same(workflow.repeats, revised.repeats)) {
         throw new Error("Revision changes the repeat contract of an active run.")
       }
+      const oldTemplates = templateMap(workflow)
       const currentWorkrooms = workroomMap(workflow)
       const revisedWorkrooms = workroomMap(revised)
       const reservedWorkrooms = new Set(
@@ -1541,7 +1460,7 @@ export function transition(
           if (node.attempts.length === 0) {
             return []
           }
-          const workroom = templateMap(workflow).get(node.templateId)?.workroom
+          const workroom = oldTemplates.get(node.templateId)?.workroom
           return workroom === undefined ? [] : [workroom]
         })
       )
@@ -1553,7 +1472,6 @@ export function transition(
           throw new Error(`Revision changes already-opened or reserved workroom "${workroom.id}".`)
         }
       }
-      const oldTemplates = templateMap(workflow)
       const revisedTemplates = templateMap(revised)
       const pausedConditionTarget =
         state.pause?.kind === "condition" && state.pause.conditionNodeId !== undefined
@@ -1730,7 +1648,7 @@ export function transition(
     }
   }
 
-  if (context?.deferScheduling !== true) {
+  if (event.type !== "ui-degraded" && context?.deferScheduling !== true) {
     schedule()
   }
   return { workflow, state, actions, events }

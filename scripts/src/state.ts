@@ -529,14 +529,23 @@ export function holdBlocksDependencies(state: RunState, hold: HoldState): boolea
   )
 }
 
+export function hasResolvedHistory(node: RunState["nodes"][string]): boolean {
+  return node.attempts.length > 0 || node.status === "skipped"
+}
+
 export function runNeedsAttention(state: RunState): boolean {
+  if (state.status === "completed" || state.status === "stopped") {
+    return false
+  }
   return (
     state.status === "paused" ||
     state.status === "failed" ||
     state.pendingRevision !== null ||
     Object.values(state.nodes).some((node) => node.status === "awaiting-approval") ||
-    Object.values(state.workrooms).some((workroom) =>
-      Object.values(workroom.seats).some((seat) => seat.status === "attention")
+    Object.values(state.workrooms).some(
+      (workroom) =>
+        workroom.status === "active" &&
+        Object.values(workroom.seats).some((seat) => seat.status === "attention")
     ) ||
     Object.values(state.holds).some((hold) => holdBlocksDependencies(state, hold)) ||
     Object.values(state.repeats).some((repeat) => repeat.status === "max-rounds")

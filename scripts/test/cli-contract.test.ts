@@ -13,9 +13,12 @@ import {
   jsonError,
   runCli,
   setWatchInstalledHookForTests,
+  statusText,
+  statusValue,
   structuralDiff,
   watchBeforeScan
 } from "../src/cli.js"
+import { createInitialRunState } from "../src/transition.js"
 
 const COMMANDS = [
   "validate",
@@ -156,6 +159,122 @@ describe("CLI contract", () => {
     ).toEqual(["~ presentation"])
   })
 
+  test("terminal status text does not offer stale recovery commands", () => {
+    const workflow: WorkflowSpec = {
+      name: "terminal-status",
+      objective: "Do not offer terminal actions.",
+      cwd: "/tmp",
+      concurrency: 1,
+      callback: { type: "none" },
+      milestones: false,
+      limits: { maxStarts: null },
+      writeConflicts: "reject",
+      presentation: {
+        workrooms: [
+          {
+            id: "review",
+            label: "Review",
+            layout: "columns",
+            seats: [{ id: "reviewer", label: "Reviewer" }],
+            settlesOn: ["build"]
+          }
+        ]
+      },
+      repeats: [],
+      nodes: [
+        {
+          id: "build",
+          type: "agent",
+          title: "Build",
+          needs: [],
+          workroom: "review",
+          seat: "reviewer",
+          cwd: null,
+          workspace: {
+            mode: "shared",
+            path: null,
+            vcs: "none",
+            writes: [],
+            exclusiveResources: []
+          },
+          inputs: [],
+          retry: { maxAttempts: 1 },
+          gate: "none",
+          provider: "codex",
+          model: "provider-default",
+          effort: null,
+          prompt: "Build.",
+          session: { mode: "fresh", from: null, saveAs: null },
+          permissions: {
+            execution: { sandbox: "read-only" },
+            escalation: "deny",
+            extraArgs: [],
+            inheritEnv: [],
+            env: {}
+          },
+          output: { format: "text", schema: null }
+        }
+      ]
+    }
+    const initial = createInitialRunState(workflow, {
+      id: "terminal-run",
+      runtimeVersion: "test-build",
+      digest: "workflow-digest",
+      now: "2026-08-05T00:00:00.000Z",
+      origin: null
+    })
+    const build = initial.nodes.build
+    const review = initial.workrooms.review
+    const reviewer = review?.seats.reviewer
+    if (build === undefined || review === undefined || reviewer === undefined) {
+      throw new Error("Expected the test workflow state to contain its node and workroom seat.")
+    }
+    const stopped = {
+      ...initial,
+      status: "stopped" as const,
+      pause: {
+        kind: "condition" as const,
+        message: "A stale condition message.",
+        repeatId: null,
+        createdAt: initial.updatedAt
+      },
+      pendingRevision: {
+        workflow,
+        digest: "revision-digest",
+        summary: ["stale revision"],
+        createdAt: initial.updatedAt
+      },
+      nodes: { build: { ...build, status: "completed" as const } },
+      holds: { build: { target: "build", scope: "instance" as const, setAt: initial.updatedAt } },
+      workrooms: {
+        review: {
+          ...review,
+          status: "active" as const,
+          seats: {
+            reviewer: {
+              ...reviewer,
+              status: "attention" as const,
+              nodeId: "build"
+            }
+          }
+        }
+      }
+    }
+
+    const text = statusText(stopped)
+    expect(text).not.toContain("Needs you:")
+    for (const command of [
+      "orchestrate approve",
+      "orchestrate resume",
+      "orchestrate release",
+      "orchestrate reconcile",
+      "orchestrate node-done"
+    ]) {
+      expect(text).not.toContain(command)
+    }
+    expect(statusValue({ ...initial, status: "failed" }).needsAttention).toBe(true)
+  })
+
   test("previews the workroom floor plan and authoritative seat assignments", async () => {
     const temporary = await mkdtemp(path.join(os.tmpdir(), "orchestrate-preview-workrooms-"))
     const file = path.join(temporary, "workflow.json")
@@ -193,8 +312,8 @@ describe("CLI contract", () => {
             mode: "shared",
             path: null,
             vcs: "none",
-            writes: [],
-            exclusiveResources: []
+            writes: ["src/**"],
+            exclusiveResources: ["release-slot"]
           },
           inputs: [],
           retry: { maxAttempts: 1 },
@@ -209,7 +328,7 @@ describe("CLI contract", () => {
             escalation: "deny",
             extraArgs: [],
             inheritEnv: [],
-            env: {}
+            env: { REVIEW_CHANNEL: "private-value" }
           },
           output: { format: "text", schema: null }
         }
@@ -219,9 +338,9 @@ describe("CLI contract", () => {
       await Bun.write(file, `${JSON.stringify(spec)}\n`)
       const json = await capture(() => runCli(["preview", file, "--json"]))
       expect(json.code).toBe(0)
-      expect(JSON.parse(json.output)).toMatchObject({
+      const parsed = JSON.parse(json.output)
+      expect(parsed).toMatchObject({
         floorPlan: {
-          activeSeatsOverrideCloseSuccess: true,
           workrooms: [
             {
               id: "delivery",
@@ -233,9 +352,13 @@ describe("CLI contract", () => {
         },
         nodes: [{ id: "build", workroom: "delivery", seat: "builder" }]
       })
+      expect(parsed.nodes[0].permissions).not.toHaveProperty("env")
+      expect(json.output).not.toContain("private-value")
       const plain = await capture(() => runCli(["preview", file]))
       expect(plain.output).toContain("Floor plan:")
-      expect(plain.output).toContain("Active seats override close-success: true")
+      expect(plain.output).toContain(
+        "Seat panes stay parked while active; settled panes follow completed-pane preferences."
+      )
       expect(plain.output).toContain(
         'delivery "Delivery\\nforged room" layout=columns settlesOn=build'
       )
@@ -243,6 +366,10 @@ describe("CLI contract", () => {
       expect(plain.output).not.toContain("Delivery\nforged room")
       expect(plain.output).not.toContain("Builder\nforged seat")
       expect(plain.output).toContain("workroom=delivery seat=builder")
+      expect(plain.output).toContain(
+        'workspace=shared path=null writes=["src/**"] exclusiveResources=["release-slot"] envKeys=["REVIEW_CHANNEL"]'
+      )
+      expect(plain.output).not.toContain("private-value")
     } finally {
       await rm(temporary, { recursive: true, force: true })
     }

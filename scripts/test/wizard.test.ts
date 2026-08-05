@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 
-import type { NodeRunState, UiPreferenceLayer, WorkflowSpec } from "../src/types.js"
+import type { NodeRunState, WorkflowSpec } from "../src/types.js"
 
 import { EVENT_SEVERITIES } from "../src/notifications.js"
 import { nearestRootAncestor, placementBaseGroup } from "../src/placement.js"
@@ -25,6 +25,7 @@ import {
   type PlacementChoices,
   type WizardIo,
   type WizardKey,
+  type WizardPreferencePatch,
   type WizardSelections
 } from "../src/wizard.js"
 
@@ -46,28 +47,6 @@ const DEFAULT_SELECTIONS: WizardSelections = {
 }
 
 const SUB_NODE_MATCHER = { ...MATCHER, id: "*--*" } as const
-
-/** The layer the pre-wizard cli.ts implementation wrote for equivalent answers. */
-function legacyWizardLayer(
-  board: UiPreferenceLayer["board"],
-  surface: "tab" | "split",
-  workspace: "dedicated" | "origin",
-  milestone: "herdr" | "board" | "silent"
-): UiPreferenceLayer {
-  return {
-    board,
-    placement: {
-      workspace,
-      rules: [{ match: MATCHER, surface }],
-      grouping: { by: "root-ancestor" },
-      maxSplitsPerTab: 4
-    },
-    completedPanes: { agent: "keep-open", command: "close-success" },
-    focus: "attention",
-    continuation: { rules: [{ match: MATCHER, autoContinue: true }] },
-    notifications: { attention: "herdr", milestone, progress: "board" }
-  }
-}
 
 function stripAnsi(text: string): string {
   return Object.values(ANSI).reduce((stripped, code) => stripped.replaceAll(code, ""), text)
@@ -99,14 +78,14 @@ function scriptedIo(keys: readonly WizardKey[]): {
 }
 
 function captureApply(): {
-  calls: { layer: UiPreferenceLayer; project: string | null }[]
-  apply: (layer: UiPreferenceLayer, project: string | null) => Promise<unknown>
+  calls: { patch: WizardPreferencePatch; project: string | null }[]
+  apply: (patch: WizardPreferencePatch, project: string | null) => Promise<unknown>
 } {
-  const calls: { layer: UiPreferenceLayer; project: string | null }[] = []
+  const calls: { patch: WizardPreferencePatch; project: string | null }[] = []
   return {
     calls,
-    apply: (layer, project) => {
-      calls.push({ layer, project })
+    apply: (patch, project) => {
+      calls.push({ patch, project })
       return Promise.resolve(null)
     }
   }
@@ -387,30 +366,39 @@ describe("placementRulesForLayout", () => {
 })
 
 describe("wizardPlan", () => {
-  test("per-node matches the layer the previous cli wizard wrote for tab answers", () => {
+  test("per-node patch contains only the choices shown by the wizard", () => {
     const plan = wizardPlan({ ...DEFAULT_SELECTIONS, layout: "per-node" }, null)
-    expect(plan.layer).toStrictEqual(legacyWizardLayer("split-right", "tab", "origin", "herdr"))
+    expect(plan.patch).toStrictEqual({
+      board: "split-right",
+      placement: {
+        workspace: "origin",
+        rules: [{ match: MATCHER, surface: "tab" }],
+        grouping: { by: "root-ancestor" },
+        maxSplitsPerTab: 4
+      },
+      notifications: { attention: "herdr", milestone: "herdr", progress: "board" }
+    })
   })
 
   test("nested writes sub-node-split rules with id-prefix grouping", () => {
     const plan = wizardPlan(DEFAULT_SELECTIONS, null)
-    expect(plan.layer.placement?.rules).toStrictEqual([
+    expect(plan.patch.placement.rules).toStrictEqual([
       { match: SUB_NODE_MATCHER, surface: "split" },
       { match: MATCHER, surface: "tab" }
     ])
-    expect(plan.layer.placement?.grouping).toStrictEqual({ by: "id-prefix", separator: "--" })
+    expect(plan.patch.placement.grouping).toStrictEqual({ by: "id-prefix", separator: "--" })
   })
 
   test("grouped writes root-tab plus descendant-split rules with root grouping", () => {
     const plan = wizardPlan({ ...DEFAULT_SELECTIONS, layout: "grouped" }, null)
-    expect(plan.layer.placement?.rules).toStrictEqual([
+    expect(plan.patch.placement.rules).toStrictEqual([
       { match: ROOT_MATCHER, surface: "tab" },
       { match: MATCHER, surface: "split" }
     ])
-    expect(plan.layer.placement?.grouping).toStrictEqual({ by: "root-ancestor" })
+    expect(plan.patch.placement.grouping).toStrictEqual({ by: "root-ancestor" })
   })
 
-  test("keeps focus, completed panes, and continuation at the shipped defaults", () => {
+  test("does not write focus, completed panes, or continuation choices it never showed", () => {
     const plan = wizardPlan(
       {
         notifications: { attention: "board", milestone: "silent", progress: "silent" },
@@ -420,17 +408,17 @@ describe("wizardPlan", () => {
       },
       null
     )
-    expect(plan.layer.focus).toBe("attention")
-    expect(plan.layer.completedPanes).toStrictEqual({
-      agent: "keep-open",
-      command: "close-success"
-    })
-    expect(plan.layer.continuation).toStrictEqual({
-      rules: [{ match: MATCHER, autoContinue: true }]
-    })
-    expect(plan.layer.board).toBe("current-workspace")
-    expect(plan.layer.placement?.workspace).toBe("origin")
-    expect(plan.layer.notifications).toStrictEqual({
+    expect(Object.keys(plan.patch).toSorted()).toStrictEqual([
+      "board",
+      "notifications",
+      "placement"
+    ])
+    expect("focus" in plan.patch).toBe(false)
+    expect("completedPanes" in plan.patch).toBe(false)
+    expect("continuation" in plan.patch).toBe(false)
+    expect(plan.patch.board).toBe("current-workspace")
+    expect(plan.patch.placement.workspace).toBe("origin")
+    expect(plan.patch.notifications).toStrictEqual({
       attention: "board",
       milestone: "silent",
       progress: "silent"
@@ -440,19 +428,24 @@ describe("wizardPlan", () => {
   test("emits the exact ui set commands in screen order", () => {
     const plan = wizardPlan(DEFAULT_SELECTIONS, null)
     expect(plan.commands).toStrictEqual([
-      `orchestrate ui set placement.workspace '"origin"'`,
-      `orchestrate ui set placement.rules '[{"match":{"type":"any","provider":"any","level":"any","origin":"any","id":"*--*"},"surface":"split"},{"match":{"type":"any","provider":"any","level":"any","origin":"any","id":"*"},"surface":"tab"}]'`,
-      `orchestrate ui set placement.grouping '{"by":"id-prefix","separator":"--"}'`,
       `orchestrate ui set board '"split-right"'`,
+      `orchestrate ui set placement '{"workspace":"origin","rules":[{"match":{"type":"any","provider":"any","level":"any","origin":"any","id":"*--*"},"surface":"split"},{"match":{"type":"any","provider":"any","level":"any","origin":"any","id":"*"},"surface":"tab"}],"grouping":{"by":"id-prefix","separator":"--"},"maxSplitsPerTab":4}'`,
       `orchestrate ui set notifications '{"attention":"herdr","milestone":"herdr","progress":"board"}'`
     ])
   })
 
   test("appends --project to every command for project layers", () => {
     const plan = wizardPlan(DEFAULT_SELECTIONS, "/tmp/demo-project")
-    expect(plan.commands).toHaveLength(5)
+    expect(plan.commands).toHaveLength(3)
     for (const command of plan.commands) {
-      expect(command.endsWith(" --project /tmp/demo-project")).toBe(true)
+      expect(command.endsWith(" --project '/tmp/demo-project'")).toBe(true)
+    }
+  })
+
+  test("shell-quotes project paths in equivalent commands", () => {
+    const plan = wizardPlan(DEFAULT_SELECTIONS, "/tmp/demo project's")
+    for (const command of plan.commands) {
+      expect(command.endsWith(` --project '/tmp/demo project'"'"'s'`)).toBe(true)
     }
   })
 })
@@ -464,14 +457,14 @@ describe("runWizardWithIo", () => {
     await runWizardWithIo("/tmp/demo-project", io, apply)
     expect(calls).toHaveLength(1)
     expect(calls[0]?.project).toBe("/tmp/demo-project")
-    expect(calls[0]?.layer).toStrictEqual(wizardPlan(DEFAULT_SELECTIONS, "/tmp/demo-project").layer)
+    expect(calls[0]?.patch).toStrictEqual(wizardPlan(DEFAULT_SELECTIONS, "/tmp/demo-project").patch)
     expect(frames[0]).toContain("board (1/5)")
     expect(frames.some((frame) => frame.includes("workspace (2/5)"))).toBe(true)
     expect(frames.some((frame) => frame.includes("tabs (3/5)"))).toBe(true)
     expect(frames.some((frame) => frame.includes("notifications (4/5)"))).toBe(true)
     expect(frames.some((frame) => frame.includes("confirm (5/5)"))).toBe(true)
     expect(prints.join("")).toContain(
-      `orchestrate ui set board '"split-right"' --project /tmp/demo-project`
+      `orchestrate ui set board '"split-right"' --project '/tmp/demo-project'`
     )
   })
 
@@ -489,7 +482,9 @@ describe("runWizardWithIo", () => {
     const { io, frames } = scriptedIo(["enter", "escape"])
     await runWizardWithIo(null, io, captureApply().apply)
     const second = frames[1] ?? ""
-    expect(second).toContain("Where should the workflow itself run?")
+    expect(second).toContain("Where should run panes and workrooms appear?")
+    expect(second).toContain("Herdr UI destination only")
+    expect(second).toContain("filesystem workspace stay workflow-defined")
     expect(second).toContain("┌ herdr")
     expect(second).not.toContain("Demo workflow:")
     expect(second).not.toContain("board · release-review")
@@ -502,6 +497,8 @@ describe("runWizardWithIo", () => {
     const groupedFrame = frames[3] ?? ""
     const perNodeFrame = frames[4] ?? ""
     expect(nestedFrame).toContain("What goes into one tab?")
+    expect(nestedFrame).toContain("ordinary/seatless panes")
+    expect(nestedFrame).toContain("declared seats stay in their approved workroom")
     expect(nestedFrame).toContain("Demo workflow:")
     expect(nestedFrame).not.toContain("┌ herdr")
     expect(stripAnsi(nestedFrame)).toContain("api + splits: api--test, api--bench")
@@ -525,12 +522,12 @@ describe("runWizardWithIo", () => {
     }
     await runWizardWithIo(null, io, apply)
     expect(calls).toHaveLength(1)
-    expect(calls[0]?.layer.board).toBe("dedicated-workspace")
-    expect(calls[0]?.layer.placement?.workspace).toBe("dedicated")
+    expect(calls[0]?.patch.board).toBe("dedicated-workspace")
+    expect(calls[0]?.patch.placement.workspace).toBe("dedicated")
     const workspaceFrame = frames.find((frame) =>
-      frame.includes("Where should the workflow itself run?")
+      frame.includes("Where should run panes and workrooms appear?")
     )
-    expect(workspaceFrame).toContain("already gives each run its own workspace")
+    expect(workspaceFrame).toContain("already gives each run its own Herdr workspace")
   })
 
   test("arrow-key navigation reaches non-default answers", async () => {
@@ -551,7 +548,7 @@ describe("runWizardWithIo", () => {
     }
     await runWizardWithIo(null, io, apply)
     expect(calls).toHaveLength(1)
-    expect(calls[0]?.layer).toStrictEqual(
+    expect(calls[0]?.patch).toStrictEqual(
       wizardPlan(
         {
           notifications: { attention: "herdr", milestone: "board", progress: "silent" },
@@ -560,7 +557,7 @@ describe("runWizardWithIo", () => {
           board: "current-workspace"
         },
         null
-      ).layer
+      ).patch
     )
   })
 
@@ -584,7 +581,7 @@ describe("runWizardWithIo", () => {
     const { calls, apply } = captureApply()
     await runWizardWithIo(null, io, apply)
     expect(calls).toHaveLength(1)
-    expect(calls[0]?.layer.notifications).toStrictEqual({
+    expect(calls[0]?.patch.notifications).toStrictEqual({
       attention: "board",
       milestone: "herdr",
       progress: "silent"
@@ -592,7 +589,8 @@ describe("runWizardWithIo", () => {
     const attentionFrame = frames.find((frame) =>
       frame.includes("Where should attention events go?")
     )
-    expect(attentionFrame).toContain("an approval gate opened")
+    expect(attentionFrame).toContain("approval or revision is waiting")
+    expect(attentionFrame).toContain("workroom occupancy needs repair")
   })
 
   test("escape exits without writing anything", async () => {
@@ -636,7 +634,7 @@ describe("runWizardWithIo", () => {
       .filter(
         (line) =>
           stripAnsi(line).includes("workspace per run") ||
-          stripAnsi(line).includes("current workspace (default)")
+          stripAnsi(line).includes("current workspace (recommended)")
       )
     expect(optionLines).toHaveLength(2)
     const columns = optionLines.map((line) => stripAnsi(line).search(/\S/) + 1)
