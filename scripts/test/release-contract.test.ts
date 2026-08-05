@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, setDefaultTimeout, test } from "bun:test"
 import { spawnSync } from "node:child_process"
 import { createHash } from "node:crypto"
-import { chmod, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises"
+import { chmod, mkdir, mkdtemp, readdir, rm } from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 
@@ -82,9 +82,10 @@ beforeEach(async () => {
   shimDir = path.join(root, "bin")
   await mkdir(shimDir)
   const herdr = path.join(shimDir, "herdr")
-  await writeFile(
+  await Bun.write(
     herdr,
-    '#!/bin/sh\ncase "$1 $2" in "--version ") echo "herdr 0.7.5";; "plugin link"|"plugin unlink") exit 0;; "plugin list") echo \'{"result":{"plugins":[{"id":"orchestrate"}]}}\';; *) echo \'{"result":{"type":"ok"}}\';; esac\n'
+    '#!/bin/sh\ncase "$1 $2" in "--version ") echo "herdr 0.7.5";; "plugin link"|"plugin unlink") exit 0;; "plugin list") echo \'{"result":{"plugins":[{"id":"orchestrate"}]}}\';; *) echo \'{"result":{"type":"ok"}}\';; esac\n',
+    { createPath: false }
   )
   await chmod(herdr, 0o755)
 })
@@ -97,7 +98,7 @@ describe("release payload contract", () => {
   test("covers the exact bundle source-map closure and native OpenTUI asset notices", async () => {
     const scriptsRoot = path.resolve(import.meta.dir, "..")
     const sourceMap = JSON.parse(
-      await readFile(path.join(scriptsRoot, "orchestrate.mjs.map"), "utf8")
+      await Bun.file(path.join(scriptsRoot, "orchestrate.mjs.map")).text()
     ) as { readonly sources: readonly string[] }
     const bundled = [
       ...new Set(
@@ -117,7 +118,7 @@ describe("release payload contract", () => {
       "json-schema-traverse",
       "pure-rand"
     ])
-    const notice = await readFile(path.join(scriptsRoot, "THIRD_PARTY_LICENSES.txt"), "utf8")
+    const notice = await Bun.file(path.join(scriptsRoot, "THIRD_PARTY_LICENSES.txt")).text()
     for (const required of [
       "@opentui/core 0.4.5",
       "@opentui/core-darwin-arm64 0.4.5 native asset",
@@ -131,26 +132,22 @@ describe("release payload contract", () => {
     ]) {
       expect(notice).toContain(required)
     }
-    const coreLicense = await readFile(
-      path.join(scriptsRoot, "node_modules", "@opentui", "core", "LICENSE"),
-      "utf8"
-    )
-    const nativeLicense = await readFile(
-      path.join(scriptsRoot, "node_modules", "@opentui", "core-darwin-arm64", "LICENSE"),
-      "utf8"
-    )
+    const coreLicense = await Bun.file(
+      path.join(scriptsRoot, "node_modules", "@opentui", "core", "LICENSE")
+    ).text()
+    const nativeLicense = await Bun.file(
+      path.join(scriptsRoot, "node_modules", "@opentui", "core-darwin-arm64", "LICENSE")
+    ).text()
     expect(nativeLicense).toBe(coreLicense)
   })
 
   test("builds tags from main and creates a reviewable draft release", async () => {
-    const ciWorkflow = await readFile(
-      path.resolve(import.meta.dir, "../../.github/workflows/ci.yml"),
-      "utf8"
-    )
-    const releaseWorkflow = await readFile(
-      path.resolve(import.meta.dir, "../../.github/workflows/release.yml"),
-      "utf8"
-    )
+    const ciWorkflow = await Bun.file(
+      path.resolve(import.meta.dir, "../../.github/workflows/ci.yml")
+    ).text()
+    const releaseWorkflow = await Bun.file(
+      path.resolve(import.meta.dir, "../../.github/workflows/release.yml")
+    ).text()
     for (const workflowSource of [ciWorkflow, releaseWorkflow]) {
       expect(workflowSource).toContain('HOMEBREW_NO_AUTO_UPDATE: "1"')
       expect(workflowSource).toContain("brew install fish")
@@ -209,12 +206,12 @@ describe("release payload contract", () => {
     const output = path.join(root, "occupied-release")
     const marker = path.join(output, "keep.txt")
     await mkdir(output)
-    await writeFile(marker, "keep\n")
+    await Bun.write(marker, "keep\n", { createPath: false })
 
     await expect(
       assembleRelease({ version: "0.1.0", repository: "example/orchestrate", output })
     ).rejects.toThrow("already exists and is not empty")
-    expect(await readFile(marker, "utf8")).toBe("keep\n")
+    expect(await Bun.file(marker).text()).toBe("keep\n")
   })
 
   test("assembles, unpacks, and executes the exact compiled macOS ARM64 payload", async () => {
@@ -230,17 +227,17 @@ describe("release payload contract", () => {
     })
     const payload = path.join(artifacts.unpacked, "orchestrate")
     const binary = path.join(payload, "bin", "orchestrate")
-    const formula = await readFile(artifacts.formula, "utf8")
-    const plugin = await readFile(path.join(payload, "herdr-plugin", "herdr-plugin.toml"), "utf8")
+    const formula = await Bun.file(artifacts.formula).text()
+    const plugin = await Bun.file(path.join(payload, "herdr-plugin", "herdr-plugin.toml")).text()
     expect(await inventory(payload)).toEqual(RELEASE_PAYLOAD_FILES)
     expect(plugin).toContain('on = "pane.agent_status_changed"')
     expect(plugin).toContain('command = ["sh", "bin/orchestrate-panel", "herdr-event"]')
     expect(
       (await inventory(payload)).filter((file) => file.startsWith("references/"))
     ).toHaveLength(9)
-    const archiveBytes = await readFile(artifacts.archive)
+    const archiveBytes = await Bun.file(artifacts.archive).bytes()
     const independentlyComputed = createHash("sha256").update(archiveBytes).digest("hex")
-    const sidecar = await readFile(`${artifacts.archive}.sha256`, "utf8")
+    const sidecar = await Bun.file(`${artifacts.archive}.sha256`).text()
     expect(independentlyComputed).toBe(artifacts.sha256)
     expect(sidecar).toBe(`${independentlyComputed}  ${path.basename(artifacts.archive)}\n`)
     expect(formula).toContain(`version "${version}"`)
@@ -248,13 +245,12 @@ describe("release payload contract", () => {
     expect(formula).not.toContain("@VERSION@")
     expect(plugin).toContain(`version = "${version}"`)
     const repositoryRoot = path.resolve(import.meta.dir, "../..")
-    const sourceLicense = await readFile(path.join(repositoryRoot, "LICENSE"), "utf8")
-    const sourceNotices = await readFile(
-      path.join(repositoryRoot, "scripts", "THIRD_PARTY_LICENSES.txt"),
-      "utf8"
-    )
-    const payloadLicense = await readFile(path.join(payload, "LICENSE"), "utf8")
-    const payloadNotices = await readFile(path.join(payload, "THIRD_PARTY_LICENSES.txt"), "utf8")
+    const sourceLicense = await Bun.file(path.join(repositoryRoot, "LICENSE")).text()
+    const sourceNotices = await Bun.file(
+      path.join(repositoryRoot, "scripts", "THIRD_PARTY_LICENSES.txt")
+    ).text()
+    const payloadLicense = await Bun.file(path.join(payload, "LICENSE")).text()
+    const payloadNotices = await Bun.file(path.join(payload, "THIRD_PARTY_LICENSES.txt")).text()
     expect(payloadLicense).toBe(sourceLicense)
     expect(payloadNotices).toBe(sourceNotices)
     expect(createHash("sha256").update(payloadLicense).digest("hex")).toBe(
@@ -265,8 +261,8 @@ describe("release payload contract", () => {
     )
     const formulaPayload = path.join(root, "release", "formula-root", "libexec")
     expect(await inventory(formulaPayload)).toEqual(RELEASE_PAYLOAD_FILES)
-    expect(await readFile(path.join(formulaPayload, "LICENSE"), "utf8")).toBe(sourceLicense)
-    expect(await readFile(path.join(formulaPayload, "THIRD_PARTY_LICENSES.txt"), "utf8")).toBe(
+    expect(await Bun.file(path.join(formulaPayload, "LICENSE")).text()).toBe(sourceLicense)
+    expect(await Bun.file(path.join(formulaPayload, "THIRD_PARTY_LICENSES.txt")).text()).toBe(
       sourceNotices
     )
     expect(
@@ -287,7 +283,7 @@ describe("release payload contract", () => {
     await mkdir(cwd)
     await mkdir(home)
     const file = path.join(root, "workflow.json")
-    await writeFile(file, `${JSON.stringify(workflow(cwd), null, 2)}\n`)
+    await Bun.write(file, `${JSON.stringify(workflow(cwd), null, 2)}\n`, { createPath: false })
     expect(run(binary, ["validate", file, "--json"], home, state).status).toBe(0)
     const preview = run(binary, ["preview", file, "--json"], home, state)
     expect(preview.status).toBe(0)
@@ -298,7 +294,7 @@ describe("release payload contract", () => {
     const setup = run(binary, ["setup", "--no-wizard", "--json"], home, state)
     expect(setup.status).toBe(0)
     expect(
-      await readFile(
+      await Bun.file(
         path.join(
           home,
           ".local",
@@ -307,9 +303,8 @@ describe("release payload contract", () => {
           "current",
           "herdr-plugin",
           "herdr-plugin.toml"
-        ),
-        "utf8"
-      )
+        )
+      ).text()
     ).toContain(`version = "${version}"`)
   })
 })

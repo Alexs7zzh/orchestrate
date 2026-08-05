@@ -1,6 +1,4 @@
-import { spawnSync } from "node:child_process"
-import { createHash } from "node:crypto"
-import { chmod, cp, lstat, mkdir, readFile, readdir, symlink, writeFile } from "node:fs/promises"
+import { chmod, cp, lstat, mkdir, readdir, symlink } from "node:fs/promises"
 import path from "node:path"
 
 import { assertReleaseVersion } from "./semver.js"
@@ -47,11 +45,16 @@ function requiredEnvironment(name: string): string {
 }
 
 function run(command: string, args: readonly string[], cwd?: string): string {
-  const result = spawnSync(command, args, { cwd, encoding: "utf8" })
-  if (result.status !== 0) {
-    throw new Error(`${command} ${args.join(" ")} failed: ${result.stderr.trim()}`)
+  const result = Bun.spawnSync([command, ...args], {
+    ...(cwd === undefined ? {} : { cwd }),
+    env: process.env,
+    stdio: ["ignore", "pipe", "pipe"]
+  })
+  const stderr = new TextDecoder().decode(result.stderr)
+  if (!result.success) {
+    throw new Error(`${command} ${args.join(" ")} failed: ${stderr.trim()}`)
   }
-  return result.stdout
+  return new TextDecoder().decode(result.stdout)
 }
 
 export interface ReleaseArtifacts {
@@ -110,11 +113,11 @@ export async function assembleRelease(options: {
     path.join(payload, "THIRD_PARTY_LICENSES.txt")
   )
   const pluginPath = path.join(payload, "herdr-plugin", "herdr-plugin.toml")
-  const plugin = (await readFile(pluginPath, "utf8")).replace(
+  const plugin = (await Bun.file(pluginPath).text()).replace(
     /^version = ".*"$/m,
     `version = "${version}"`
   )
-  await writeFile(pluginPath, plugin)
+  await Bun.write(pluginPath, plugin, { createPath: false, mode: 0o644 })
   const inventory = await payloadFiles(payload)
   if (JSON.stringify(inventory) !== JSON.stringify(RELEASE_PAYLOAD_FILES)) {
     throw new Error(`Release payload inventory mismatch: ${JSON.stringify(inventory)}.`)
@@ -126,7 +129,7 @@ export async function assembleRelease(options: {
       path.join(payload, "THIRD_PARTY_LICENSES.txt")
     ]
   ] as const) {
-    if ((await readFile(source, "utf8")) !== (await readFile(staged, "utf8"))) {
+    if ((await Bun.file(source).text()) !== (await Bun.file(staged).text())) {
       throw new Error(`Release notice ${path.basename(staged)} does not match its source.`)
     }
   }
@@ -138,20 +141,23 @@ export async function assembleRelease(options: {
     throw new Error("Staged plugin version does not match the release version.")
   }
   run("tar", ["-C", stageRoot, "-czf", archive, "orchestrate"])
-  const sha256 = createHash("sha256")
-    .update(await readFile(archive))
+  const sha256 = new Bun.CryptoHasher("sha256")
+    .update(await Bun.file(archive).bytes())
     .digest("hex")
-  await writeFile(`${archive}.sha256`, `${sha256}  ${path.basename(archive)}\n`)
-  const template = await readFile(
-    path.join(repositoryRoot, "distribution", "orchestrate.rb.in"),
-    "utf8"
-  )
-  await writeFile(
+  await Bun.write(`${archive}.sha256`, `${sha256}  ${path.basename(archive)}\n`, {
+    createPath: false,
+    mode: 0o644
+  })
+  const template = await Bun.file(
+    path.join(repositoryRoot, "distribution", "orchestrate.rb.in")
+  ).text()
+  await Bun.write(
     formula,
     template
       .replaceAll("@VERSION@", version)
       .replaceAll("@SHA256@", sha256)
-      .replaceAll("@REPOSITORY@", options.repository)
+      .replaceAll("@REPOSITORY@", options.repository),
+    { createPath: false, mode: 0o644 }
   )
   await mkdir(unpacked, { recursive: true })
   run("tar", ["-C", unpacked, "-xzf", archive])

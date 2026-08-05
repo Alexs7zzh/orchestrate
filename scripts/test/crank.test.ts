@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test"
-import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises"
+import { chmod, mkdir, mkdtemp, rm, symlink } from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 
@@ -156,7 +156,7 @@ class FakeSurface implements CrankSurface {
     const attempt = request.state.nodes[request.intent.nodeId]?.attempts.at(-1)
     if (attempt !== undefined) {
       await mkdir(path.dirname(attempt.outputPath), { recursive: true })
-      await writeFile(attempt.outputPath, "")
+      await Bun.write(attempt.outputPath, "", { createPath: false })
     }
     const pane: PaneReference = {
       workspaceId: "workspace",
@@ -240,7 +240,7 @@ describe("crank shell", () => {
 
     const firstToken = started.state.nodes.first?.attempts.at(-1)?.token as string
     const firstOutput = started.state.nodes.first?.attempts.at(-1)?.outputPath as string
-    await writeFile(firstOutput, "first output\n")
+    await Bun.write(firstOutput, "first output\n", { createPath: false })
     const afterFirst = await crankRun(
       runDirectory(started.state.id),
       {
@@ -425,8 +425,8 @@ describe("crank shell", () => {
     const runDir = runDirectory(started.state.id)
     await mkdir(path.dirname(reviewAttempt.resultPath), { recursive: true })
     await mkdir(path.dirname(independentAttempt.resultPath), { recursive: true })
-    await writeFile(reviewAttempt.resultPath, '{"clean":"not-boolean"}\n')
-    await writeFile(independentAttempt.resultPath, '{"clean":true}\n')
+    await Bun.write(reviewAttempt.resultPath, '{"clean":"not-boolean"}\n', { createPath: false })
+    await Bun.write(independentAttempt.resultPath, '{"clean":true}\n', { createPath: false })
     await submitNodeDone(runDir, "review", reviewAttempt.token, "completed")
     await submitNodeDone(runDir, "independent", independentAttempt.token, "completed")
     await expect(reconcileRun(runDir, { surface })).rejects.toThrow(
@@ -439,7 +439,7 @@ describe("crank shell", () => {
       await reconcileRun(runDir, { surface }).catch((error: unknown) => String(error))
     ).toContain(completionSubmissionPath(reviewAttempt.resultPath))
 
-    await writeFile(reviewAttempt.resultPath, '{"clean":true}\n')
+    await Bun.write(reviewAttempt.resultPath, '{"clean":true}\n', { createPath: false })
     const finished = await reconcileRun(runDir, { surface })
     expect(finished.state.status).toBe("completed")
     expect(finished.state.nodes.review?.result).toEqual({ clean: true })
@@ -453,7 +453,7 @@ describe("crank shell", () => {
       throw new Error("missing attempt")
     }
     await mkdir(path.dirname(attempt.resultPath), { recursive: true })
-    await writeFile(attempt.resultPath, "x".repeat(MAX_RESULT_BYTES + 1))
+    await Bun.write(attempt.resultPath, "x".repeat(MAX_RESULT_BYTES + 1), { createPath: false })
     const runDir = runDirectory(started.state.id)
     await submitNodeDone(runDir, "review", attempt.token, "completed")
     await expect(reconcileRun(runDir, { surface })).rejects.toThrow(
@@ -465,7 +465,7 @@ describe("crank shell", () => {
   test("rejects a provider result symlink without reading its target", async () => {
     const secret = path.join(temporaryRoot, "outside-secret.txt")
     const result = path.join(temporaryRoot, "submission", "result.txt")
-    await writeFile(secret, "must not escape")
+    await Bun.write(secret, "must not escape", { createPath: false })
     await mkdir(path.dirname(result), { recursive: true })
     await symlink(secret, result)
 
@@ -537,7 +537,7 @@ describe("crank shell", () => {
       throw new Error("missing review attempt")
     }
     await mkdir(path.dirname(attempt.resultPath), { recursive: true })
-    await writeFile(attempt.resultPath, '{"clean":true}\n')
+    await Bun.write(attempt.resultPath, '{"clean":true}\n', { createPath: false })
     await submitNodeDone(runDirectory(started.state.id), "review", attempt.token, "completed")
     const completed = await reconcileRun(runDirectory(started.state.id), { surface })
     expect(completed.state.nodes.review?.status).toBe("completed")
@@ -591,7 +591,9 @@ describe("crank shell", () => {
         }
       }
     }
-    await writeFile(runStatePath(runDir), `${JSON.stringify(tampered, null, 2)}\n`)
+    await Bun.write(runStatePath(runDir), `${JSON.stringify(tampered, null, 2)}\n`, {
+      createPath: false
+    })
 
     const restarted = new FakeSurface()
     const drained = await reconcileRun(runDir, {
@@ -600,7 +602,7 @@ describe("crank shell", () => {
     expect(drained.state).toEqual(authoritative)
     expect(restarted.spawns).toEqual([])
     expect(restarted.handoffs).toEqual([])
-    expect(JSON.parse(await readFile(runStatePath(runDir), "utf8"))).toEqual(authoritative)
+    expect(JSON.parse(await Bun.file(runStatePath(runDir)).text())).toEqual(authoritative)
   })
 
   test("commits completed and hold records atomically before trusted reconciliation can race", async () => {
@@ -615,10 +617,10 @@ describe("crank shell", () => {
       throw new Error("missing provider attempt")
     }
     await mkdir(path.dirname(attempt.resultPath), { recursive: true })
-    await writeFile(attempt.resultPath, '{"clean":true}\n')
+    await Bun.write(attempt.resultPath, '{"clean":true}\n', { createPath: false })
     await submitNodeDone(runDir, "provider", attempt.token, "completed", true)
     const beforeFailedCommit = await readRunState(runDir)
-    const beforeJournal = await readFile(eventsPath(runDir), "utf8")
+    const beforeJournal = await Bun.file(eventsPath(runDir)).text()
     injectAtomicWriteFaultForTests({
       targetPath: eventsPath(runDir),
       afterBytes: 41,
@@ -626,7 +628,7 @@ describe("crank shell", () => {
       error: Object.assign(new Error("injected completion-plus-hold ENOSPC"), { code: "ENOSPC" })
     })
     await expect(reconcileRun(runDir, { surface })).rejects.toThrow("completion-plus-hold ENOSPC")
-    expect(await readFile(eventsPath(runDir), "utf8")).toBe(beforeJournal)
+    expect(await Bun.file(eventsPath(runDir)).text()).toBe(beforeJournal)
     expect(await readRunState(runDir)).toEqual(beforeFailedCommit)
     expect((await readRunState(runDir)).holds.provider).toBeUndefined()
     expect((await readRunState(runDir)).nodes.dependent?.status).toBe("pending")
@@ -673,7 +675,9 @@ describe("crank shell", () => {
       throw new Error("missing compile attempt")
     }
     await mkdir(path.dirname(attempt.resultPath), { recursive: true })
-    await writeFile(attempt.resultPath, "compiler failed at Source/Main.cpp:42\n")
+    await Bun.write(attempt.resultPath, "compiler failed at Source/Main.cpp:42\n", {
+      createPath: false
+    })
     await submitNodeDone(runDir, "compile", attempt.token, "failed")
     const failed = await reconcileRun(runDir, { surface })
     expect(failed.state.status).toBe("failed")
@@ -800,8 +804,8 @@ describe("crank shell", () => {
         this.executions += 1
         if (request.intent.nodeId === "planned") {
           await mkdir(path.dirname(attempt.resultPath), { recursive: true })
-          await writeFile(attempt.resultPath, '{"clean":true}\n')
-          await writeFile(
+          await Bun.write(attempt.resultPath, '{"clean":true}\n', { createPath: false })
+          await Bun.write(
             completionSubmissionPath(attempt.resultPath),
             `${JSON.stringify({
               runId: persisted.state.id,
@@ -809,7 +813,8 @@ describe("crank shell", () => {
               token: attempt.token,
               outcome: "completed",
               hold: false
-            })}\n`
+            })}\n`,
+            { createPath: false }
           )
         }
         return super.recoverOrSpawn(request)
@@ -855,7 +860,7 @@ describe("crank shell", () => {
       throw new Error("missing decision attempt")
     }
     await mkdir(path.dirname(attempt.resultPath), { recursive: true })
-    await writeFile(attempt.resultPath, "{}\n")
+    await Bun.write(attempt.resultPath, "{}\n", { createPath: false })
     await submitNodeDone(runDir, "decision", attempt.token, "completed")
 
     const paused = await reconcileRun(runDir, { surface })
@@ -951,7 +956,7 @@ describe("crank shell", () => {
       throw new Error("missing resumed agent attempt")
     }
     await mkdir(path.dirname(attempt.resultPath), { recursive: true })
-    await writeFile(attempt.resultPath, '{"clean":false}\n')
+    await Bun.write(attempt.resultPath, '{"clean":false}\n', { createPath: false })
     await submitNodeDone(persisted.runDir, "planned", attempt.token, "failed")
 
     const dormant = await readRunState(persisted.runDir)
@@ -975,7 +980,7 @@ describe("crank shell", () => {
     expect(paused.state.status).toBe("paused")
 
     await mkdir(path.dirname(attempt.resultPath), { recursive: true })
-    await writeFile(attempt.resultPath, '{"clean":true}\n')
+    await Bun.write(attempt.resultPath, '{"clean":true}\n', { createPath: false })
     await submitNodeDone(runDir, "review", attempt.token, "completed")
 
     const reconciled = await reconcileRun(runDir, { surface })
@@ -995,7 +1000,7 @@ describe("crank shell", () => {
       throw new Error("missing review attempt")
     }
     await mkdir(path.dirname(attempt.resultPath), { recursive: true })
-    await writeFile(attempt.resultPath, '{"clean":true}\n')
+    await Bun.write(attempt.resultPath, '{"clean":true}\n', { createPath: false })
     await submitNodeDone(runDir, "review", attempt.token, "completed")
     const pane = attempt.pane
     if (pane === null) {
@@ -1099,7 +1104,7 @@ describe("crank shell", () => {
       throw new Error("missing review attempt")
     }
     await mkdir(path.dirname(attempt.resultPath), { recursive: true })
-    await writeFile(attempt.resultPath, '{"clean":true}\n')
+    await Bun.write(attempt.resultPath, '{"clean":true}\n', { createPath: false })
     await submitNodeDone(runDir, "review", attempt.token, "completed")
     const event = JSON.stringify({
       event: "pane_exited",
@@ -1122,15 +1127,16 @@ describe("crank shell", () => {
       throw new Error("missing submitting attempt")
     }
     await mkdir(path.dirname(firstAttempt.resultPath), { recursive: true })
-    await writeFile(firstAttempt.resultPath, '{"clean":true}\n')
+    await Bun.write(firstAttempt.resultPath, '{"clean":true}\n', { createPath: false })
 
     const deniedBin = path.join(temporaryRoot, "denied-bin")
     await mkdir(deniedBin)
-    await writeFile(
+    await Bun.write(
       path.join(deniedBin, "herdr"),
       '#!/bin/sh\necho "herdr workspace list: EPERM" >&2\nexit 126\n',
-      { mode: 0o755 }
+      { createPath: false, mode: 0o755 }
     )
+    await chmod(path.join(deniedBin, "herdr"), 0o755)
     const savedPath = process.env.PATH
     process.env.PATH = deniedBin
     try {
@@ -1164,7 +1170,7 @@ describe("crank shell", () => {
       throw new Error("missing dependent attempt")
     }
     await mkdir(path.dirname(secondAttempt.resultPath), { recursive: true })
-    await writeFile(secondAttempt.resultPath, '{"clean":true}\n')
+    await Bun.write(secondAttempt.resultPath, '{"clean":true}\n', { createPath: false })
     await submitNodeDone(runDir, "dependent", secondAttempt.token, "completed")
     const finished = await reconcileRun(runDir, {
       surface: restartedSurface
@@ -1214,7 +1220,7 @@ describe("crank shell", () => {
         throw new Error(`missing ${nodeId} attempt`)
       }
       await mkdir(path.dirname(attempt.resultPath), { recursive: true })
-      await writeFile(attempt.resultPath, '{"clean":true}\n')
+      await Bun.write(attempt.resultPath, '{"clean":true}\n', { createPath: false })
       await submitNodeDone(runDir, nodeId, attempt.token, "completed")
       return reconcileRun(runDir, { surface })
     }
@@ -1272,7 +1278,7 @@ describe("crank shell", () => {
         throw new Error(`missing ${nodeId} attempt`)
       }
       await mkdir(path.dirname(attempt.resultPath), { recursive: true })
-      await writeFile(attempt.resultPath, `${JSON.stringify(result)}\n`)
+      await Bun.write(attempt.resultPath, `${JSON.stringify(result)}\n`, { createPath: false })
       await submitNodeDone(runDir, nodeId, attempt.token, "completed")
       return reconcileRun(runDir, { surface })
     }

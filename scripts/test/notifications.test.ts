@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { mkdtemp, readFile } from "node:fs/promises"
+import { mkdtemp } from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 
@@ -230,7 +230,7 @@ describe("milestone callbacks", () => {
       })
     )
     expect(result.callback).toBe("delivered")
-    const payload = JSON.parse(await readFile(target, "utf8")) as Record<string, unknown>
+    const payload = JSON.parse(await Bun.file(target).text()) as Record<string, unknown>
     expect(payload["patch"]).toBeUndefined()
     expect(payload["type"]).toBe("node.completed")
     expect(payload["runId"]).toBe(record.runId)

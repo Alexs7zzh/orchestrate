@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import { spawnSync } from "node:child_process"
-import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
+import { chmod, mkdir, mkdtemp, rm } from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 
@@ -203,13 +203,14 @@ describe("CLI contract", () => {
     try {
       const bin = path.join(root, "bin")
       await mkdir(bin)
-      await writeFile(
+      await Bun.write(
         path.join(bin, "orchestrate"),
         `#!/bin/sh
 if [ "$1" = runs ]; then printf 'runA  running  A\nrunB  running  B\n'; exit; fi
 if [ "$1" = status ]; then printf 'Nodes:\n  nodeA  running\n  nodeB  pending\n'; exit; fi
 exit 1
-`
+`,
+        { createPath: false }
       )
       await chmod(path.join(bin, "orchestrate"), 0o755)
       const scripts = Object.fromEntries(
@@ -217,7 +218,9 @@ exit 1
           (["fish", "zsh", "bash"] as const).map(async (shell) => {
             const result = await capture(() => runCli(["completion", shell, "--json"]))
             const file = path.join(root, `completion.${shell}`)
-            await writeFile(file, (JSON.parse(result.output) as { script: string }).script)
+            await Bun.write(file, (JSON.parse(result.output) as { script: string }).script, {
+              createPath: false
+            })
             return [shell, file] as const
           })
         )
@@ -278,13 +281,13 @@ exit 1
     const root = await mkdtemp(path.join(os.tmpdir(), "orchestrate-watch-before-scan-"))
     try {
       const state = path.join(root, "state.json")
-      await writeFile(state, '{"status":"running"}\n')
+      await Bun.write(state, '{"status":"running"}\n', { createPath: false })
       setWatchInstalledHookForTests(async () => {
-        await writeFile(state, '{"status":"completed"}\n')
+        await Bun.write(state, '{"status":"completed"}\n', { createPath: false })
       })
       const settled = await Promise.race([
         watchBeforeScan(state, async () => {
-          const value = JSON.parse(await readFile(state, "utf8")) as { status: string }
+          const value = JSON.parse(await Bun.file(state).text()) as { status: string }
           return value.status === "running" ? null : value
         }),
         new Promise<never>((_resolve, reject) =>
@@ -294,14 +297,14 @@ exit 1
       expect(settled).toEqual({ status: "completed" })
 
       const events = path.join(root, "events.json")
-      await writeFile(events, "[]\n")
+      await Bun.write(events, "[]\n", { createPath: false })
       const emitted: number[] = []
       setWatchInstalledHookForTests(async () => {
-        await writeFile(events, '[{"sequence":1}]\n')
+        await Bun.write(events, '[{"sequence":1}]\n', { createPath: false })
       })
       await Promise.race([
         watchBeforeScan(events, async () => {
-          const current = JSON.parse(await readFile(events, "utf8")) as Array<{
+          const current = JSON.parse(await Bun.file(events).text()) as Array<{
             sequence: number
           }>
           emitted.push(...current.map((event) => event.sequence))
@@ -319,10 +322,9 @@ exit 1
   })
 
   test("the CLI specification contains every exact live usage shape", async () => {
-    const specification = await readFile(
-      new URL("../../references/cli-spec.md", import.meta.url),
-      "utf8"
-    )
+    const specification = await Bun.file(
+      new URL("../../references/cli-spec.md", import.meta.url)
+    ).text()
     for (const help of Object.values(PUBLIC_COMMAND_HELP)) {
       for (const line of help.split("\n")) {
         const shape = line

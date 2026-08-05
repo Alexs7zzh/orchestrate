@@ -1,6 +1,6 @@
 import { createTestRenderer } from "@opentui/core/testing"
 import { afterEach, describe, expect, test } from "bun:test"
-import { mkdtemp, rm, writeFile } from "node:fs/promises"
+import { mkdtemp, rm } from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 
@@ -48,13 +48,13 @@ describe("OpenTUI board viewport", () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "orchestrate-board-result-"))
     try {
       const resultPath = path.join(root, "result.txt")
-      await writeFile(resultPath, "bounded result")
+      await Bun.write(resultPath, "bounded result", { createPath: false })
       const detail = await readBoardResultDetail(resultPath)
       expect(renderBoardFrame(model("result display"), null, detail).text).toContain(
         "DETAIL\nbounded result"
       )
 
-      await writeFile(resultPath, "x".repeat(MAX_RESULT_BYTES + 1))
+      await Bun.write(resultPath, "x".repeat(MAX_RESULT_BYTES + 1), { createPath: false })
       expect(await readBoardResultDetail(resultPath)).toContain(
         `${MAX_RESULT_BYTES}-byte result limit`
       )

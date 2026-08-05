@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, setDefaultTimeout, test } from "bun:test"
 import { spawnSync } from "node:child_process"
-import { chmod, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises"
+import { chmod, mkdir, mkdtemp, readdir, rm } from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 
@@ -150,9 +150,9 @@ case "$1 $2" in
   *) printf '%s\n' '{"id":"cli:test","result":{"type":"ok"}}' ;;
 esac
 `
-  await writeFile(path.join(shimDir, "herdr"), shim)
+  await Bun.write(path.join(shimDir, "herdr"), shim, { createPath: false })
   await chmod(path.join(shimDir, "herdr"), 0o755)
-  await writeFile(path.join(shimDir, "codex"), "#!/bin/sh\nexit 0\n")
+  await Bun.write(path.join(shimDir, "codex"), "#!/bin/sh\nexit 0\n", { createPath: false })
   await chmod(path.join(shimDir, "codex"), 0o755)
 })
 
@@ -181,7 +181,7 @@ describe("packaged CLI", () => {
 
   test("refuses build A state from build B even when the environment forges build A", async () => {
     const file = path.join(temporaryRoot, "build-pinning-workflow.json")
-    await writeFile(file, `${JSON.stringify(workflow(), null, 2)}\n`)
+    await Bun.write(file, `${JSON.stringify(workflow(), null, 2)}\n`, { createPath: false })
     const preview = run(["preview", file, "--json"])
     const digest = (JSON.parse(preview.stdout) as { digest: string }).digest
     const started = run(["run", file, "--approve", digest, "--json"])
@@ -189,8 +189,8 @@ describe("packaged CLI", () => {
     const runId = (JSON.parse(started.stdout) as { runId: string }).runId
     const buildB = run(["--version"]).stdout.trim()
     const journal = path.join(stateDir, "runs", runId, "events.json")
-    const buildAJournal = (await readFile(journal, "utf8")).replaceAll(buildB, "build-a")
-    await writeFile(journal, buildAJournal)
+    const buildAJournal = (await Bun.file(journal).text()).replaceAll(buildB, "build-a")
+    await Bun.write(journal, buildAJournal, { createPath: false })
 
     const rejected = run(["status", runId, "--json"], {
       ORCHESTRATE_BUILD_ID: "build-a"
@@ -203,7 +203,7 @@ describe("packaged CLI", () => {
 
   test("validates, previews, dry-runs without state mutation, and starts fire-and-forget", async () => {
     const file = path.join(temporaryRoot, "workflow.json")
-    await writeFile(file, `${JSON.stringify(workflow(), null, 2)}\n`)
+    await Bun.write(file, `${JSON.stringify(workflow(), null, 2)}\n`, { createPath: false })
     const validated = run(["validate", file, "--json"])
     expect(validated.status).toBe(0)
     const validation = JSON.parse(validated.stdout)
@@ -224,7 +224,11 @@ describe("packaged CLI", () => {
     expect(dry.status).toBe(0)
     expect(JSON.parse(dry.stdout).ok).toBeTrue()
     expect(await readdir(stateDir).catch(() => [])).toEqual([])
-    expect(await readFile(herdrLog, "utf8").catch(() => "")).toBe("--version\n")
+    expect(
+      await Bun.file(herdrLog)
+        .text()
+        .catch(() => "")
+    ).toBe("--version\n")
 
     const started = run(["run", file, "--approve", preview.digest, "--json"])
     expect(started.stderr).toBe("")
@@ -240,10 +244,10 @@ describe("packaged CLI", () => {
     expect(JSON.parse(run(["board", runId, "--json"]).stdout).run.id).toBe(runId)
 
     const state = JSON.parse(
-      await readFile(path.join(stateDir, "runs", runId, "state.json"), "utf8")
+      await Bun.file(path.join(stateDir, "runs", runId, "state.json")).text()
     ) as { nodes: { check: { attempts: Array<{ outputPath: string }> } } }
     const outputPath = state.nodes.check.attempts.at(-1)?.outputPath as string
-    await writeFile(outputPath, "compiled result\n")
+    await Bun.write(outputPath, "compiled result\n", { createPath: false })
     expect(run(["result", runId, "check"]).stdout).toBe("compiled result\n\n")
     expect(run(["result", runId.slice(0, 18), "check"]).stdout).toBe("compiled result\n\n")
     const resultJson = JSON.parse(
@@ -266,7 +270,7 @@ describe("packaged CLI", () => {
     expect(run(["release", runId, "check", "--json"]).status).toBe(0)
     const revised = { ...workflow(), objective: "Exercise revision dispatch." }
     const revisionFile = path.join(temporaryRoot, "revision.json")
-    await writeFile(revisionFile, `${JSON.stringify(revised, null, 2)}\n`)
+    await Bun.write(revisionFile, `${JSON.stringify(revised, null, 2)}\n`, { createPath: false })
     const proposed = run(["revise", runId, revisionFile, "--json"])
     expect(proposed.status).toBe(0)
     const revisionDigest = JSON.parse(proposed.stdout).digest as string
@@ -319,7 +323,7 @@ describe("packaged CLI", () => {
     ]
     for (const [index, candidate] of callbacks.entries()) {
       const file = path.join(temporaryRoot, `callback-${index}.json`)
-      await writeFile(
+      await Bun.write(
         file,
         `${JSON.stringify({
           ...workflow(),
@@ -327,7 +331,8 @@ describe("packaged CLI", () => {
           milestones: true,
           limits: { maxStarts: 7 },
           writeConflicts: "allow-with-approval"
-        })}\n`
+        })}\n`,
+        { createPath: false }
       )
       const jsonPreview = run(["preview", file, "--json"])
       expect(jsonPreview.status).toBe(0)
@@ -348,14 +353,15 @@ describe("packaged CLI", () => {
 
   test("dry-run performs the read-only herdr >=0.7 version preflight", async () => {
     const file = path.join(temporaryRoot, "dry-run-version-workflow.json")
-    await writeFile(file, `${JSON.stringify(workflow(), null, 2)}\n`)
+    await Bun.write(file, `${JSON.stringify(workflow(), null, 2)}\n`, { createPath: false })
     const digest = JSON.parse(run(["preview", file, "--json"]).stdout).digest as string
     const oldBin = path.join(temporaryRoot, "old-herdr-bin")
     const oldLog = path.join(temporaryRoot, "old-herdr.log")
     await mkdir(oldBin)
-    await writeFile(
+    await Bun.write(
       path.join(oldBin, "herdr"),
-      `#!/bin/sh\nprintf '%s\\n' "$*" >> ${JSON.stringify(oldLog)}\necho 'herdr 0.6.9'\n`
+      `#!/bin/sh\nprintf '%s\\n' "$*" >> ${JSON.stringify(oldLog)}\necho 'herdr 0.6.9'\n`,
+      { createPath: false }
     )
     await chmod(path.join(oldBin, "herdr"), 0o755)
     const rejected = run(["run", file, "--approve", digest, "--dry-run", "--json"], {
@@ -365,7 +371,7 @@ describe("packaged CLI", () => {
     expect(JSON.parse(rejected.stdout).checks).toContainEqual(
       expect.objectContaining({ name: "herdr", ok: false })
     )
-    expect(await readFile(oldLog, "utf8")).toBe("--version\n")
+    expect(await Bun.file(oldLog).text()).toBe("--version\n")
     expect(await readdir(stateDir).catch(() => [])).toEqual([])
   })
 
@@ -509,14 +515,14 @@ describe("packaged CLI", () => {
 
   test("clean dry-run leaves the run directory byte-identical", async () => {
     const file = path.join(temporaryRoot, "workflow.json")
-    await writeFile(file, `${JSON.stringify(workflow(), null, 2)}\n`)
+    await Bun.write(file, `${JSON.stringify(workflow(), null, 2)}\n`, { createPath: false })
     const preview = JSON.parse(run(["preview", file, "--json"]).stdout)
     const started = JSON.parse(run(["run", file, "--approve", preview.digest, "--json"]).stdout)
     const runPath = path.join(stateDir, "runs", started.runId)
-    const before = await readFile(path.join(runPath, "state.json"), "utf8")
+    const before = await Bun.file(path.join(runPath, "state.json")).text()
     const dry = run(["clean", started.runId, "--dry-run", "--json"])
     expect(dry.status).toBe(0)
-    expect(await readFile(path.join(runPath, "state.json"), "utf8")).toBe(before)
+    expect(await Bun.file(path.join(runPath, "state.json")).text()).toBe(before)
     const rejected = run(["clean", started.runId, "--json"])
     expect(rejected.status).toBe(1)
     expect(JSON.parse(rejected.stdout).error.message).toContain("stop it before cleaning")
@@ -531,12 +537,14 @@ describe("packaged CLI", () => {
     const untouched = run(["setup", "--no-wizard", "--json"], { HOME: home })
     expect(untouched.status).toBe(0)
     expect(
-      await readFile(path.join(stateDir, "preferences.json"), "utf8").catch(() => null)
+      await Bun.file(path.join(stateDir, "preferences.json"))
+        .text()
+        .catch(() => null)
     ).toBeNull()
 
     const defaulted = run(["setup", "--defaults", "--json"], { HOME: home })
     expect(defaulted.status).toBe(0)
-    const preferences = JSON.parse(await readFile(path.join(stateDir, "preferences.json"), "utf8"))
+    const preferences = JSON.parse(await Bun.file(path.join(stateDir, "preferences.json")).text())
     expect(preferences.global.ui).toMatchObject({ board: null, focus: null })
     expect(run(["ui", "show", "--json"], { HOME: home }).status).toBe(0)
     expect(run(["ui", "set", "focus", '"never"', "--json"], { HOME: home }).status).toBe(0)
@@ -555,10 +563,9 @@ describe("packaged CLI", () => {
     expect(linkFailure.stderr).toBe("")
     expect(JSON.parse(linkFailure.stdout).error.message).toContain("plugin link exited with 9")
     expect(
-      await readFile(
-        path.join(home, ".local", "share", "orchestrate", "current", "build.json"),
-        "utf8"
-      ).catch(() => null)
+      await Bun.file(path.join(home, ".local", "share", "orchestrate", "current", "build.json"))
+        .text()
+        .catch(() => null)
     ).toBeNull()
 
     expect(run(["setup", "--no-wizard", "--json"], { HOME: home }).status).toBe(0)
@@ -569,17 +576,17 @@ describe("packaged CLI", () => {
     expect(unlinkFailure.status).toBe(1)
     expect(JSON.parse(unlinkFailure.stdout).error.message).toContain("plugin unlink exited with 9")
     expect(
-      await readFile(
-        path.join(home, ".local", "share", "orchestrate", "current", "build.json"),
-        "utf8"
-      )
+      await Bun.file(
+        path.join(home, ".local", "share", "orchestrate", "current", "build.json")
+      ).text()
     ).toContain("build")
 
     const unhealthyBin = path.join(temporaryRoot, "unhealthy-bin")
     await mkdir(unhealthyBin)
-    await writeFile(
+    await Bun.write(
       path.join(unhealthyBin, "herdr"),
-      '#!/bin/sh\ncase "$1 $2" in "--version ") echo "herdr 0.7.5";; "plugin list") echo \'{"result":{"plugins":[]}}\';; esac\n'
+      '#!/bin/sh\ncase "$1 $2" in "--version ") echo "herdr 0.7.5";; "plugin list") echo \'{"result":{"plugins":[]}}\';; esac\n',
+      { createPath: false }
     )
     await chmod(path.join(unhealthyBin, "herdr"), 0o755)
     const doctor = run(["doctor", "--json"], {
@@ -598,17 +605,17 @@ describe("packaged CLI", () => {
     await mkdir(home)
     expect(run(["setup", "--defaults", "--json"], { HOME: home }).status).toBe(0)
     const preferencesPath = path.join(stateDir, "preferences.json")
-    const before = await readFile(preferencesPath, "utf8")
+    const before = await Bun.file(preferencesPath).text()
     const file = path.join(temporaryRoot, "preferences-workflow.json")
-    await writeFile(file, `${JSON.stringify(workflow(), null, 2)}\n`)
+    await Bun.write(file, `${JSON.stringify(workflow(), null, 2)}\n`, { createPath: false })
     const preview = JSON.parse(run(["preview", file, "--json"], { HOME: home }).stdout)
     expect(run(["run", file, "--approve", preview.digest, "--json"], { HOME: home }).status).toBe(0)
-    expect(await readFile(preferencesPath, "utf8")).toBe(before)
+    expect(await Bun.file(preferencesPath).text()).toBe(before)
   })
 
   test("board --json remains noninteractive under a TTY with multiple runs", async () => {
     const file = path.join(temporaryRoot, "tty-workflow.json")
-    await writeFile(file, `${JSON.stringify(workflow(), null, 2)}\n`)
+    await Bun.write(file, `${JSON.stringify(workflow(), null, 2)}\n`, { createPath: false })
     const digest = JSON.parse(run(["preview", file, "--json"]).stdout).digest as string
     expect(run(["run", file, "--approve", digest, "--json"]).status).toBe(0)
     expect(run(["run", file, "--approve", digest, "--json"]).status).toBe(0)
@@ -633,7 +640,7 @@ describe("packaged CLI", () => {
 
   test("discovers an older live result-missing run across runs, board JSON, and the panel", async () => {
     const file = path.join(temporaryRoot, "attention-workflow.json")
-    await writeFile(file, `${JSON.stringify(agentWorkflow(), null, 2)}\n`)
+    await Bun.write(file, `${JSON.stringify(agentWorkflow(), null, 2)}\n`, { createPath: false })
     const digest = JSON.parse(run(["preview", file, "--json"]).stdout).digest as string
     const older = JSON.parse(run(["run", file, "--approve", digest, "--json"]).stdout)
       .runId as string
@@ -655,9 +662,10 @@ describe("packaged CLI", () => {
     ])
 
     const panelLog = path.join(temporaryRoot, "panel-cli.log")
-    await writeFile(
+    await Bun.write(
       path.join(shimDir, "orchestrate"),
-      `#!/bin/sh\nprintf '%s\\n' "$*" >> ${JSON.stringify(panelLog)}\nexec ${JSON.stringify(binary)} "$@"\n`
+      `#!/bin/sh\nprintf '%s\\n' "$*" >> ${JSON.stringify(panelLog)}\nexec ${JSON.stringify(binary)} "$@"\n`,
+      { createPath: false }
     )
     await chmod(path.join(shimDir, "orchestrate"), 0o755)
     const panel = spawnSync(
@@ -675,7 +683,7 @@ describe("packaged CLI", () => {
       }
     )
     expect(panel.status).toBe(2)
-    expect(await readFile(panelLog, "utf8")).toBe(`runs --needs-attention\nboard ${older}\n`)
+    expect(await Bun.file(panelLog).text()).toBe(`runs --needs-attention\nboard ${older}\n`)
     expect(panel.stdout).toContain("result missing")
   })
 })

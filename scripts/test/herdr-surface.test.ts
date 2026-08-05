@@ -1,17 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test"
 import { Option } from "effect"
-import {
-  access,
-  chmod,
-  mkdir,
-  mkdtemp,
-  readdir,
-  readFile,
-  realpath,
-  rm,
-  symlink,
-  writeFile
-} from "node:fs/promises"
+import { access, chmod, mkdir, mkdtemp, readdir, realpath, rm, symlink } from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 
@@ -471,7 +460,7 @@ case "$1 $2" in
 esac
 `
   const shim = path.join(shimDirectory, "herdr")
-  await writeFile(shim, body)
+  await Bun.write(shim, body, { createPath: false })
   await chmod(shim, 0o755)
 }
 
@@ -570,7 +559,7 @@ describe("herdr surface", () => {
       prompt: null,
       placement: placement(node.id, "origin")
     })
-    const log = await readFile(logPath, "utf8")
+    const log = await Bun.file(logPath).text()
     expect(observation.pane.workspaceId).toBe("origin-workspace")
     expect(log).toContain("pane get origin-pane")
     expect(log).toContain("tab create --workspace origin-workspace")
@@ -596,7 +585,7 @@ describe("herdr surface", () => {
       prompt: null,
       placement: placement(node.id, "dedicated")
     })
-    const log = await readFile(logPath, "utf8")
+    const log = await Bun.file(logPath).text()
     expect(log).toContain("workspace create")
     expect(log).toContain("--env ORCHESTRATE_NODE_ID=check")
     expect(log).toContain("tab rename t1 check")
@@ -634,7 +623,7 @@ describe("herdr surface", () => {
         }
       }
     })
-    const log = await readFile(logPath, "utf8")
+    const log = await Bun.file(logPath).text()
     expect(observation.pane.workspaceId).toBe("w1")
     expect(log).toContain("pane get origin-pane")
     expect(log).toContain("workspace create")
@@ -676,7 +665,7 @@ describe("herdr surface", () => {
       placement: placement(second.id)
     })
 
-    const log = await readFile(logPath, "utf8")
+    const log = await Bun.file(logPath).text()
     expect(log.match(/workspace create/g)).toHaveLength(1)
     expect(log.match(/tab rename t1 check/g)).toHaveLength(1)
     expect(log.match(/tab create --workspace w1/g)).toHaveLength(1)
@@ -715,7 +704,7 @@ describe("herdr surface", () => {
       placement: placement(node.id)
     })
 
-    const log = await readFile(logPath, "utf8")
+    const log = await Bun.file(logPath).text()
     expect(log).toContain("workspace get w1")
     expect(log).toContain("tab create --workspace w1")
     expect(log).not.toContain("workspace create")
@@ -731,7 +720,7 @@ describe("herdr surface", () => {
       board: "dedicated-workspace"
     })
 
-    const log = await readFile(logPath, "utf8")
+    const log = await Bun.file(logPath).text()
     expect(log).toContain("workspace create")
     expect(log).toContain("tab rename t1 Board")
     expect(log).not.toContain("tab create")
@@ -757,7 +746,7 @@ describe("herdr surface", () => {
       prompt: "Rendered prompt and node-done contract.",
       placement: placement(node.id)
     })
-    const log = await readFile(logPath, "utf8")
+    const log = await Bun.file(logPath).text()
     expect(observation).toEqual({
       pane: {
         workspaceId: "w1",
@@ -771,7 +760,7 @@ describe("herdr surface", () => {
     expect(log).toContain("agent start o-review-7f87e2e85f26e92d --kind codex --pane p1")
     const submissionDirectory = path.dirname(state(node.id).nodes[node.id]!.attempts[0]!.resultPath)
     const runDirectory = path.join(process.env.ORCHESTRATE_STATE_DIR!, "runs", state(node.id).id)
-    const profileDocument = await readFile(profileCapturePath, "utf8")
+    const profileDocument = await Bun.file(profileCapturePath).text()
     expect(log).toContain("--ask-for-approval never")
     expect(log).toContain("--profile orchestrate-control-")
     expect(log).not.toContain("default_permissions")
@@ -805,7 +794,7 @@ describe("herdr surface", () => {
       prompt: "Run without preserving this session.",
       placement: placement(node.id)
     })
-    const log = await readFile(logPath, "utf8")
+    const log = await Bun.file(logPath).text()
     expect(observation.providerSessionId).toBeNull()
     expect(log).toContain("agent prompt p1 Run without preserving this session.")
     expect(log.slice(log.indexOf("agent prompt p1"))).not.toContain("agent get p1")
@@ -851,7 +840,7 @@ describe("herdr surface", () => {
       prompt: "REVIEW s1 r1.",
       placement: placement("review--r1")
     })
-    const log = await readFile(logPath, "utf8")
+    const log = await Bun.file(logPath).text()
     expect(observation.providerSessionId).toBe("session-1")
     expect(log).toContain("fork committed-session")
     expect(log).not.toContain("resume committed-session")
@@ -898,7 +887,7 @@ describe("herdr surface", () => {
       prompt: "REVIEW s1 r1.",
       placement: placement("review--r1")
     })
-    const log = await readFile(logPath, "utf8")
+    const log = await Bun.file(logPath).text()
     expect(observation.providerSessionId).toMatch(
       /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
     )
@@ -924,7 +913,7 @@ describe("herdr surface", () => {
       prompt: "Write source and report completion.",
       placement: placement(node.id)
     })
-    const log = await readFile(logPath, "utf8")
+    const log = await Bun.file(logPath).text()
     const submissionDirectory = path.dirname(runState.nodes[node.id]!.attempts[0]!.resultPath)
     const authoritativeRunDirectory = path.join(
       process.env.ORCHESTRATE_STATE_DIR!,
@@ -934,7 +923,7 @@ describe("herdr surface", () => {
     const canonicalTemporaryRoot = await realpath(temporaryRoot)
     const canonicalAllowedRoot = path.join(canonicalTemporaryRoot, "allowed")
     const canonicalSubmissionsRoot = `${canonicalTemporaryRoot}-state-submissions`
-    const profileDocument = await readFile(profileCapturePath, "utf8")
+    const profileDocument = await Bun.file(profileCapturePath).text()
     expect(log).toContain("--ask-for-approval never --profile orchestrate-control-")
     expect(profileDocument).toContain('extends=":read-only"')
     expect(profileDocument).toContain(`${JSON.stringify(canonicalAllowedRoot)}="write"`)
@@ -980,7 +969,11 @@ describe("herdr surface", () => {
         })
       ).rejects.toThrow("overlaps Orchestrate-owned authority")
     }
-    expect(await readFile(logPath, "utf8").catch(() => "")).not.toContain("tab create")
+    expect(
+      await Bun.file(logPath)
+        .text()
+        .catch(() => "")
+    ).not.toContain("tab create")
   })
 
   test("rejects direct-launch Claude mode and argument adversaries before Herdr access", async () => {
@@ -1010,7 +1003,11 @@ describe("herdr surface", () => {
         })
       ).rejects.toThrow("must use dontAsk and launcher-owned arguments")
     }
-    expect(await readFile(logPath, "utf8").catch(() => "")).toBe("")
+    expect(
+      await Bun.file(logPath)
+        .text()
+        .catch(() => "")
+    ).toBe("")
   })
 
   test("rejects a protected-root symlink swap after the last preparation check without touching herdr", async () => {
@@ -1019,7 +1016,7 @@ describe("herdr surface", () => {
     const protectedRoot = process.env.ORCHESTRATE_STATE_DIR as string
     await mkdir(safeTarget)
     await mkdir(protectedRoot)
-    await writeFile(path.join(protectedRoot, "state-marker"), "untouched\n")
+    await Bun.write(path.join(protectedRoot, "state-marker"), "untouched\n", { createPath: false })
     await symlink(safeTarget, providerLink)
     const node = {
       ...agent(),
@@ -1042,8 +1039,12 @@ describe("herdr surface", () => {
         placement: placement(node.id)
       })
     ).rejects.toThrow("changed during launch")
-    expect(await readFile(logPath, "utf8").catch(() => "")).toBe("")
-    expect(await readFile(path.join(protectedRoot, "state-marker"), "utf8")).toBe("untouched\n")
+    expect(
+      await Bun.file(logPath)
+        .text()
+        .catch(() => "")
+    ).toBe("")
+    expect(await Bun.file(path.join(protectedRoot, "state-marker")).text()).toBe("untouched\n")
   })
 
   test("rejects a mutating declared write prefix with a symlink component", async () => {
@@ -1068,7 +1069,11 @@ describe("herdr surface", () => {
         placement: placement(node.id)
       })
     ).rejects.toThrow("contains a symlink component")
-    expect(await readFile(logPath, "utf8").catch(() => "")).toBe("")
+    expect(
+      await Bun.file(logPath)
+        .text()
+        .catch(() => "")
+    ).toBe("")
   })
 
   test("gives Claude only the attempt submission directory and exact completion operations", async () => {
@@ -1081,7 +1086,7 @@ describe("herdr surface", () => {
       prompt: "Review and report completion.",
       placement: placement(node.id)
     })
-    const log = await readFile(logPath, "utf8")
+    const log = await Bun.file(logPath).text()
     const submissionDirectory = path.dirname(runState.nodes[node.id]!.attempts[0]!.resultPath)
     const canonicalSubmissionDirectory = await realpath(submissionDirectory)
     const canonicalTemporaryRoot = await realpath(temporaryRoot)
@@ -1092,7 +1097,7 @@ describe("herdr surface", () => {
       runState.id
     )
     const settingsPath = path.join(submissionDirectory, "claude-settings.json")
-    const settings = await readFile(settingsPath, "utf8")
+    const settings = await Bun.file(settingsPath).text()
     expect(log).toContain(`--safe-mode --settings ${settingsPath}`)
     expect(log).toContain("--permission-mode dontAsk")
     expect(log).toContain("--tools Bash")
@@ -1138,8 +1143,8 @@ describe("herdr surface", () => {
       prompt: "Review without human approvals.",
       placement: placement(node.id)
     })
-    const log = await readFile(logPath, "utf8")
-    const profileDocument = await readFile(profileCapturePath, "utf8")
+    const log = await Bun.file(logPath).text()
+    const profileDocument = await Bun.file(profileCapturePath).text()
     expect(log).toContain("--ask-for-approval on-request")
     expect(log).toContain("--profile orchestrate-control-")
     expect(profileDocument).toContain('extends=":read-only"')
@@ -1156,7 +1161,7 @@ describe("herdr surface", () => {
       prompt: "Review after the shell is ready.",
       placement: placement(node.id)
     })
-    const log = await readFile(logPath, "utf8")
+    const log = await Bun.file(logPath).text()
     expect(log.match(/agent start o-review-7f87e2e85f26e92d/g)).toHaveLength(2)
     expect(log).toContain("--timeout 120000")
   })
@@ -1172,39 +1177,42 @@ describe("herdr surface", () => {
       sessionId: "origin-session"
     })
     await surface.promptOrigin(origin!, "The workflow completed.")
-    const log = await readFile(logPath, "utf8")
+    const log = await Bun.file(logPath).text()
     expect(log).toContain("agent get origin-pane")
     expect(log).toContain("agent prompt origin-pane The workflow completed.")
   })
 
   test("distinguishes a non-agent origin from invalid or failed Herdr observation", async () => {
     const shim = path.join(shimDirectory, "herdr")
-    await writeFile(
+    await Bun.write(
       shim,
       `#!/bin/sh\nprintf '%s\\n' '${herdrResponse({
         type: "pane_current",
         pane: herdrPane("p1", "w1", "t1", { agent: null, agent_session: null })
-      })}'\n`
+      })}'\n`,
+      { createPath: false }
     )
     await chmod(shim, 0o755)
     expect(await new HerdrSurface().captureOrigin()).toBeNull()
 
-    await writeFile(
+    await Bun.write(
       shim,
-      `#!/bin/sh\nprintf '%s\\n' '{"result":{"pane":{"agent":"codex","agent_session":{"agent":"codex","kind":"id","source":"herdr:codex","value":"origin-session"},"workspace_id":"w1","tab_id":"t1","pane_id":"p1"}}}'\n`
+      `#!/bin/sh\nprintf '%s\\n' '{"result":{"pane":{"agent":"codex","agent_session":{"agent":"codex","kind":"id","source":"herdr:codex","value":"origin-session"},"workspace_id":"w1","tab_id":"t1","pane_id":"p1"}}}'\n`,
+      { createPath: false }
     )
     await expect(new HerdrSurface().captureOrigin()).rejects.toThrow(
       "invalid current-pane response"
     )
 
-    await writeFile(shim, "#!/bin/sh\nprintf '%s\\n' 'not-json'\n")
+    await Bun.write(shim, "#!/bin/sh\nprintf '%s\\n' 'not-json'\n", { createPath: false })
     await expect(new HerdrSurface().captureOrigin()).rejects.toThrow(
       "invalid current-pane response"
     )
 
-    await writeFile(
+    await Bun.write(
       shim,
-      `#!/bin/sh\nprintf '%s\\n' '{ "error": { "code": "server_unavailable", "message": "outage" }, "id": "cli:pane:current" }' >&2\nexit 1\n`
+      `#!/bin/sh\nprintf '%s\\n' '{ "error": { "code": "server_unavailable", "message": "outage" }, "id": "cli:pane:current" }' >&2\nexit 1\n`,
+      { createPath: false }
     )
     await expect(new HerdrSurface().captureOrigin()).rejects.toThrow("server_unavailable")
   })
@@ -1219,13 +1227,13 @@ describe("herdr surface", () => {
       prompt: null,
       placement: placement(node.id)
     })
-    const log = await readFile(logPath, "utf8")
+    const log = await Bun.file(logPath).text()
     expect(observation.providerSessionId).toBeNull()
     const runLine = log.split("\n").find((line) => line.startsWith("pane run p1")) as string
     // Every typed word must be quoting-free: the pane shell re-splits them.
     expect(runLine).toMatch(/^pane run p1 \/bin\/bash \S+command\.sh$/)
     const commandPath = runLine.split(" ").at(-1) as string
-    const script = await readFile(commandPath, "utf8")
+    const script = await Bun.file(commandPath).text()
     expect(script).toContain("node-exit")
     expect(script).toContain(`'/usr/bin/printf' 'ok' 2>&1 | tee "$ORCHESTRATE_OUTPUT_PATH"`)
   })
@@ -1251,7 +1259,7 @@ describe("herdr surface", () => {
         reusePane: { ...anchor, paneId: "old-slot" }
       }
     })
-    const log = await readFile(logPath, "utf8")
+    const log = await Bun.file(logPath).text()
     expect(log).toContain("pane split --pane old-slot --direction down")
     expect(log).toContain("--no-focus")
     expect(log).toContain("pane close old-slot")
@@ -1273,7 +1281,7 @@ describe("herdr surface", () => {
       prompt: null,
       placement: { ...placement(node.id), reusePane: existing }
     })
-    const log = await readFile(logPath, "utf8")
+    const log = await Bun.file(logPath).text()
     expect(log).toContain("pane get session-pane")
     expect(log).toContain("pane split --pane session-pane --direction down")
     expect(log).toContain("pane close session-pane")
@@ -1322,7 +1330,7 @@ describe("herdr surface", () => {
         workspaceId: expectedWorkspace,
         surface: "tab"
       })
-      const log = await readFile(logPath, "utf8")
+      const log = await Bun.file(logPath).text()
       expect(log).toContain("pane get stale-anchor")
       if (destination === "dedicated") {
         expect(log).toContain("tab rename t1 check")
@@ -1356,7 +1364,7 @@ describe("herdr surface", () => {
         }
       })
     ).rejects.toThrow("Could not verify split anchor")
-    const log = await readFile(logPath, "utf8")
+    const log = await Bun.file(logPath).text()
     expect(log).not.toContain("pane split --pane anchor")
     expect(log).not.toContain("tab create")
   })
@@ -1387,7 +1395,7 @@ describe("herdr surface", () => {
       surface: "tab"
     })
     expect(runState.nodes.check?.attempts).toHaveLength(1)
-    const log = await readFile(logPath, "utf8")
+    const log = await Bun.file(logPath).text()
     expect(log.match(/pane get anchor/g)).toHaveLength(1)
     expect(log.match(/pane split --pane anchor/g)).toHaveLength(1)
     expect(log.match(/tab rename t1 check/g)).toHaveLength(1)
@@ -1416,7 +1424,7 @@ describe("herdr surface", () => {
         }
       })
     ).rejects.toBeInstanceOf(HerdrObservationError)
-    const log = await readFile(logPath, "utf8")
+    const log = await Bun.file(logPath).text()
     expect(log).toContain("pane split --pane anchor")
     expect(log).not.toContain("tab create")
   })
@@ -1433,7 +1441,7 @@ describe("herdr surface", () => {
     const first = await new HerdrSurface().spawn(request)
     const recovered = await new HerdrSurface().recoverOrSpawn(request)
     expect(recovered).toEqual(first)
-    const log = await readFile(logPath, "utf8")
+    const log = await Bun.file(logPath).text()
     expect(log.match(/workspace create/g)).toHaveLength(1)
     expect(log).not.toContain("tab create")
   })
@@ -1451,8 +1459,8 @@ describe("herdr surface", () => {
     }
     const attempt = runState.nodes[node.id]!.attempts[0]!
     injectAfterAgentPromptForTests(async () => {
-      await writeFile(attempt.resultPath, '{"clean":true}\n')
-      await writeFile(
+      await Bun.write(attempt.resultPath, '{"clean":true}\n', { createPath: false })
+      await Bun.write(
         path.join(path.dirname(attempt.resultPath), "completion.json"),
         `${JSON.stringify({
           runId: runState.id,
@@ -1460,17 +1468,18 @@ describe("herdr surface", () => {
           token: activeIntent.token,
           outcome: "completed",
           hold: false
-        })}\n`
+        })}\n`,
+        { createPath: false }
       )
       throw new Error("injected crash after prompt acceptance")
     })
     await expect(new HerdrSurface().spawn(request)).rejects.toBeInstanceOf(HerdrObservationError)
     const recovered = await new HerdrSurface().recoverOrSpawn(request)
     expect(recovered.pane.paneId).toBe("p1")
-    expect(await readFile(path.join(path.dirname(attempt.outputPath), "prompt.txt"), "utf8")).toBe(
+    expect(await Bun.file(path.join(path.dirname(attempt.outputPath), "prompt.txt")).text()).toBe(
       "Execute exactly once."
     )
-    const log = await readFile(logPath, "utf8")
+    const log = await Bun.file(logPath).text()
     expect(log.match(/workspace create/g)).toHaveLength(1)
     expect(log).not.toContain("tab create")
     expect(log.match(/agent start o-review-7f87e2e85f26e92d/g)).toHaveLength(1)
@@ -1489,7 +1498,7 @@ describe("herdr surface", () => {
     }
     await new HerdrSurface().spawn(request)
     const receipt = path.join(temporaryRoot, "spawn.json")
-    const before = await readFile(receipt, "utf8")
+    const before = await Bun.file(receipt).text()
     await writeShim(true, false, true, "transport")
 
     const failure = await new HerdrSurface()
@@ -1497,8 +1506,8 @@ describe("herdr surface", () => {
       .catch((error: unknown) => error)
     expect(failure).toBeInstanceOf(HerdrObservationError)
     expect((failure as Error).message).toContain("Could not verify receipt pane")
-    expect(await readFile(receipt, "utf8")).toBe(before)
-    const log = await readFile(logPath, "utf8")
+    expect(await Bun.file(receipt).text()).toBe(before)
+    const log = await Bun.file(logPath).text()
     expect(log.match(/workspace create/g)).toHaveLength(1)
     expect(log).not.toContain("tab create")
   })
@@ -1514,12 +1523,14 @@ describe("herdr surface", () => {
     }
     await new HerdrSurface().spawn(request)
     const receipt = path.join(temporaryRoot, "spawn.json")
-    const value = JSON.parse(await readFile(receipt, "utf8")) as Record<string, unknown>
-    await writeFile(receipt, `${JSON.stringify({ ...value, status: "created" })}\n`)
+    const value = JSON.parse(await Bun.file(receipt).text()) as Record<string, unknown>
+    await Bun.write(receipt, `${JSON.stringify({ ...value, status: "created" })}\n`, {
+      createPath: false
+    })
     await expect(new HerdrSurface().recoverOrSpawn(request)).rejects.toThrow(
       'Spawn for node "check" is created; inspect pane "p1" and resume explicitly.'
     )
-    const log = await readFile(logPath, "utf8")
+    const log = await Bun.file(logPath).text()
     expect(log).not.toContain("pane close p1")
     expect(log.match(/workspace create/g)).toHaveLength(1)
     expect(log).not.toContain("tab create")
@@ -1537,7 +1548,7 @@ describe("herdr surface", () => {
     const surface = new HerdrSurface()
     await surface.spawn(request)
     await surface.abandonPlanned(request)
-    const log = await readFile(logPath, "utf8")
+    const log = await Bun.file(logPath).text()
     expect(log).toContain("pane close p1")
     expect(log.match(/workspace create/g)).toHaveLength(1)
     expect(log).not.toContain("tab create")
@@ -1736,7 +1747,11 @@ describe("herdr surface", () => {
     await expect(new HerdrSurface().spawn(request)).rejects.toThrow(
       'is on branch "wrong", expected "expected"'
     )
-    expect(await readFile(logPath, "utf8").catch(() => "")).toBe("")
+    expect(
+      await Bun.file(logPath)
+        .text()
+        .catch(() => "")
+    ).toBe("")
     Bun.spawnSync(["git", "worktree", "remove", "--force", target], {
       cwd: temporaryRoot
     })
@@ -1753,7 +1768,7 @@ describe("herdr surface", () => {
       placement: placement(node.id)
     })
     expect(observation.providerSessionId).toBe("session-1")
-    const log = await readFile(logPath, "utf8")
+    const log = await Bun.file(logPath).text()
     // Two readiness polls (not-ready, then ready) both precede the prompt.
     const promptIndex = log.indexOf("agent prompt p1")
     const polls = [...log.matchAll(/agent get p1/g)].filter(
@@ -1777,8 +1792,8 @@ describe("herdr surface", () => {
     expect(observation.providerSessionId).toBe("session-1")
     const attempt = runState.nodes[node.id]!.attempts[0]!
     const promptFile = path.join(path.dirname(attempt.resultPath), "prompt.txt")
-    expect(await readFile(promptFile, "utf8")).toBe(longPrompt)
-    const log = await readFile(logPath, "utf8")
+    expect(await Bun.file(promptFile).text()).toBe(longPrompt)
+    const log = await Bun.file(logPath).text()
     const promptLine = log.split("\n").find((line) => line.startsWith("agent prompt")) as string
     expect(promptLine).toContain(`saved it to ${promptFile}`)
     expect(promptLine).toContain("orchestrate launcher")
@@ -1797,7 +1812,7 @@ describe("herdr surface", () => {
       placement: placement(node.id)
     })
     expect(observation.providerSessionId).toBe("session-1")
-    const log = await readFile(logPath, "utf8")
+    const log = await Bun.file(logPath).text()
     expect(log.split("\n").filter((line) => line.startsWith("agent prompt")).length).toBe(2)
     expect(log).not.toContain("pane close p1")
   })
@@ -1822,7 +1837,7 @@ describe("herdr surface", () => {
     expect((failure as Error).message).toContain("ambiguous")
     const attempt = runState.nodes[node.id]!.attempts[0]!
     const receipt = JSON.parse(
-      await readFile(path.join(path.dirname(attempt.outputPath), "spawn.json"), "utf8")
+      await Bun.file(path.join(path.dirname(attempt.outputPath), "spawn.json")).text()
     ) as { status: string; providerSessionId: string | null }
     expect(receipt.status).toBe("ambiguous")
     expect(receipt.providerSessionId).toMatch(
@@ -1833,7 +1848,7 @@ describe("herdr surface", () => {
     // Recovery must adopt the exact launcher-chosen id without observing a
     // replacement session or re-prompting.
     await mkdir(path.dirname(attempt.resultPath), { recursive: true })
-    await writeFile(
+    await Bun.write(
       completionSubmissionPath(attempt.resultPath),
       JSON.stringify({
         runId: runState.id,
@@ -1841,13 +1856,14 @@ describe("herdr surface", () => {
         token: "token-1",
         outcome: "completed",
         hold: false
-      })
+      }),
+      { createPath: false }
     )
     await writeShim(false, false, true, "none", "p1", false, "always")
-    const before = await readFile(logPath, "utf8")
+    const before = await Bun.file(logPath).text()
     const observation = await surface.recoverOrSpawn(request)
     expect(observation.providerSessionId).toBe(receipt.providerSessionId)
-    const after = await readFile(logPath, "utf8")
+    const after = await Bun.file(logPath).text()
     expect(after.split("agent get p1").length).toBe(before.split("agent get p1").length)
     expect(after.split("agent prompt").length).toBe(before.split("agent prompt").length)
     expect(after.split("agent start").length).toBe(before.split("agent start").length)
@@ -1869,8 +1885,8 @@ describe("herdr surface", () => {
     await expect(surface.spawn(request)).rejects.toBeInstanceOf(HerdrObservationError)
     const attempt = runState.nodes[node.id]!.attempts[0]!
     await mkdir(path.dirname(attempt.resultPath), { recursive: true })
-    await writeFile(attempt.resultPath, '{"clean":true}\n')
-    await writeFile(
+    await Bun.write(attempt.resultPath, '{"clean":true}\n', { createPath: false })
+    await Bun.write(
       completionSubmissionPath(attempt.resultPath),
       `${JSON.stringify({
         runId: runState.id,
@@ -1878,19 +1894,20 @@ describe("herdr surface", () => {
         token: activeIntent.token,
         outcome: "completed",
         hold: false
-      })}\n`
+      })}\n`,
+      { createPath: false }
     )
     await writeShim(true, false, true, "none", "p1")
-    const before = await readFile(logPath, "utf8")
+    const before = await Bun.file(logPath).text()
 
     await expect(surface.recoverOrSpawn(request)).rejects.toThrow(
       "failing this attempt instead of reusing its completion token"
     )
-    const after = await readFile(logPath, "utf8")
+    const after = await Bun.file(logPath).text()
     expect(after.split("agent prompt").length).toBe(before.split("agent prompt").length)
     expect(after.split("agent start").length).toBe(before.split("agent start").length)
     const receipt = JSON.parse(
-      await readFile(path.join(path.dirname(attempt.outputPath), "spawn.json"), "utf8")
+      await Bun.file(path.join(path.dirname(attempt.outputPath), "spawn.json")).text()
     ) as { status: string; providerSessionId: string | null }
     expect(receipt).toMatchObject({ status: "ambiguous", providerSessionId: null })
   })
@@ -1913,7 +1930,7 @@ describe("herdr surface", () => {
     expect(observation.providerSessionId).toMatch(
       /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
     )
-    const log = await readFile(logPath, "utf8")
+    const log = await Bun.file(logPath).text()
     expect(log).toContain(`--session-id ${observation.providerSessionId}`)
     expect(log.slice(log.indexOf("agent prompt p1"))).not.toContain("agent get p1")
     // Claude sessions are project-scoped by cwd: lineage nodes launch from
@@ -1923,13 +1940,12 @@ describe("herdr surface", () => {
       .find((line) => line.startsWith("workspace create")) as string
     expect(workspaceLine).toContain("claude-sessions")
     const runState = state(node.id)
-    const settings = await readFile(
+    const settings = await Bun.file(
       path.join(
         path.dirname(runState.nodes[node.id]!.attempts[0]!.resultPath),
         "claude-settings.json"
-      ),
-      "utf8"
-    )
+      )
+    ).text()
     expect(settings).toContain("claude-sessions")
   })
 
@@ -1950,7 +1966,7 @@ describe("herdr surface", () => {
     expect((failure as Error).message).toContain("Session capture")
     expect((failure as Error).cause).toBeInstanceOf(Error)
     expect(((failure as Error).cause as Error).message).toContain("session.saveAs")
-    const log = await readFile(logPath, "utf8")
+    const log = await Bun.file(logPath).text()
     expect(log.indexOf("agent prompt p1 Prompt")).toBeLessThan(log.lastIndexOf("agent get p1"))
     expect(log).not.toContain("pane close p1")
 
@@ -1961,7 +1977,7 @@ describe("herdr surface", () => {
     const observation = await surface.recoverOrSpawn(request)
     expect(observation.providerSessionId).toBe("session-1")
     expect(observation.pane.paneId).toBe("p1")
-    const healed = await readFile(logPath, "utf8")
+    const healed = await Bun.file(logPath).text()
     expect(healed.split("agent prompt p1").length - 1).toBe(1)
     expect(healed.split("agent start").length - 1).toBe(1)
 
@@ -1980,7 +1996,7 @@ describe("herdr surface", () => {
       placement: placement(node.id)
     })
     expect(observation.providerSessionId).toBe("session-1")
-    const log = await readFile(logPath, "utf8")
+    const log = await Bun.file(logPath).text()
     expect(log.split("agent get p1").length - 1).toBeGreaterThanOrEqual(2)
     expect(log).not.toContain("pane close p1")
   })

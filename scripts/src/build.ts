@@ -1,4 +1,4 @@
-import { chmod, readdir, readFile } from "node:fs/promises"
+import { chmod, readdir } from "node:fs/promises"
 import path from "node:path"
 
 import { ASSET_SOURCES } from "./assets.js"
@@ -19,7 +19,7 @@ async function sourceFiles(directory: string): Promise<readonly string[]> {
 
 const root = path.resolve(import.meta.dir, "..")
 const repository = path.resolve(root, "..")
-const packageJson = JSON.parse(await readFile(path.join(root, "package.json"), "utf8")) as {
+const packageJson = JSON.parse(await Bun.file(path.join(root, "package.json")).text()) as {
   readonly version: string
 }
 const requestedVersion = process.env.ORCHESTRATE_RELEASE_VERSION?.trim()
@@ -39,13 +39,13 @@ const hasher = new Bun.CryptoHasher("sha256")
 hasher.update(`version:${releaseVersion}`)
 for (const file of inputs) {
   hasher.update(path.relative(root, file))
-  hasher.update(await readFile(file))
+  hasher.update(await Bun.file(file).bytes())
 }
 const build = hasher.digest("hex").slice(0, 16)
 const assets = Object.fromEntries(
   await Promise.all(
     Object.entries(ASSET_SOURCES).map(async ([destination, source]) => {
-      const raw = await readFile(path.join(repository, source), "utf8")
+      const raw = await Bun.file(path.join(repository, source)).text()
       const content =
         destination === "herdr-plugin/herdr-plugin.toml"
           ? raw.replace(/^version = ".*"$/m, `version = "${releaseVersion}"`)

@@ -1,4 +1,4 @@
-import { readFile, readdir } from "node:fs/promises"
+import { readdir } from "node:fs/promises"
 import path from "node:path"
 
 async function sourceFiles(directory: string): Promise<readonly string[]> {
@@ -28,13 +28,13 @@ function packageName(specifier: string): string | null {
 }
 
 const scriptsRoot = path.resolve(import.meta.dir, "..")
-const manifest = JSON.parse(await readFile(path.join(scriptsRoot, "package.json"), "utf8")) as {
+const manifest = JSON.parse(await Bun.file(path.join(scriptsRoot, "package.json")).text()) as {
   readonly dependencies: Readonly<Record<string, string>>
 }
 const imports = new Set<string>()
 const importPattern = /(?:from\s+|import\s*\()\s*["']([^"']+)["']/g
 for (const file of await sourceFiles(path.join(scriptsRoot, "src"))) {
-  const source = await readFile(file, "utf8")
+  const source = await Bun.file(file).text()
   for (const match of source.matchAll(importPattern)) {
     const dependency = packageName(match[1] as string)
     if (dependency !== null) {

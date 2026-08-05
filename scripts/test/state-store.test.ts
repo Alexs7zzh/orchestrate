@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test"
-import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises"
+import { mkdir, mkdtemp, readdir, rm } from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 
@@ -149,7 +149,7 @@ describe("state store", () => {
       if (damage === "missing") {
         await rm(runStatePath(runDir))
       } else {
-        await writeFile(runStatePath(runDir), '{"sequence":')
+        await Bun.write(runStatePath(runDir), '{"sequence":', { createPath: false })
       }
       expect(await readRunState(runDir)).toEqual(initial)
       const release = await acquireRunLock(runDir)
@@ -158,7 +158,7 @@ describe("state store", () => {
       } finally {
         await release()
       }
-      expect(JSON.parse(await readFile(runStatePath(runDir), "utf8"))).toEqual(initial)
+      expect(JSON.parse(await Bun.file(runStatePath(runDir)).text())).toEqual(initial)
       await rm(runDir, { recursive: true, force: true })
     }
   })
@@ -205,7 +205,7 @@ describe("state store", () => {
     await appendEvents(runDir, [event(paused, initial, "run.paused")])
 
     expect(await readRunState(runDir)).toEqual(paused)
-    expect(JSON.parse(await readFile(runStatePath(runDir), "utf8"))).toEqual(initial)
+    expect(JSON.parse(await Bun.file(runStatePath(runDir)).text())).toEqual(initial)
   })
 
   test("serializes concurrent crank lock holders", async () => {
@@ -243,7 +243,7 @@ describe("state store", () => {
       )
     )
     expect(await Promise.all(children.map((child) => child.exited))).toEqual([0, 0, 0])
-    const records = (await readFile(log, "utf8")).trim().split("\n")
+    const records = (await Bun.file(log).text()).trim().split("\n")
     expect(records).toHaveLength(6)
     let active: string | null = null
     for (const record of records) {
@@ -274,9 +274,11 @@ describe("state store", () => {
     const runDir = await persistNewRun(workflow(), DEFAULT_UI_PREFERENCES, initial, [
       event(initial, null, "run.started")
     ])
-    await writeFile(workflowPath(runDir), JSON.stringify({ name: "incomplete" }))
+    await Bun.write(workflowPath(runDir), JSON.stringify({ name: "incomplete" }), {
+      createPath: false
+    })
     await expect(readWorkflow(runDir)).rejects.toThrow("Invalid workflow snapshot")
-    await writeFile(uiPath(runDir), JSON.stringify({ board: "split-right" }))
+    await Bun.write(uiPath(runDir), JSON.stringify({ board: "split-right" }), { createPath: false })
     await expect(readUiSnapshot(runDir)).rejects.toThrow("Invalid UI snapshot")
   })
 
@@ -304,7 +306,7 @@ describe("state store", () => {
         data: { scope: "instance", source: "manual" }
       }
     ] as const
-    const priorJournal = await readFile(eventsPath(runDir), "utf8")
+    const priorJournal = await Bun.file(eventsPath(runDir)).text()
     const enospc = Object.assign(new Error("injected ENOSPC after a short write"), {
       code: "ENOSPC"
     })
@@ -316,7 +318,7 @@ describe("state store", () => {
     })
 
     await expect(appendEvents(runDir, batch)).rejects.toThrow("injected ENOSPC")
-    expect(await readFile(eventsPath(runDir), "utf8")).toBe(priorJournal)
+    expect(await Bun.file(eventsPath(runDir)).text()).toBe(priorJournal)
     expect(await readRunState(runDir)).toEqual(initial)
     expect((await readdir(runDir)).some((entry) => entry.endsWith(".tmp"))).toBeTrue()
 

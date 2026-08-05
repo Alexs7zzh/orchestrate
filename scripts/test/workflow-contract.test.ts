@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { mkdir, mkdtemp, readFile, rm, symlink } from "node:fs/promises"
+import { mkdir, mkdtemp, rm, symlink } from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 
@@ -122,10 +122,7 @@ describe("workflow contract", () => {
   })
 
   test("keeps the documented JSON workflow example valid", async () => {
-    const document = await readFile(
-      new URL("../../references/examples.md", import.meta.url),
-      "utf8"
-    )
+    const document = await Bun.file(new URL("../../references/examples.md", import.meta.url)).text()
     const block = document.match(/```json\n([\s\S]*?)\n```/)?.[1]
     expect(block).toBeDefined()
     expect(

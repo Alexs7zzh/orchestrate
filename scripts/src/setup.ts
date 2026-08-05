@@ -259,9 +259,7 @@ async function stageExecutable(stage: string, invokedPath: string): Promise<void
   )
   await copyFile(invoked, runtime)
   await chmod(runtime, 0o755)
-  const launch = invoked.endsWith(".mjs")
-    ? `exec node ${JSON.stringify(stableRuntime)} "$@"`
-    : `exec ${JSON.stringify(stableRuntime)} "$@"`
+  const launch = `exec ${JSON.stringify(stableRuntime)} "$@"`
   const dollar = "$"
   const wrapper = [
     "#!/bin/sh",

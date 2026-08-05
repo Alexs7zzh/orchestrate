@@ -6,13 +6,11 @@ import {
   lstat,
   mkdir,
   mkdtemp,
-  readFile,
   readlink,
   readdir,
   rm,
   symlink,
-  utimes,
-  writeFile
+  utimes
 } from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
@@ -35,9 +33,9 @@ beforeEach(async () => {
   executable = path.join(root, "orchestrate")
   await mkdir(path.join(home, ".codex"), { recursive: true })
   await mkdir(bin)
-  await writeFile(executable, "#!/bin/sh\nexit 0\n")
+  await Bun.write(executable, "#!/bin/sh\nexit 0\n", { createPath: false, mode: 0o755 })
   await chmod(executable, 0o755)
-  await writeFile(
+  await Bun.write(
     path.join(bin, "herdr"),
     `#!/bin/sh
 case "$1 $2" in
@@ -47,7 +45,8 @@ case "$1 $2" in
   "plugin list") echo '{"result":{"plugins":[{"id":"orchestrate"}]}}' ;;
 esac
 exit 0
-`
+`,
+    { createPath: false, mode: 0o755 }
   )
   await chmod(path.join(bin, "herdr"), 0o755)
   originalHome = process.env.HOME
@@ -89,7 +88,7 @@ describe("setup pipeline", () => {
   test("herdr panel opens the attention run and falls back to the latest run", async () => {
     const log = path.join(root, "panel.log")
     const cli = path.join(bin, "orchestrate")
-    await writeFile(
+    await Bun.write(
       cli,
       `#!/bin/sh
 printf '%s\\n' "$*" >> ${JSON.stringify(log)}
@@ -98,7 +97,8 @@ case "$*" in
   "runs") printf '%s\\n' '20260803000001-bbbbbbbb  completed  latest' ;;
   "board "*) exit 0 ;;
 esac
-`
+`,
+      { createPath: false, mode: 0o755 }
     )
     await chmod(cli, 0o755)
     const panel = path.resolve(import.meta.dir, "../../herdr-plugin/bin/orchestrate-panel")
@@ -108,17 +108,17 @@ esac
       env: { ...process.env, PATH: `${bin}:/usr/bin:/bin`, PANEL_HAS_ATTENTION: "1" }
     })
     expect(attention.status).toBe(0)
-    expect(await readFile(log, "utf8")).toBe(
+    expect(await Bun.file(log).text()).toBe(
       "runs --needs-attention\nboard 20260803000000-aaaaaaaa\n"
     )
 
-    await writeFile(log, "")
+    await Bun.write(log, "", { createPath: false, mode: 0o644 })
     const latest = spawnSync("/bin/sh", [panel], {
       encoding: "utf8",
       env: { ...process.env, PATH: `${bin}:/usr/bin:/bin` }
     })
     expect(latest.status).toBe(0)
-    expect(await readFile(log, "utf8")).toBe(
+    expect(await Bun.file(log).text()).toBe(
       "runs --needs-attention\nruns\nboard 20260803000001-bbbbbbbb\n"
     )
   })
@@ -131,7 +131,7 @@ esac
     const share = path.join(home, ".local", "share", "orchestrate")
     const current = path.join(share, "current")
     expect((await lstat(current)).isSymbolicLink()).toBeTrue()
-    expect(await readFile(path.join(current, "skill", "SKILL.md"), "utf8")).toContain("Orchestrate")
+    expect(await Bun.file(path.join(current, "skill", "SKILL.md")).text()).toContain("Orchestrate")
     expect(await target(path.join(home, ".local", "bin", "orchestrate"))).toBe(
       path.join(current, "bin", "orchestrate")
     )
@@ -156,11 +156,51 @@ esac
     ).toHaveLength(1)
   })
 
+  test("runs a staged source bundle under Bun for native preference locking", async () => {
+    const sourceBundle = path.resolve(import.meta.dir, "../orchestrate.mjs")
+    const nodeTrap = path.join(bin, "node")
+    await Bun.write(
+      nodeTrap,
+      "#!/bin/sh\necho 'staged source bundle invoked node' >&2\nexit 97\n",
+      {
+        createPath: false,
+        mode: 0o755
+      }
+    )
+    await chmod(nodeTrap, 0o755)
+    const stateDir = path.join(root, "staged-state")
+    const env = {
+      ...process.env,
+      HOME: home,
+      PATH: `${bin}:${path.dirname(process.execPath)}:/usr/bin:/bin`,
+      ORCHESTRATE_STATE_DIR: stateDir
+    }
+
+    const setup = spawnSync(sourceBundle, ["setup", "--no-wizard", "--json"], {
+      encoding: "utf8",
+      env
+    })
+    expect(setup.stderr).toBe("")
+    expect(setup.status).toBe(0)
+
+    const wrapper = path.join(home, ".local", "bin", "orchestrate")
+    expect(await Bun.file(wrapper).text()).not.toContain("exec node")
+    const updated = spawnSync(wrapper, ["ui", "set", "focus", JSON.stringify("never"), "--json"], {
+      encoding: "utf8",
+      env
+    })
+    expect(updated.stderr).toBe("")
+    expect(updated.status).toBe(0)
+    const preferences = JSON.parse(await Bun.file(path.join(stateDir, "preferences.json")).text())
+    expect(preferences.global.ui.focus).toBe("never")
+  })
+
   test("installed plugin uses its staged CLI instead of an earlier PATH entry", async () => {
     const installedLog = path.join(root, "installed.log")
-    await writeFile(
+    await Bun.write(
       executable,
-      `#!/bin/sh\nprintf '%s\\n' "$*" >> ${JSON.stringify(installedLog)}\nexit 0\n`
+      `#!/bin/sh\nprintf '%s\\n' "$*" >> ${JSON.stringify(installedLog)}\nexit 0\n`,
+      { createPath: false, mode: 0o755 }
     )
     await chmod(executable, 0o755)
     await runSetup({ invokedPath: executable, remove: false, dryRun: false })
@@ -168,15 +208,16 @@ esac
     const staleBin = path.join(root, "stale-bin")
     const staleLog = path.join(root, "stale.log")
     await mkdir(staleBin)
-    await writeFile(
+    await Bun.write(
       path.join(staleBin, "orchestrate"),
-      `#!/bin/sh\nprintf '%s\\n' "$*" >> ${JSON.stringify(staleLog)}\nexit 77\n`
+      `#!/bin/sh\nprintf '%s\\n' "$*" >> ${JSON.stringify(staleLog)}\nexit 77\n`,
+      { createPath: false, mode: 0o755 }
     )
     await chmod(path.join(staleBin, "orchestrate"), 0o755)
 
     const current = await target(path.join(home, ".local", "share", "orchestrate", "current"))
     const panel = path.join(current, "herdr-plugin", "bin", "orchestrate-panel")
-    expect(await readFile(panel, "utf8")).toContain(
+    expect(await Bun.file(panel).text()).toContain(
       `ORCHESTRATE_EXECUTABLE='${path.join(current, "bin", "orchestrate")}'`
     )
 
@@ -186,8 +227,12 @@ esac
     })
     expect(invoked.status).toBe(0)
     expect(invoked.stderr).toBe("")
-    expect(await readFile(installedLog, "utf8")).toBe("herdr-event --json\n")
-    expect(await readFile(staleLog, "utf8").catch(() => "")).toBe("")
+    expect(await Bun.file(installedLog).text()).toBe("herdr-event --json\n")
+    expect(
+      await Bun.file(staleLog)
+        .text()
+        .catch(() => "")
+    ).toBe("")
   })
 
   test("atomically changes builds, prunes old and interrupted stages, and supports downgrade", async () => {
@@ -219,18 +264,20 @@ esac
     setRuntimeBuildForTests("build-a")
     await runSetup({ invokedPath: executable, remove: false, dryRun: false })
     await mkdir(runDir, { recursive: true })
-    await writeFile(
+    await Bun.write(
       path.join(runDir, "state.json"),
-      JSON.stringify({ status: "running", runtimeVersion: "build-a" })
+      JSON.stringify({ status: "running", runtimeVersion: "build-a" }),
+      { createPath: false, mode: 0o644 }
     )
 
     setRuntimeBuildForTests("build-b")
     await runSetup({ invokedPath: executable, remove: false, dryRun: false })
     expect((await readdir(path.join(share, "versions"))).toSorted()).toEqual(["build-a", "build-b"])
 
-    await writeFile(
+    await Bun.write(
       path.join(runDir, "state.json"),
-      JSON.stringify({ status: "stopped", runtimeVersion: "build-a" })
+      JSON.stringify({ status: "stopped", runtimeVersion: "build-a" }),
+      { createPath: false, mode: 0o644 }
     )
     setRuntimeBuildForTests("build-c")
     await runSetup({ invokedPath: executable, remove: false, dryRun: false })
@@ -240,9 +287,10 @@ esac
   test("skips copied old staged wrappers and delegates setup to a newer formula build", async () => {
     const bundle = path.join(root, "build-b-orchestrate")
     const sourceBundle = path.resolve(import.meta.dir, "../orchestrate.mjs")
-    await writeFile(
+    await Bun.write(
       bundle,
-      `#!/bin/sh\nexec ${JSON.stringify(process.execPath)} ${JSON.stringify(sourceBundle)} "$@"\n`
+      `#!/bin/sh\nexec ${JSON.stringify(process.execPath)} ${JSON.stringify(sourceBundle)} "$@"\n`,
+      { createPath: false, mode: 0o755 }
     )
     await chmod(bundle, 0o755)
     const share = path.join(home, ".local", "share", "orchestrate")
@@ -257,7 +305,10 @@ esac
     const formulaBin = path.join(root, "formula-bin")
     await mkdir(formulaBin)
     const formula = path.join(formulaBin, "orchestrate")
-    await writeFile(formula, `#!/bin/sh\nexec ${JSON.stringify(bundle)} "$@"\n`)
+    await Bun.write(formula, `#!/bin/sh\nexec ${JSON.stringify(bundle)} "$@"\n`, {
+      createPath: false,
+      mode: 0o755
+    })
     await chmod(formula, 0o755)
     const localBin = path.join(home, ".local", "bin")
     const copiedStageBin = path.join(root, "copied-stage-bin")
@@ -277,7 +328,7 @@ esac
     )
     expect(upgraded.stderr).toBe("")
     expect(upgraded.status).toBe(0)
-    expect(JSON.parse(await readFile(path.join(share, "current", "build.json"), "utf8"))).toEqual({
+    expect(JSON.parse(await Bun.file(path.join(share, "current", "build.json")).text())).toEqual({
       build: formulaBuild
     })
     const installed = spawnSync(path.join(localBin, "orchestrate"), ["--version"], {
@@ -297,7 +348,7 @@ esac
     await runSetup({ invokedPath: executable, remove: false, dryRun: false })
     const state = path.join(home, ".local", "state", "orchestrate", "keep.txt")
     await mkdir(path.dirname(state), { recursive: true })
-    await writeFile(state, "keep")
+    await Bun.write(state, "keep", { createPath: false, mode: 0o644 })
     await runSetup({ invokedPath: executable, remove: true, dryRun: false })
     expect(
       await lstat(path.join(home, ".local", "share", "orchestrate")).catch(() => null)
@@ -305,19 +356,19 @@ esac
     expect(
       await lstat(path.join(home, ".local", "bin", "orchestrate")).catch(() => null)
     ).toBeNull()
-    expect(await readFile(state, "utf8")).toBe("keep")
+    expect(await Bun.file(state).text()).toBe("keep")
   })
 
   test("preserves foreign stable-link collisions before registering the plugin", async () => {
     const share = path.join(home, ".local", "share", "orchestrate")
     const current = path.join(share, "current")
     await mkdir(share, { recursive: true })
-    await writeFile(current, "user-owned\n")
+    await Bun.write(current, "user-owned\n", { createPath: false, mode: 0o644 })
 
     await expect(
       runSetup({ invokedPath: executable, remove: false, dryRun: false })
     ).rejects.toThrow(`Refusing to replace non-symlink ${current}.`)
-    expect(await readFile(current, "utf8")).toBe("user-owned\n")
+    expect(await Bun.file(current).text()).toBe("user-owned\n")
     expect(await lstat(path.join(share, "versions")).catch(() => null)).toBeNull()
   })
 
@@ -411,7 +462,7 @@ esac
     const keg = path.join(root, "keg")
     const kegBinary = path.join(keg, "libexec", "bin", "orchestrate")
     await mkdir(path.dirname(kegBinary), { recursive: true })
-    await writeFile(
+    await Bun.write(
       kegBinary,
       `#!/bin/sh
 printf '%s\\n' "$*" >> ${JSON.stringify(adoptLog)}
@@ -419,11 +470,12 @@ case "$1" in
   --version) printf '%s\\n' "@local/orchestrate-runtime@9.9.9+abcdef1234567890" ;;
   setup) printf '{}\\n' ;;
 esac
-`
+`,
+      { createPath: false, mode: 0o755 }
     )
     await chmod(kegBinary, 0o755)
     const receipt = path.join(keg, "INSTALL_RECEIPT.json")
-    await writeFile(receipt, "{}\n")
+    await Bun.write(receipt, "{}\n", { createPath: false, mode: 0o644 })
     const kegBin = path.join(root, "keg-bin")
     await mkdir(kegBin)
     await symlink(kegBinary, path.join(kegBin, "orchestrate"))
@@ -438,7 +490,7 @@ esac
       from: "build-a",
       to: "@local/orchestrate-runtime@9.9.9+abcdef1234567890"
     })
-    expect(await readFile(adoptLog, "utf8")).toContain("setup --no-wizard --json")
+    expect(await Bun.file(adoptLog).text()).toContain("setup --no-wizard --json")
 
     await utimes(receipt, new Date(), new Date(Date.now() - 60_000))
     expect(await migrateStagedInstallation(stagedBinary)).toEqual({
@@ -470,12 +522,15 @@ esac
     await mkdir(runDir, { recursive: true })
 
     const statePath = path.join(runDir, "state.json")
-    await writeFile(statePath, JSON.stringify({ status: "running" }))
+    await Bun.write(statePath, JSON.stringify({ status: "running" }), {
+      createPath: false,
+      mode: 0o644
+    })
     expect(await migrateStagedInstallation(executable)).toEqual({
       migrated: false,
       reason: "unsettled runs"
     })
-    await writeFile(statePath, "torn-snapshot")
+    await Bun.write(statePath, "torn-snapshot", { createPath: false, mode: 0o644 })
     expect(await migrateStagedInstallation(executable)).toEqual({
       migrated: false,
       reason: "unsettled runs"
@@ -493,7 +548,10 @@ esac
       await chmod(runsRoot, 0o755)
     }
 
-    await writeFile(statePath, JSON.stringify({ status: "completed" }))
+    await Bun.write(statePath, JSON.stringify({ status: "completed" }), {
+      createPath: false,
+      mode: 0o644
+    })
     expect(await migrateStagedInstallation(executable)).toEqual({
       migrated: true,
       from: "build-a",

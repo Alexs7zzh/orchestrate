@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test"
-import { mkdir, mkdtemp, open, readFile, rm, writeFile } from "node:fs/promises"
+import { mkdir, mkdtemp, open, rm } from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 
@@ -47,7 +47,8 @@ async function waitForRecords(log: string, expected: readonly string[]): Promise
   const deadline = Date.now() + 5_000
   while (Date.now() < deadline) {
     const records = new Set(
-      await readFile(log, "utf8")
+      await Bun.file(log)
+        .text()
         .then((value) => value.trim().split("\n").filter(Boolean))
         .catch((): string[] => [])
     )
@@ -111,20 +112,20 @@ describe("UI preferences contract", () => {
 
   test("rejects a placement object missing its required workspace without rewriting it", async () => {
     await setUiPreference("placement.maxSplitsPerTab", 7, null)
-    const stored = JSON.parse(await readFile(preferencesPath(), "utf8")) as {
+    const stored = JSON.parse(await Bun.file(preferencesPath()).text()) as {
       global: { ui: { placement: Record<string, unknown> } }
     }
     delete stored.global.ui.placement.workspace
     const malformed = `${JSON.stringify(stored)}\n`
-    await writeFile(preferencesPath(), malformed)
+    await Bun.write(preferencesPath(), malformed, { createPath: false })
 
     await expect(readPreferences()).rejects.toThrow("Missing key")
-    expect(await readFile(preferencesPath(), "utf8")).toBe(malformed)
+    expect(await Bun.file(preferencesPath()).text()).toBe(malformed)
   })
 
   test("rejects unknown design-preference fields without alternate parsing", async () => {
     await setUiPreference("focus", "never", null)
-    const stored = JSON.parse(await readFile(preferencesPath(), "utf8")) as {
+    const stored = JSON.parse(await Bun.file(preferencesPath()).text()) as {
       global: Record<string, unknown>
     }
     for (const field of [
@@ -137,7 +138,7 @@ describe("UI preferences contract", () => {
     ]) {
       const malformed = structuredClone(stored)
       malformed.global[field] = null
-      await writeFile(preferencesPath(), `${JSON.stringify(malformed)}\n`)
+      await Bun.write(preferencesPath(), `${JSON.stringify(malformed)}\n`, { createPath: false })
       await expect(readPreferences()).rejects.toThrow("Unexpected key")
     }
   })
@@ -196,7 +197,7 @@ describe("UI preferences contract", () => {
         interleavingLog,
         writerNames.map((name) => `${name}:blocked`)
       )
-      await expect(readFile(preferencesPath(), "utf8")).rejects.toMatchObject({ code: "ENOENT" })
+      await expect(Bun.file(preferencesPath()).text()).rejects.toMatchObject({ code: "ENOENT" })
     } catch (error) {
       interleavingError = error
     } finally {

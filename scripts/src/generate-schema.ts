@@ -1,5 +1,3 @@
-import { readFile, writeFile } from "node:fs/promises"
-
 import { fetchBaselineHerdrApiSchema } from "./herdr-contract.js"
 import {
   EventRecordSchema,
@@ -155,7 +153,10 @@ async function runHerdrSchemaCommand(args: readonly string[]): Promise<string> {
 
 async function refreshHerdrSnapshot(): Promise<void> {
   const compact = compactHerdrSchema(await fetchBaselineHerdrApiSchema(runHerdrSchemaCommand))
-  await writeFile(herdrSnapshotUrl, `${JSON.stringify(compact, null, 2)}\n`)
+  await Bun.write(herdrSnapshotUrl, `${JSON.stringify(compact, null, 2)}\n`, {
+    createPath: false,
+    mode: 0o644
+  })
 }
 
 function schemaIdentifier(name: string): string {
@@ -343,11 +344,15 @@ const outputs = [
 ] as const
 
 for (const [relativePath, schema] of outputs) {
-  await writeFile(
+  await Bun.write(
     new URL(relativePath, import.meta.url),
-    `${JSON.stringify(jsonSchemaDocumentFor(schema), null, 2)}\n`
+    `${JSON.stringify(jsonSchemaDocumentFor(schema), null, 2)}\n`,
+    { createPath: false, mode: 0o644 }
   )
 }
 
-const herdrSnapshot = JSON.parse(await readFile(herdrSnapshotUrl, "utf8")) as unknown
-await writeFile(herdrGeneratedUrl, generatedHerdrModule(herdrSnapshot))
+const herdrSnapshot = JSON.parse(await Bun.file(herdrSnapshotUrl).text()) as unknown
+await Bun.write(herdrGeneratedUrl, generatedHerdrModule(herdrSnapshot), {
+  createPath: false,
+  mode: 0o644
+})
