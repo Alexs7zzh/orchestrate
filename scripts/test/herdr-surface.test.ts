@@ -40,7 +40,16 @@ import {
   removeWorkflowWorktrees,
   setAgentSessionTimeoutForTests
 } from "../src/herdr-surface.js"
-import { completionSubmissionPath } from "../src/state.js"
+import { DEFAULT_UI_PREFERENCES } from "../src/preferences.js"
+import { prepareNode } from "../src/prompt.js"
+import {
+  completionSubmissionPath,
+  persistNewRun,
+  runDirectory as stateRunDirectory,
+  runtimeBuild
+} from "../src/state.js"
+import { createInitialRunState, transition } from "../src/transition.js"
+import { validateWorkflow } from "../src/validation.js"
 
 let temporaryRoot = ""
 let shimDirectory = ""
@@ -220,6 +229,27 @@ function intent(id: string): SpawnIntent {
     status: "planned",
     createdAt: "2026-08-02T12:00:00.000Z"
   }
+}
+
+async function persistRun(spec: WorkflowSpec): Promise<void> {
+  const digest = validateWorkflow(spec).digest
+  if (digest === null) {
+    throw new Error("invalid test workflow")
+  }
+  const runId = "20260802120000-1234abcd"
+  const initial = createInitialRunState(spec, {
+    id: runId,
+    runtimeVersion: runtimeBuild(),
+    digest,
+    now: "2026-08-02T12:00:00.000Z",
+    origin: null
+  })
+  const runDir = stateRunDirectory(runId)
+  const started = transition(initial, spec, { type: "run" }, initial.createdAt, {
+    prepareNode: (runState, workflowSpec, node) =>
+      prepareNode(workflowSpec, runState, runDir, node.id)
+  })
+  await persistNewRun(spec, DEFAULT_UI_PREFERENCES, started.state, started.events)
 }
 
 function herdrPane(
@@ -547,7 +577,7 @@ describe("herdr surface", () => {
     expect(log).not.toContain("workspace create")
   })
 
-  test("uses a dedicated run workspace even when a live origin exists", async () => {
+  test("reuses a dedicated run workspace's initial pane even when a live origin exists", async () => {
     const node = command()
     const runState: RunState = {
       ...state(node.id),
@@ -568,7 +598,9 @@ describe("herdr surface", () => {
     })
     const log = await readFile(logPath, "utf8")
     expect(log).toContain("workspace create")
-    expect(log).toContain("tab create --workspace w1")
+    expect(log).toContain("--env ORCHESTRATE_NODE_ID=check")
+    expect(log).toContain("tab rename t1 check")
+    expect(log).not.toContain("tab create --workspace w1")
     expect(log).not.toContain("pane get origin-pane")
   })
 
@@ -606,8 +638,105 @@ describe("herdr surface", () => {
     expect(observation.pane.workspaceId).toBe("w1")
     expect(log).toContain("pane get origin-pane")
     expect(log).toContain("workspace create")
-    expect(log).toContain("tab create --workspace w1")
+    expect(log).toContain("tab rename t1 check")
+    expect(log).not.toContain("tab create --workspace w1")
     expect(log).not.toContain("pane split --pane old-pane")
+  })
+
+  test("claims a created workspace pane once, then creates later tabs normally", async () => {
+    const first = command()
+    const second = agent()
+    const spec: WorkflowSpec = {
+      ...workflow(first),
+      concurrency: 2,
+      nodes: [first, second]
+    }
+    const baseState = state(first.id)
+    const runState: RunState = {
+      ...baseState,
+      nodes: {
+        [first.id]: baseState.nodes[first.id] as NodeRunState,
+        [second.id]: runtimeNode(second.id)
+      }
+    }
+    const surface = new HerdrSurface()
+
+    await surface.spawn({
+      workflow: spec,
+      state: runState,
+      intent: intent(first.id),
+      prompt: null,
+      placement: placement(first.id)
+    })
+    await surface.spawn({
+      workflow: spec,
+      state: runState,
+      intent: intent(second.id),
+      prompt: "Review after the first node.",
+      placement: placement(second.id)
+    })
+
+    const log = await readFile(logPath, "utf8")
+    expect(log.match(/workspace create/g)).toHaveLength(1)
+    expect(log.match(/tab rename t1 check/g)).toHaveLength(1)
+    expect(log.match(/tab create --workspace w1/g)).toHaveLength(1)
+  })
+
+  test("does not reclaim a root pane from a recovered run workspace", async () => {
+    const node = command()
+    const baseState = state(node.id)
+    const current = baseState.nodes[node.id] as NodeRunState
+    const runState: RunState = {
+      ...baseState,
+      nodes: {
+        [node.id]: {
+          ...current,
+          attempts: [
+            {
+              ...(current.attempts[0] as NodeRunState["attempts"][number]),
+              pane: {
+                workspaceId: "w1",
+                tabId: "existing-tab",
+                paneId: "existing-pane",
+                group: "previous",
+                surface: "tab"
+              }
+            }
+          ]
+        }
+      }
+    }
+
+    await new HerdrSurface().spawn({
+      workflow: workflow(node),
+      state: runState,
+      intent: intent(node.id),
+      prompt: null,
+      placement: placement(node.id)
+    })
+
+    const log = await readFile(logPath, "utf8")
+    expect(log).toContain("workspace get w1")
+    expect(log).toContain("tab create --workspace w1")
+    expect(log).not.toContain("workspace create")
+    expect(log).not.toContain("tab rename")
+  })
+
+  test("uses a newly created workspace's initial pane for the board", async () => {
+    const spec = workflow(command())
+    await persistRun(spec)
+
+    await new HerdrSurface().openBoard("20260802120000-1234abcd", {
+      ...DEFAULT_UI_PREFERENCES,
+      board: "dedicated-workspace"
+    })
+
+    const log = await readFile(logPath, "utf8")
+    expect(log).toContain("workspace create")
+    expect(log).toContain("tab rename t1 Board")
+    expect(log).not.toContain("tab create")
+    expect(log).toContain("pane rename p1 surface-test: board")
+    expect(log).toContain("pane run p1 /tmp/orchestrate board 20260802120000-1234abcd")
   })
 
   test("distinguishes explicit pane absence from herdr transport failure", async () => {
@@ -1195,7 +1324,12 @@ describe("herdr surface", () => {
       })
       const log = await readFile(logPath, "utf8")
       expect(log).toContain("pane get stale-anchor")
-      expect(log).toContain(`tab create --workspace ${expectedWorkspace}`)
+      if (destination === "dedicated") {
+        expect(log).toContain("tab rename t1 check")
+        expect(log).not.toContain("tab create --workspace w1")
+      } else {
+        expect(log).toContain(`tab create --workspace ${expectedWorkspace}`)
+      }
       expect(log).not.toContain("pane split --pane stale-anchor")
     }
   )
@@ -1256,7 +1390,8 @@ describe("herdr surface", () => {
     const log = await readFile(logPath, "utf8")
     expect(log.match(/pane get anchor/g)).toHaveLength(1)
     expect(log.match(/pane split --pane anchor/g)).toHaveLength(1)
-    expect(log.match(/tab create --workspace w1/g)).toHaveLength(1)
+    expect(log.match(/tab rename t1 check/g)).toHaveLength(1)
+    expect(log).not.toContain("tab create --workspace w1")
   })
 
   test("preserves split intent when the split itself has a transport error", async () => {
@@ -1299,7 +1434,8 @@ describe("herdr surface", () => {
     const recovered = await new HerdrSurface().recoverOrSpawn(request)
     expect(recovered).toEqual(first)
     const log = await readFile(logPath, "utf8")
-    expect(log.match(/tab create/g)).toHaveLength(1)
+    expect(log.match(/workspace create/g)).toHaveLength(1)
+    expect(log).not.toContain("tab create")
   })
 
   test("adopts one prompt after acceptance-before-receipt crash without closing or respawning", async () => {
@@ -1335,7 +1471,8 @@ describe("herdr surface", () => {
       "Execute exactly once."
     )
     const log = await readFile(logPath, "utf8")
-    expect(log.match(/tab create/g)).toHaveLength(1)
+    expect(log.match(/workspace create/g)).toHaveLength(1)
+    expect(log).not.toContain("tab create")
     expect(log.match(/agent start o-review-7f87e2e85f26e92d/g)).toHaveLength(1)
     expect(log.match(/agent prompt p1 Execute exactly once\./g)).toHaveLength(1)
     expect(log).not.toContain("pane close p1")
@@ -1362,7 +1499,8 @@ describe("herdr surface", () => {
     expect((failure as Error).message).toContain("Could not verify receipt pane")
     expect(await readFile(receipt, "utf8")).toBe(before)
     const log = await readFile(logPath, "utf8")
-    expect(log.match(/tab create/g)).toHaveLength(1)
+    expect(log.match(/workspace create/g)).toHaveLength(1)
+    expect(log).not.toContain("tab create")
   })
 
   test("stops for inspection when an incomplete receipt still has a live pane", async () => {
@@ -1383,7 +1521,8 @@ describe("herdr surface", () => {
     )
     const log = await readFile(logPath, "utf8")
     expect(log).not.toContain("pane close p1")
-    expect(log.match(/tab create/g)).toHaveLength(1)
+    expect(log.match(/workspace create/g)).toHaveLength(1)
+    expect(log).not.toContain("tab create")
   })
 
   test("abandons a planned receipt without starting another pane", async () => {
@@ -1400,7 +1539,8 @@ describe("herdr surface", () => {
     await surface.abandonPlanned(request)
     const log = await readFile(logPath, "utf8")
     expect(log).toContain("pane close p1")
-    expect(log.match(/tab create/g)).toHaveLength(1)
+    expect(log.match(/workspace create/g)).toHaveLength(1)
+    expect(log).not.toContain("tab create")
   })
 
   test("creates distinct explicit Git worktrees for two repeat rounds and cleans both", async () => {
@@ -1778,8 +1918,10 @@ describe("herdr surface", () => {
     expect(log.slice(log.indexOf("agent prompt p1"))).not.toContain("agent get p1")
     // Claude sessions are project-scoped by cwd: lineage nodes launch from
     // the run-shared session directory, carved into the sandbox.
-    const tabLine = log.split("\n").find((line) => line.startsWith("tab create")) as string
-    expect(tabLine).toContain("claude-sessions")
+    const workspaceLine = log
+      .split("\n")
+      .find((line) => line.startsWith("workspace create")) as string
+    expect(workspaceLine).toContain("claude-sessions")
     const runState = state(node.id)
     const settings = await readFile(
       path.join(

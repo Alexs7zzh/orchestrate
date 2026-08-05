@@ -953,21 +953,42 @@ async function findWorkspace(workflow: WorkflowSpec, runId: string): Promise<str
   return null
 }
 
-async function createWorkspace(workflow: WorkflowSpec, runId: string): Promise<string> {
+interface CreatedWorkspace {
+  readonly workspaceId: string
+  readonly rootPane: PaneReference
+}
+
+async function createWorkspace(
+  workflow: WorkflowSpec,
+  runId: string,
+  cwd: string,
+  environment: Readonly<Record<string, string>>
+): Promise<CreatedWorkspace> {
   const created = decodeHerdrJson(
     await runHerdr([
       "workspace",
       "create",
       "--cwd",
-      workflow.cwd,
+      cwd,
       "--label",
       workspaceLabel(workflow, runId),
-      "--no-focus"
+      "--no-focus",
+      ...Object.entries(environment).flatMap(([key, value]) => ["--env", `${key}=${value}`])
     ]),
     "workspace create",
     decodeHerdrWorkspaceCreatedResponse
   )
-  return created.result.workspace.workspace_id
+  const workspaceId = created.result.workspace.workspace_id
+  return {
+    workspaceId,
+    rootPane: {
+      workspaceId,
+      tabId: created.result.tab.tab_id,
+      paneId: created.result.root_pane.pane_id,
+      group: workspaceLabel(workflow, runId),
+      surface: "tab"
+    }
+  }
 }
 
 async function createTab(
@@ -1100,6 +1121,7 @@ async function hasTokenValidSubmission(
 
 export class HerdrSurface {
   private workspaceId: string | null = null
+  private bootstrapPane: PaneReference | null = null
   private boardCurrent: PaneReference | null | undefined
 
   async connect(): Promise<void> {
@@ -1155,7 +1177,40 @@ export class HerdrSurface {
     await runHerdr(["agent", "prompt", origin.paneId, prompt])
   }
 
-  private async nodeWorkspace(request: SpawnRequest, create: boolean): Promise<string | null> {
+  private async createRunWorkspace(
+    workflow: WorkflowSpec,
+    runId: string,
+    cwd: string,
+    environment: Readonly<Record<string, string>>
+  ): Promise<string> {
+    const created = await createWorkspace(workflow, runId, cwd, environment)
+    this.workspaceId = created.workspaceId
+    this.bootstrapPane = created.rootPane
+    return created.workspaceId
+  }
+
+  private async freshTab(
+    workspaceId: string,
+    label: string,
+    cwd: string,
+    environment: Readonly<Record<string, string>>,
+    group: string
+  ): Promise<PaneReference> {
+    const bootstrap = this.bootstrapPane
+    if (bootstrap !== null && bootstrap.workspaceId === workspaceId) {
+      await runHerdr(["tab", "rename", bootstrap.tabId, label])
+      this.bootstrapPane = null
+      return { ...bootstrap, group, surface: "tab" }
+    }
+    return { ...(await createTab(workspaceId, label, cwd, environment)), group, surface: "tab" }
+  }
+
+  private async nodeWorkspace(
+    request: SpawnRequest,
+    create: boolean,
+    cwd = request.workflow.cwd,
+    environment: Readonly<Record<string, string>> = {}
+  ): Promise<string | null> {
     if (request.placement.workspace === "origin") {
       const origin = await liveOriginWorkspace(request.state)
       if (origin !== null) {
@@ -1170,7 +1225,7 @@ export class HerdrSurface {
         (await findWorkspace(request.workflow, request.state.id))
     }
     if (this.workspaceId === null && create) {
-      this.workspaceId = await createWorkspace(request.workflow, request.state.id)
+      return this.createRunWorkspace(request.workflow, request.state.id, cwd, environment)
     }
     return this.workspaceId
   }
@@ -1236,10 +1291,6 @@ export class HerdrSurface {
         )
       }
     }
-    const workspaceId = replacementPane?.workspaceId ?? (await this.nodeWorkspace(request, true))
-    if (workspaceId === null) {
-      throw new Error(`Could not resolve a workspace for node "${intent.nodeId}".`)
-    }
     const environment = {
       ...nodeEnvironment(node),
       ORCHESTRATE_BIN: orchestrateExecutable(),
@@ -1250,6 +1301,12 @@ export class HerdrSurface {
       ORCHESTRATE_OUTPUT_PATH: attempt.outputPath,
       ORCHESTRATE_RESULT_PATH: attempt.resultPath,
       ORCHESTRATE_SOURCE_ROOT: sourceRoot
+    }
+    const workspaceId =
+      replacementPane?.workspaceId ??
+      (await this.nodeWorkspace(request, true, providerCwd, environment))
+    if (workspaceId === null) {
+      throw new Error(`Could not resolve a workspace for node "${intent.nodeId}".`)
     }
     const splitAnchor =
       replacementPane ??
@@ -1269,11 +1326,14 @@ export class HerdrSurface {
         )
       }
     }
-    const freshTab = async (): Promise<PaneReference> => ({
-      ...(await createTab(workspaceId, request.placement.groupLabel, providerCwd, environment)),
-      group: request.placement.group,
-      surface: "tab" as const
-    })
+    const freshTab = async (): Promise<PaneReference> =>
+      this.freshTab(
+        workspaceId,
+        request.placement.groupLabel,
+        providerCwd,
+        environment,
+        request.placement.group
+      )
     let pane: PaneReference
     if (!anchorIsLive) {
       pane = await freshTab()
@@ -1603,12 +1663,15 @@ export class HerdrSurface {
     if (preferences.board === "split-right" && current !== null) {
       pane = await createSplit(current, workflow.cwd, {}, "board", "right", 0.35)
     } else {
-      const workspaceId =
-        preferences.board === "current-workspace" && current !== null
-          ? current.workspaceId
-          : ((await findWorkspace(workflow, state.id)) ??
-            (await createWorkspace(workflow, state.id)))
-      pane = await createTab(workspaceId, "Board", workflow.cwd, {})
+      let workspaceId: string
+      if (preferences.board === "current-workspace" && current !== null) {
+        workspaceId = current.workspaceId
+      } else {
+        this.workspaceId ??= await findWorkspace(workflow, state.id)
+        workspaceId =
+          this.workspaceId ?? (await this.createRunWorkspace(workflow, state.id, workflow.cwd, {}))
+      }
+      pane = await this.freshTab(workspaceId, "Board", workflow.cwd, {}, "board")
     }
     await runHerdr(["pane", "rename", pane.paneId, `${workflow.name}: board`])
     await runHerdr(["pane", "run", pane.paneId, ...command])

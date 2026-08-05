@@ -112,7 +112,12 @@ printf '%s\n' "$*" >> ${JSON.stringify(herdrLog)}
 case "$1 $2" in
   "--version ") printf 'herdr 0.7.5\n' ;;
   "workspace list") printf '%s\n' '{"id":"cli:workspace:list","result":{"type":"workspace_list","workspaces":[]}}' ;;
-  "workspace create") printf '%s\n' '{"id":"cli:workspace:create","result":{"type":"workspace_created","workspace":{"workspace_id":"w1","number":1,"label":"packaged-test","focused":false,"pane_count":1,"tab_count":1,"active_tab_id":"t1","agent_status":"idle"},"tab":{"tab_id":"t1","workspace_id":"w1","number":1,"label":"packaged-test","focused":false,"pane_count":1,"agent_status":"idle"},"root_pane":{"terminal_id":"terminal-p1","agent_status":"idle","workspace_id":"w1","tab_id":"t1","pane_id":"p1","focused":false,"revision":1}}}' ;;
+  "workspace create")
+    count_file=${JSON.stringify(`${herdrLog}.tabs`)}
+    count=$(cat "$count_file" 2>/dev/null || printf 0)
+    count=$((count + 1))
+    printf '%s' "$count" > "$count_file"
+    printf '{"id":"cli:workspace:create","result":{"type":"workspace_created","workspace":{"workspace_id":"w1","number":1,"label":"packaged-test","focused":false,"pane_count":1,"tab_count":1,"active_tab_id":"t%s","agent_status":"idle"},"tab":{"tab_id":"t%s","workspace_id":"w1","number":%s,"label":"packaged-test","focused":false,"pane_count":1,"agent_status":"idle"},"root_pane":{"terminal_id":"terminal-p%s","agent_status":"idle","workspace_id":"w1","tab_id":"t%s","pane_id":"p%s","focused":false,"revision":1}}}\n' "$count" "$count" "$count" "$count" "$count" "$count" ;;
   "tab create")
     count_file=${JSON.stringify(`${herdrLog}.tabs`)}
     count=$(cat "$count_file" 2>/dev/null || printf 0)
