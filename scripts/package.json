@@ -23,15 +23,15 @@
     "verify": "bun run format:check && bun run lint && bun run check && bun run check:production-dependencies && bun run test"
   },
   "dependencies": {
-    "@opentui/core": "0.4.5",
-    "ajv": "8.17.1",
+    "@opentui/core": "0.5.1",
+    "ajv": "8.20.0",
     "effect": "4.0.0-beta.102"
   },
   "devDependencies": {
     "@effect/tsgo": "0.31.0",
-    "@types/bun": "1.2.21",
+    "@types/bun": "1.3.14",
     "@types/node": "22.18.6",
-    "oxfmt": "0.61.0",
+    "oxfmt": "0.62.0",
     "oxlint": "1.77.0",
     "oxlint-tsgolint": "7.0.2001",
     "typescript": "7.0.2"
