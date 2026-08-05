@@ -17,7 +17,7 @@ import type {
 } from "./types.js"
 
 import { buildBoardModel, runtimeDependencyIds } from "./board-model.js"
-import { observePaneGarnish, runBoardTui } from "./board.js"
+import { observePaneGarnish } from "./board-observation.js"
 import {
   crankRun,
   handleHerdrAgentStatusEvent,
@@ -1464,6 +1464,7 @@ export async function runCli(
         : await selectedRun(parsed.positionals[0])
       : await selectBoardRun(parsed.positionals[0])
     if (!json && process.stdin.isTTY && process.stdout.isTTY) {
+      const { runBoardTui } = await import("./board.js")
       await runBoardTui(runDir)
       return EXIT_OK
     }

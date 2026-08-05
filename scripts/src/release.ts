@@ -1,6 +1,7 @@
 import { chmod, cp, lstat, mkdir, readdir, symlink } from "node:fs/promises"
 import path from "node:path"
 
+import { COMPILED_TARGET, MINIMUM_MACOS_VERSION } from "./build-contract.js"
 import { assertReleaseVersion } from "./semver.js"
 
 export const RELEASE_PAYLOAD_FILES = Object.freeze([
@@ -57,6 +58,24 @@ function run(command: string, args: readonly string[], cwd?: string): string {
   return new TextDecoder().decode(result.stdout)
 }
 
+function assertCompiledPlatform(binary: string): void {
+  const architectures = run("/usr/bin/lipo", ["-archs", binary]).trim()
+  if (architectures !== "arm64") {
+    throw new Error(
+      `Release binary must match ${COMPILED_TARGET} as a thin ARM64 Mach-O; found ${architectures}.`
+    )
+  }
+  const buildVersion = run("/usr/bin/vtool", ["-show-build", binary])
+  if (
+    !/^\s*platform MACOS$/m.test(buildVersion) ||
+    !new RegExp(`^\\s*minos ${MINIMUM_MACOS_VERSION.replace(".", "\\.")}$`, "m").test(buildVersion)
+  ) {
+    throw new Error(
+      `Release binary must target macOS with minimum version ${MINIMUM_MACOS_VERSION}.`
+    )
+  }
+}
+
 export interface ReleaseArtifacts {
   readonly version: string
   readonly archive: string
@@ -102,6 +121,7 @@ export async function assembleRelease(options: {
   await mkdir(output, { recursive: true })
   await mkdir(path.join(payload, "bin"), { recursive: true })
   const binary = path.join(scriptsRoot, "dist", "orchestrate")
+  assertCompiledPlatform(binary)
   await cp(binary, path.join(payload, "bin", "orchestrate"))
   await chmod(path.join(payload, "bin", "orchestrate"), 0o755)
   for (const entry of ["SKILL.md", "agents", "references", "herdr-plugin"] as const) {

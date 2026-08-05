@@ -11,8 +11,9 @@ agent-orchestrated setup.
 
 ## Install
 
-Requires macOS ARM64 (Apple silicon), Herdr 0.7.5 or newer, and Codex and/or Claude for the providers
-a workflow uses. Git is needed only when a workflow selects `git-worktree` isolation.
+Requires macOS 13 Ventura or newer on ARM64 (Apple silicon), Herdr 0.7.5 or newer, and Codex and/or
+Claude for the providers a workflow uses. Git is needed only when a workflow selects
+`git-worktree` isolation.
 
 ```bash
 brew tap alexs7zzh/tap
@@ -33,8 +34,8 @@ After `brew upgrade orchestrate`, run `orchestrate setup` if automatic migration
 the new build; migration waits while any run is unsettled. Before `brew uninstall orchestrate`, run
 `orchestrate setup --remove` so the matching build can unlink its skill and Herdr plugin.
 
-Release builds target macOS ARM64 and are distributed through Homebrew. Linux and npm distribution
-are not supported.
+Release builds target macOS 13 or newer on ARM64 and are distributed through Homebrew. Linux and
+npm distribution are not supported.
 
 ## Terms
 

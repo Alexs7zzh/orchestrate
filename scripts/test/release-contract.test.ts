@@ -5,6 +5,15 @@ import { chmod, mkdir, mkdtemp, readdir, rm } from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 
+import {
+  buildToolchainIdentity,
+  COMPILED_BUNDLE_TARGET,
+  COMPILED_TARGET,
+  MINIMUM_MACOS_VERSION,
+  SOURCE_BUNDLE_TARGET,
+  TARGET_ARCHITECTURE,
+  TARGET_PLATFORM
+} from "../src/build-contract.js"
 import { assembleRelease, RELEASE_PAYLOAD_FILES } from "../src/release.js"
 import { assertReleaseVersion, parseSemVer } from "../src/semver.js"
 
@@ -95,14 +104,42 @@ afterEach(async () => {
 })
 
 describe("release payload contract", () => {
-  test("covers the exact bundle source-map closure and native OpenTUI asset notices", async () => {
+  test("pins the compiled target and every requested toolchain identity component", () => {
+    const baseline = {
+      artifact: "compiled" as const,
+      bunVersion: "1.3.14",
+      bunRevision: "bun-revision-a",
+      target: COMPILED_TARGET,
+      minimumMacOSVersion: MINIMUM_MACOS_VERSION
+    }
+    const identities = [
+      baseline,
+      { ...baseline, artifact: "bundle" as const },
+      { ...baseline, bunVersion: "1.3.15" },
+      { ...baseline, bunRevision: "bun-revision-b" },
+      { ...baseline, target: "bun-darwin-x64" },
+      { ...baseline, minimumMacOSVersion: "14.0" }
+    ].map(buildToolchainIdentity)
+    expect(COMPILED_TARGET).toBe("bun-darwin-arm64")
+    expect(COMPILED_BUNDLE_TARGET).toBe("bun")
+    expect(SOURCE_BUNDLE_TARGET).toBe("node")
+    expect(TARGET_PLATFORM).toBe("darwin")
+    expect(TARGET_ARCHITECTURE).toBe("arm64")
+    expect(MINIMUM_MACOS_VERSION).toBe("13.0")
+    expect(new Set(identities).size).toBe(identities.length)
+    expect(identities[0]).toContain("bun-version:1.3.14")
+    expect(identities[0]).toContain("bun-revision:bun-revision-a")
+    expect(identities[0]).toContain("target:bun-darwin-arm64")
+  })
+
+  test("covers exact bundled package versions and native OpenTUI asset notices", async () => {
     const scriptsRoot = path.resolve(import.meta.dir, "..")
-    const sourceMap = JSON.parse(
-      await Bun.file(path.join(scriptsRoot, "orchestrate.mjs.map")).text()
-    ) as { readonly sources: readonly string[] }
+    const compiledMetafile = JSON.parse(
+      await Bun.file(path.join(scriptsRoot, "dist", "orchestrate.meta.json")).text()
+    ) as { readonly inputs: Readonly<Record<string, unknown>> }
     const bundled = [
       ...new Set(
-        sourceMap.sources.flatMap((source) => {
+        Object.keys(compiledMetafile.inputs).flatMap((source) => {
           const match = source.match(/node_modules\/((?:@[^/]+\/)?[^/]+)/)
           return match?.[1] === undefined ? [] : [match[1]]
         })
@@ -110,25 +147,35 @@ describe("release payload contract", () => {
     ].toSorted()
     expect(bundled).toEqual([
       "@opentui/core",
+      "@opentui/core-darwin-arm64",
       "ajv",
       "effect",
       "fast-check",
       "fast-deep-equal",
       "fast-uri",
       "json-schema-traverse",
-      "pure-rand"
+      "pure-rand",
+      "web-tree-sitter"
     ])
     const notice = await Bun.file(path.join(scriptsRoot, "THIRD_PARTY_LICENSES.txt")).text()
+    expect(notice).toContain(`Bun runtime ${Bun.version} (revision\n${Bun.revision})`)
+    expect(notice).toContain(`oven-sh/bun/blob/${Bun.revision}/LICENSE.md`)
+    expect(notice).toContain(`oven-sh/bun/tree/${Bun.revision}`)
+    for (const packageName of bundled) {
+      const manifest = (await Bun.file(
+        path.join(scriptsRoot, "node_modules", packageName, "package.json")
+      ).json()) as { readonly name: string; readonly version: string; readonly license: string }
+      const qualifier = packageName === "@opentui/core-darwin-arm64" ? " native asset" : ""
+      expect(notice).toContain(
+        `- ${manifest.name} ${manifest.version}${qualifier} (${manifest.license})`
+      )
+    }
     for (const required of [
-      "@opentui/core 0.4.5",
-      "@opentui/core-darwin-arm64 0.4.5 native asset",
-      "effect 4.0.0-beta.102",
-      "fast-check 4.9.0",
-      "pure-rand 8.4.2",
       "Copyright (c) 2025 opentui",
       "Copyright (c) 2023 Effectful Technologies Inc",
       "Copyright (c) 2017 Nicolas DUBIEN",
-      "Copyright (c) 2018 Nicolas DUBIEN"
+      "Copyright (c) 2018 Nicolas DUBIEN",
+      "Copyright (c) 2018-2024 Max Brunsfeld"
     ]) {
       expect(notice).toContain(required)
     }
@@ -139,6 +186,22 @@ describe("release payload contract", () => {
       path.join(scriptsRoot, "node_modules", "@opentui", "core-darwin-arm64", "LICENSE")
     ).text()
     expect(nativeLicense).toBe(coreLicense)
+    for (const fileName of [
+      "LICENSE-LCMS2",
+      "LICENSE-LIBWEBP",
+      "AUTHORS-LIBWEBP",
+      "PATENTS-LIBWEBP",
+      "LICENSE-STB",
+      "LICENSE-WUFFS"
+    ]) {
+      const source = await Bun.file(
+        path.join(scriptsRoot, "node_modules", "@opentui", "core-darwin-arm64", fileName)
+      ).text()
+      const normalizedSource = source.replace(/[ \t]+$/gm, "")
+      expect(notice).toContain(
+        `----- BEGIN ${fileName} -----\n${normalizedSource}----- END ${fileName} -----`
+      )
+    }
   })
 
   test("builds tags from main and creates a reviewable draft release", async () => {
@@ -154,6 +217,11 @@ describe("release payload contract", () => {
     }
     expect(releaseWorkflow).toContain("runs-on: macos-15")
     expect(releaseWorkflow).toContain('test "$(uname -m)" = arm64')
+    expect(releaseWorkflow).toContain('MACOSX_DEPLOYMENT_TARGET: "13.0"')
+    expect(releaseWorkflow).toContain('case "$TAG" in arm64_*')
+    expect(releaseWorkflow).toMatch(/\$\{TAG\}: \\"\$BOTTLE_SHA\\"/)
+    expect(releaseWorkflow).toContain("release/orchestrate-*.bottle.tar.gz")
+    expect(releaseWorkflow).not.toContain(".all.bottle.tar.gz")
     expect(releaseWorkflow).toContain("fetch-depth: 0")
     expect(releaseWorkflow).toContain("git merge-base --is-ancestor")
     expect(releaseWorkflow).toContain("assertReleaseVersion")
@@ -242,8 +310,18 @@ describe("release payload contract", () => {
     expect(sidecar).toBe(`${independentlyComputed}  ${path.basename(artifacts.archive)}\n`)
     expect(formula).toContain(`version "${version}"`)
     expect(formula).toContain(`sha256 "${artifacts.sha256}"`)
+    expect(formula).toContain("depends_on macos: :ventura")
+    expect(formula).toContain("depends_on arch: :arm64")
     expect(formula).not.toContain("@VERSION@")
     expect(plugin).toContain(`version = "${version}"`)
+    expect(spawnSync("/usr/bin/lipo", ["-archs", binary], { encoding: "utf8" }).stdout.trim()).toBe(
+      "arm64"
+    )
+    const buildVersion = spawnSync("/usr/bin/vtool", ["-show-build", binary], {
+      encoding: "utf8"
+    }).stdout
+    expect(buildVersion).toMatch(/^\s*platform MACOS$/m)
+    expect(buildVersion).toMatch(/^\s*minos 13\.0$/m)
     const repositoryRoot = path.resolve(import.meta.dir, "../..")
     const sourceLicense = await Bun.file(path.join(repositoryRoot, "LICENSE")).text()
     const sourceNotices = await Bun.file(

@@ -179,6 +179,42 @@ describe("packaged CLI", () => {
     }
   })
 
+  test("compiled startup ignores ambient dotenv and bunfig files", async () => {
+    const foreignCwd = path.join(temporaryRoot, "foreign-cwd")
+    const isolatedHome = path.join(temporaryRoot, "isolated-home")
+    const preloadMarker = path.join(temporaryRoot, "ambient-preload-ran")
+    await mkdir(foreignCwd)
+    await mkdir(isolatedHome)
+    await Bun.write(
+      path.join(foreignCwd, "preload.ts"),
+      `import { writeFileSync } from "node:fs"\nwriteFileSync(${JSON.stringify(preloadMarker)}, "loaded")\n`,
+      { createPath: false }
+    )
+    await Bun.write(path.join(foreignCwd, "bunfig.toml"), 'preload = ["./preload.ts"]\n', {
+      createPath: false
+    })
+    await Bun.write(path.join(foreignCwd, ".env"), "ORCHESTRATE_STATE_DIR=/dev/null\n", {
+      createPath: false
+    })
+    const env: NodeJS.ProcessEnv = {
+      ...process.env,
+      HOME: isolatedHome,
+      PATH: `${shimDir}:${process.env.PATH ?? ""}`,
+      ORCHESTRATE_DISABLE_UI: "1"
+    }
+    delete env.ORCHESTRATE_STATE_DIR
+    delete env.XDG_STATE_HOME
+    const result = spawnSync(binary, ["runs", "--json"], {
+      cwd: foreignCwd,
+      encoding: "utf8",
+      env
+    })
+    expect(result.status).toBe(0)
+    expect(JSON.parse(result.stdout)).toEqual({ runs: [], damaged: [] })
+    expect(result.stderr).toBe("")
+    expect(await Bun.file(preloadMarker).exists()).toBe(false)
+  })
+
   test("refuses build A state from build B even when the environment forges build A", async () => {
     const file = path.join(temporaryRoot, "build-pinning-workflow.json")
     await Bun.write(file, `${JSON.stringify(workflow(), null, 2)}\n`, { createPath: false })

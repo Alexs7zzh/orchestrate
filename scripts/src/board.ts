@@ -9,14 +9,18 @@ import {
 import { Data, Effect } from "effect"
 import { watch, type FSWatcher } from "node:fs"
 
-import type { BoardAction, BoardInput, BoardViewModel, PaneGarnish } from "./board-model.js"
-import type { CrankEvent, RunState } from "./types.js"
+import type { BoardAction, BoardInput, BoardViewModel } from "./board-model.js"
+import type { CrankEvent } from "./types.js"
 
 import { buildBoardModel, mapBoardInput } from "./board-model.js"
+import { observePaneGarnish } from "./board-observation.js"
 import { crankRun, readBoundedResult } from "./crank.js"
-import { HerdrSurface, type HerdrAgentStatus } from "./herdr-surface.js"
+import { HerdrSurface } from "./herdr-surface.js"
 import { installedBuild } from "./setup.js"
 import { readEvents, readRunState, readWorkflow } from "./state.js"
+
+export { classifyLivePane, observePaneGarnish } from "./board-observation.js"
+export type { LivePaneSample } from "./board-observation.js"
 
 export interface BoardFrame {
   readonly text: string
@@ -26,11 +30,6 @@ export interface BoardFrame {
 export interface BoardRenderables {
   readonly root: BoxRenderable
   readonly text: TextRenderable
-}
-
-export interface LivePaneSample {
-  readonly condition: "live" | "blocked" | "done" | "gone"
-  readonly detail: string | null
 }
 
 export interface ClockRefreshLoop {
@@ -65,30 +64,6 @@ export interface ClockRefreshOptions {
 }
 
 const BOARD_REFRESH_INTERVAL_MS = 1_000
-const BLOCKED_DETAIL = "Agent is blocked — human needed."
-const DONE_DETAIL =
-  "Result missing: agent finished without authenticated node-done — recovery needed."
-
-export function classifyLivePane(
-  live: boolean,
-  nodeType: RunState["nodes"][string]["type"],
-  agentStatus: HerdrAgentStatus | null
-): LivePaneSample {
-  if (!live) {
-    return { condition: "gone", detail: "Pane gone — human needed." }
-  }
-  if (nodeType === "agent" && agentStatus === "blocked") {
-    return { condition: "blocked", detail: BLOCKED_DETAIL }
-  }
-  if (nodeType === "agent" && agentStatus === "done") {
-    return { condition: "done", detail: DONE_DETAIL }
-  }
-  // Herdr 0.7 reports idle, working, blocked, unknown, and done. Idle,
-  // unknown, and unrecognized startup samples are transient. Done means the
-  // provider finished while durable state still says running, so node-done
-  // was not submitted and authenticated recovery is actionable.
-  return { condition: "live", detail: null }
-}
 
 export function startClockRefresh(
   refresh: () => Promise<void>,
@@ -279,44 +254,6 @@ export function renderBoardFrame(
     lines.push("", "DETAIL", detail)
   }
   return { text: lines.join("\n"), rowNodeIds }
-}
-
-export async function observePaneGarnish(
-  state: RunState,
-  surface: HerdrSurface
-): Promise<Readonly<Record<string, PaneGarnish>>> {
-  const observed = Object.values(state.nodes).filter(
-    (node) =>
-      node.status === "running" &&
-      node.attempts.at(-1)?.pane !== null &&
-      node.attempts.at(-1)?.pane !== undefined
-  )
-  // One `pane list` snapshot replaces a pane-get plus agent-get pair per node.
-  const snapshot = observed.length === 0 ? new Map() : await surface.paneSnapshot()
-  const entries = observed.map((node) => {
-    const pane = node.attempts.at(-1)?.pane
-    if (pane === null || pane === undefined) {
-      return null
-    }
-    const observation = snapshot.get(pane.paneId)
-    const live = observation !== undefined
-    const agentStatus = live && node.type === "agent" ? (observation.agentStatus ?? null) : null
-    const sample = classifyLivePane(live, node.type, agentStatus)
-    return [
-      node.id,
-      sample.condition === "live"
-        ? ({ condition: "live", detail: null } as const)
-        : sample.condition === "blocked"
-          ? ({
-              condition: "blocked",
-              detail: sample.detail
-            } as const)
-          : sample.condition === "done"
-            ? ({ condition: "done", detail: sample.detail } as const)
-            : ({ condition: "gone", detail: sample.detail } as const)
-    ] as const
-  })
-  return Object.fromEntries(entries.filter((entry) => entry !== null))
 }
 
 function eventForAction(action: BoardAction): CrankEvent | null {

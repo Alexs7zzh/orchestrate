@@ -58,6 +58,8 @@ jobs:
           brew install fish
       - name: Verify source and compiled release payload
         working-directory: scripts
+        env:
+          MACOSX_DEPLOYMENT_TARGET: "13.0"
         run: bun run verify
       - name: Package staged payload
         working-directory: scripts
@@ -74,11 +76,8 @@ jobs:
         run: |
           set -euo pipefail
           # Install the rendered formula from the locally assembled tarball,
-          # then let brew produce a real bottle of the resulting keg. The
-          # payload is architecture-gated but OS-independent, so the bottle is
-          # renamed to the "all" tag; the tarball content (and so its digest)
-          # does not change with the rename.
-          # Homebrew only installs formulae that live in a tap, so stage the
+          # then let brew produce a real bottle of the resulting keg. Homebrew
+          # only installs formulae that live in a tap, so stage the
           # rewritten formula in a throwaway local tap.
           brew tap-new --no-git local/release
           sed "s|^  url .*|  url \"file://$GITHUB_WORKSPACE/release/orchestrate-macos-arm64.tar.gz\"|" \
@@ -87,26 +86,26 @@ jobs:
           brew bottle --json --no-rebuild \
             --root-url "https://github.com/$GITHUB_REPOSITORY/releases/download/$GITHUB_REF_NAME" \
             local/release/orchestrate
-          TAG="$(jq -r '.["local/release/orchestrate"].bottle.tags | keys[0]' orchestrate--*.bottle.json)"
-          CELLAR="$(jq -r ".[\"local/release/orchestrate\"].bottle.tags[\"$TAG\"].cellar" orchestrate--*.bottle.json)"
-          BOTTLE_SHA="$(jq -r ".[\"local/release/orchestrate\"].bottle.tags[\"$TAG\"].sha256" orchestrate--*.bottle.json)"
-          # Mirror brew's own relocatability judgement: a :-prefixed cellar is
-          # written verbatim. For a default-cellar bottle (jq reports null)
-          # the ARM64 cellar must be named explicitly — an "all" tag with no
-          # cellar key defaults to the Intel /usr/local/Cellar and would send
-          # every supported machine to a source build.
+          BOTTLE_JSON=(orchestrate--*.bottle.json)
+          test "${#BOTTLE_JSON[@]}" -eq 1
+          TAG="$(jq -r '.["local/release/orchestrate"].bottle.tags | keys[0]' "${BOTTLE_JSON[0]}")"
+          case "$TAG" in arm64_*) ;; *) echo "Unexpected bottle tag: $TAG" >&2; exit 1 ;; esac
+          CELLAR="$(jq -r ".[\"local/release/orchestrate\"].bottle.tags[\"$TAG\"].cellar" "${BOTTLE_JSON[0]}")"
+          BOTTLE_SHA="$(jq -r ".[\"local/release/orchestrate\"].bottle.tags[\"$TAG\"].sha256" "${BOTTLE_JSON[0]}")"
+          BOTTLE_FILENAME="$(jq -r ".[\"local/release/orchestrate\"].bottle.tags[\"$TAG\"].filename" "${BOTTLE_JSON[0]}")"
+          LOCAL_FILENAME="$(jq -r ".[\"local/release/orchestrate\"].bottle.tags[\"$TAG\"].local_filename" "${BOTTLE_JSON[0]}")"
+          # Mirror brew's own relocatability judgement while preserving its
+          # macOS/architecture tag in both the formula and release filename.
           case "$CELLAR" in
-            :*) SHA_LINE="    sha256 cellar: $CELLAR, all: \"$BOTTLE_SHA\"" ;;
-            null | /opt/homebrew/Cellar)
-              SHA_LINE="    sha256 cellar: \"/opt/homebrew/Cellar\", all: \"$BOTTLE_SHA\""
+            :*) SHA_LINE="    sha256 cellar: $CELLAR, ${TAG}: \"$BOTTLE_SHA\"" ;;
+            null) SHA_LINE="    sha256 ${TAG}: \"$BOTTLE_SHA\"" ;;
+            /opt/homebrew/Cellar)
+              SHA_LINE="    sha256 cellar: \"/opt/homebrew/Cellar\", ${TAG}: \"$BOTTLE_SHA\""
               ;;
             *) echo "Unexpected bottle cellar: $CELLAR" >&2; exit 1 ;;
           esac
-          # brew requests release bottles with a single name-version dash, not
-          # the double dash of its local cache naming.
-          mv orchestrate--*.bottle.tar.gz \
-            "release/orchestrate-$ORCHESTRATE_RELEASE_VERSION.all.bottle.tar.gz"
-          shasum -a 256 -c <(echo "$BOTTLE_SHA  release/orchestrate-$ORCHESTRATE_RELEASE_VERSION.all.bottle.tar.gz")
+          mv "$LOCAL_FILENAME" "release/$BOTTLE_FILENAME"
+          shasum -a 256 -c <(echo "$BOTTLE_SHA  release/$BOTTLE_FILENAME")
           awk -v url="https://github.com/$GITHUB_REPOSITORY/releases/download/$GITHUB_REF_NAME" \
             -v shaline="$SHA_LINE" '
             { print }
@@ -125,7 +124,7 @@ jobs:
           path: |
             release/orchestrate-macos-arm64.tar.gz
             release/orchestrate-macos-arm64.tar.gz.sha256
-            release/orchestrate-*.all.bottle.tar.gz
+            release/orchestrate-*.bottle.tar.gz
             release/orchestrate.rb
           if-no-files-found: error
           retention-days: 7
@@ -149,10 +148,15 @@ jobs:
           ORCHESTRATE_RELEASE_VERSION: ${{ needs.build.outputs.version }}
         run: |
           set -euo pipefail
+          BOTTLES=(release/orchestrate-*.bottle.tar.gz)
+          if [ "${#BOTTLES[@]}" -ne 1 ] || [ ! -f "${BOTTLES[0]}" ]; then
+            echo "Expected exactly one platform-tagged Homebrew bottle." >&2
+            exit 1
+          fi
           ASSETS=(
             release/orchestrate-macos-arm64.tar.gz
             release/orchestrate-macos-arm64.tar.gz.sha256
-            "release/orchestrate-$ORCHESTRATE_RELEASE_VERSION.all.bottle.tar.gz"
+            "${BOTTLES[0]}"
             release/orchestrate.rb
           )
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
