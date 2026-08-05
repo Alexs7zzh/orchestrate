@@ -1,11 +1,11 @@
 {
-  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "$schema": "./node_modules/@effect/tsgo/oxlint-schema.json",
   "categories": {
     "correctness": "error",
     "suspicious": "error",
     "perf": "error"
   },
-  "plugins": ["typescript", "unicorn", "oxc", "import", "node", "promise", "jest"],
+  "plugins": ["typescript", "unicorn", "oxc", "import", "node", "promise", "jest", "effecttsgo"],
   "env": {
     "node": true
   },

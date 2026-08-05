@@ -6,7 +6,7 @@ import {
   type BoxOptions,
   type CliRenderer
 } from "@opentui/core"
-import { Effect } from "effect"
+import { Data, Effect } from "effect"
 import { watch, type FSWatcher } from "node:fs"
 
 import type { BoardAction, BoardInput, BoardViewModel, PaneGarnish } from "./board-model.js"
@@ -36,6 +36,11 @@ export interface LivePaneSample {
 export interface ClockRefreshLoop {
   stop(): void
 }
+
+class OpenTuiSetupError extends Data.TaggedError("OpenTuiSetupError")<{
+  readonly message: string
+  readonly cause: unknown
+}> {}
 
 export function mapBoardInputWhenReady(
   model: BoardViewModel | null,
@@ -519,7 +524,7 @@ export function runBoardTui(runDir: string): Promise<void> {
           exitOnCtrlC: false,
           targetFps: 20
         }),
-      catch: (cause) => new Error("OpenTUI setup failed.", { cause })
+      catch: (cause) => new OpenTuiSetupError({ message: "OpenTUI setup failed.", cause })
     }),
     (value) =>
       Effect.sync(() => {
