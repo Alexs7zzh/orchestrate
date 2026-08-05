@@ -226,10 +226,7 @@ esac
 
     setRuntimeBuildForTests("build-b")
     await runSetup({ invokedPath: executable, remove: false, dryRun: false })
-    expect((await readdir(path.join(share, "versions"))).toSorted()).toEqual([
-      "build-a",
-      "build-b"
-    ])
+    expect((await readdir(path.join(share, "versions"))).toSorted()).toEqual(["build-a", "build-b"])
 
     await writeFile(
       path.join(runDir, "state.json"),

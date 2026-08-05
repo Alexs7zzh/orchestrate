@@ -8,6 +8,7 @@ const NullableString = Schema.NullOr(Schema.String)
 const NonEmptyString = Schema.String.check(Schema.isMinLength(1))
 const AbsolutePath = NonEmptyString.check(Schema.isPattern(/^\//))
 const NodeId = NonEmptyString.check(Schema.isPattern(/^(?!.*--r[1-9][0-9]*$)[a-z0-9][a-z0-9-]*$/))
+const RuntimeNodeId = NonEmptyString.check(Schema.isPattern(/^[a-z0-9][a-z0-9-]*$/))
 const EnvironmentName = NonEmptyString.check(Schema.isPattern(/^[A-Za-z_][A-Za-z0-9_]*$/))
 const JsonPointer = Schema.String.check(Schema.isPattern(/^(?:\/(?:[^~/]|~[01])*)*$/))
 const HttpUrl = NonEmptyString.check(Schema.isPattern(/^https?:\/\/[^\s/$.?#].[^\s]*$/i))
@@ -104,6 +105,13 @@ const OutputSchema = Schema.Struct({
   schema: Schema.NullOr(UnknownRecord)
 })
 
+const AgentOutputConditionSchema = Schema.Struct({
+  type: Schema.Literal("agent-output"),
+  node: NodeId,
+  pointer: JsonPointer,
+  equals: Schema.Unknown
+})
+
 const CommonFields = {
   id: NodeId,
   title: NonEmptyString,
@@ -112,7 +120,8 @@ const CommonFields = {
   workspace: WorkspaceSchema,
   inputs: Schema.Array(InputSchema),
   retry: RetrySchema,
-  gate: Schema.Literals(["none", "approval"])
+  gate: Schema.Literals(["none", "approval"]),
+  when: Schema.optionalKey(AgentOutputConditionSchema)
 }
 
 const AgentFields = {
@@ -157,12 +166,7 @@ export const WorkflowNodeSchema = Schema.Union([
 
 const RepeatConditionSchema = Schema.Union([
   Schema.Struct({ type: Schema.Literal("command-success"), node: NodeId }),
-  Schema.Struct({
-    type: Schema.Literal("agent-output"),
-    node: NodeId,
-    pointer: JsonPointer,
-    equals: Schema.Unknown
-  })
+  AgentOutputConditionSchema
 ])
 
 const RepeatSchema = Schema.Struct({
@@ -305,7 +309,7 @@ const AttemptStateSchema = Schema.Struct({
   outputPath: NonEmptyString
 })
 
-const NodeRunStateSchema = Schema.Struct({
+const NodeRunStateFields = {
   id: NonEmptyString,
   templateId: NonEmptyString,
   title: NonEmptyString,
@@ -315,21 +319,40 @@ const NodeRunStateSchema = Schema.Struct({
   origin: Schema.Literals(["initial", "loop-round"]),
   repeatId: NullableString,
   round: Schema.NullOr(PositiveInteger),
-  status: Schema.Literals([
-    "pending",
-    "ready",
-    "running",
-    "awaiting-approval",
-    "completed",
-    "failed",
-    "cancelled",
-    "paused"
-  ]),
   attempts: Schema.Array(AttemptStateSchema),
   resultPath: NullableString,
   result: Schema.NullOr(Schema.Unknown),
   error: NullableString
+}
+
+const NodeSkipStateSchema = Schema.Struct({
+  reason: Schema.Literals(["condition-false", "source-skipped"]),
+  conditionNode: NonEmptyString,
+  pointer: JsonPointer,
+  skippedAt: NonEmptyString
 })
+
+const NodeRunStateSchema = Schema.Union([
+  Schema.Struct({
+    ...NodeRunStateFields,
+    status: Schema.Literal("skipped"),
+    skip: NodeSkipStateSchema
+  }),
+  Schema.Struct({
+    ...NodeRunStateFields,
+    status: Schema.Literals([
+      "pending",
+      "ready",
+      "running",
+      "awaiting-approval",
+      "completed",
+      "failed",
+      "cancelled",
+      "paused"
+    ]),
+    skip: Schema.optionalKey(Schema.Never)
+  })
+])
 
 const SessionStateSchema = Schema.Struct({
   alias: NonEmptyString,
@@ -378,10 +401,12 @@ const PendingRevisionSchema = Schema.Struct({
 })
 
 const PauseStateSchema = Schema.Struct({
-  kind: Schema.Literals(["human", "fuse", "max-rounds"]),
+  kind: Schema.Literals(["human", "fuse", "max-rounds", "condition"]),
   message: NonEmptyString,
   repeatId: NullableString,
-  createdAt: NonEmptyString
+  createdAt: NonEmptyString,
+  conditionNodeId: Schema.optionalKey(NonEmptyString),
+  condition: Schema.optionalKey(AgentOutputConditionSchema)
 })
 
 export const RunOriginSchema = Schema.Struct({
@@ -497,7 +522,7 @@ function nodeEventWithoutData<const Type extends string>(type: Type) {
   return Schema.Struct({
     ...EventRecordCommon,
     type: Schema.Literal(type),
-    nodeId: NodeId,
+    nodeId: RuntimeNodeId,
     data: ForbiddenField
   })
 }
@@ -506,7 +531,12 @@ function nodeEventWithData<const Type extends string, Data extends Schema.Top>(
   type: Type,
   data: Data
 ) {
-  return Schema.Struct({ ...EventRecordCommon, type: Schema.Literal(type), nodeId: NodeId, data })
+  return Schema.Struct({
+    ...EventRecordCommon,
+    type: Schema.Literal(type),
+    nodeId: RuntimeNodeId,
+    data
+  })
 }
 
 const AttemptData = Schema.Struct({ attempt: PositiveInteger })
@@ -516,7 +546,10 @@ const HoldScope = Schema.Literals(["template", "instance"])
 
 export const EventRecordSchema = Schema.Union([
   eventWithoutData("run.started"),
-  eventWithData("run.paused", Schema.Struct({ kind: Schema.Literals(["human", "fuse"]) })),
+  eventWithData(
+    "run.paused",
+    Schema.Struct({ kind: Schema.Literals(["human", "fuse", "condition"]) })
+  ),
   eventWithoutData("run.resumed"),
   eventWithoutData("run.completed"),
   eventWithoutData("run.failed"),
@@ -527,6 +560,14 @@ export const EventRecordSchema = Schema.Union([
   nodeEventWithData(
     "node.completed",
     Schema.Union([AttemptData, Schema.Struct({ attempt: PositiveInteger, exitCode: Schema.Int })])
+  ),
+  nodeEventWithData(
+    "node.skipped",
+    Schema.Struct({
+      conditionNode: NonEmptyString,
+      pointer: JsonPointer,
+      reason: Schema.Literals(["condition-false", "source-skipped"])
+    })
   ),
   nodeEventWithData(
     "node.failed",

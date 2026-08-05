@@ -70,6 +70,7 @@ export interface BoardNodeView {
   readonly elapsedMs: number | null
   readonly pane: PaneReference | null
   readonly resultPath: string | null
+  readonly skip: NonNullable<NodeRunState["skip"]> | null
   readonly stalledPane: StalledPaneView | null
 }
 
@@ -146,6 +147,10 @@ export interface FuseAttention extends AttentionBase {
   readonly kind: "fuse"
 }
 
+export interface ConditionAttention extends AttentionBase {
+  readonly kind: "condition"
+}
+
 export interface DownstreamHeldAttention extends AttentionBase {
   readonly kind: "downstream-held"
   readonly nodeId: string
@@ -162,6 +167,7 @@ export type BoardAttention =
   | GateAttention
   | RevisionAttention
   | FuseAttention
+  | ConditionAttention
   | MaxRoundsAttention
   | DownstreamHeldAttention
   | StalledPaneAttention
@@ -211,12 +217,13 @@ const STATUS_GLYPHS: Readonly<Record<NodeStatus, string>> = {
   running: "●",
   "awaiting-approval": "◆",
   completed: "✓",
+  skipped: "↷",
   failed: "✗",
   cancelled: "⊘",
   paused: "Ⅱ"
 }
 
-const TERMINAL_NODE_STATUSES = new Set<NodeStatus>(["completed", "failed", "cancelled"])
+const TERMINAL_NODE_STATUSES = new Set<NodeStatus>(["completed", "skipped", "failed", "cancelled"])
 
 const ATTEMPT_FINISH_EVENTS = new Set<EventRecord["type"]>([
   "node.completed",
@@ -301,6 +308,10 @@ function runtimeNeeds(
     const runtimeId = `${templateId}--r${round}`
     return [runtimeId]
   })
+}
+
+export function runtimeDependencyIds(state: RunState, node: NodeRunState): readonly string[] {
+  return runtimeNeeds(state, node, repeatByTemplate(state))
 }
 
 function dependencyOrder(state: RunState): {
@@ -455,6 +466,18 @@ function buildAttention(
           }
         ]
 
+  const condition: ConditionAttention[] =
+    state.pause?.kind !== "condition"
+      ? []
+      : [
+          {
+            kind: "condition",
+            title: "Condition contract needs revision",
+            detail: state.pause.message,
+            command: null
+          }
+        ]
+
   const downstreamHeld: DownstreamHeldAttention[] = Object.values(state.holds)
     .filter((hold) => holdBlocksDependencies(state, hold))
     .map((hold) => {
@@ -463,9 +486,9 @@ function buildAttention(
         kind: "downstream-held",
         nodeId: hold.target,
         scope: hold.scope,
-        title: `${node?.title ?? hold.target}: ${node?.status === "completed" ? "completed; " : ""}downstream held`,
+        title: `${node?.title ?? hold.target}: ${node?.status === "completed" || node?.status === "skipped" ? `${node.status}; ` : ""}downstream held`,
         detail:
-          "Release the hold to allow dependents to proceed; the completed outcome is unchanged.",
+          "Release the hold to allow dependents to proceed; the terminal outcome is unchanged.",
         command: `orchestrate release ${state.id} ${hold.target}`
       }
     })
@@ -491,7 +514,15 @@ function buildAttention(
     ]
   })
 
-  return [...gates, ...revisions, ...fuse, ...maxRounds, ...downstreamHeld, ...stalled]
+  return [
+    ...gates,
+    ...revisions,
+    ...fuse,
+    ...condition,
+    ...maxRounds,
+    ...downstreamHeld,
+    ...stalled
+  ]
 }
 
 function repeatConditionText(condition: RepeatCondition): string {
@@ -726,7 +757,10 @@ function visibleRows(
         group.rounds.find((round) =>
           group.members
             .filter((member) => member.round === round)
-            .some((member) => nodes.find((node) => node.id === member.id)?.status !== "completed")
+            .some((member) => {
+              const status = nodes.find((node) => node.id === member.id)?.status
+              return status !== "completed" && status !== "skipped"
+            })
         ) ??
         group.rounds.at(-1) ??
         1
@@ -870,6 +904,7 @@ export function buildBoardModel(
       elapsedMs: latestAttempt?.elapsedMs ?? null,
       pane: node.attempts.at(-1)?.pane ?? null,
       resultPath: node.resultPath,
+      skip: node.skip ?? null,
       stalledPane: stalledPane(state, node, options.paneGarnish?.[node.id])
     }
   })

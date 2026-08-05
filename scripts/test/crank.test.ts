@@ -831,6 +831,56 @@ describe("crank shell", () => {
     expect(restarted.spawns).toEqual(["planned:a1", "dependent:a1"])
   })
 
+  test("pauses on a schema-valid missing condition pointer at the completion boundary", async () => {
+    const decision = {
+      ...agent("decision"),
+      output: {
+        format: "json" as const,
+        schema: {
+          type: "object",
+          properties: { run: { type: "boolean" } },
+          additionalProperties: false
+        }
+      }
+    } satisfies AgentNode
+    const optional = {
+      ...command("optional", ["decision"]),
+      when: { type: "agent-output" as const, node: "decision", pointer: "/run", equals: true }
+    } satisfies CommandNode
+    const surface = new FakeSurface()
+    const started = await start(workflow([decision, optional]), surface)
+    const runDir = runDirectory(started.state.id)
+    const attempt = started.state.nodes.decision?.attempts.at(-1)
+    if (attempt === undefined) {
+      throw new Error("missing decision attempt")
+    }
+    await mkdir(path.dirname(attempt.resultPath), { recursive: true })
+    await writeFile(attempt.resultPath, "{}\n")
+    await submitNodeDone(runDir, "decision", attempt.token, "completed")
+
+    const paused = await reconcileRun(runDir, { surface })
+    expect(paused.state.status).toBe("paused")
+    expect(paused.state.pause).toMatchObject({
+      kind: "condition",
+      conditionNodeId: "optional",
+      condition: { node: "decision", pointer: "/run", equals: true }
+    })
+    expect(paused.state.nodes.decision?.status).toBe("completed")
+    expect(paused.state.nodes.optional?.attempts).toEqual([])
+    await expect(
+      crankRun(
+        runDir,
+        {
+          type: "resume",
+          overrideFuse: false,
+          continueRounds: null,
+          acceptRepeat: null
+        },
+        { surface }
+      )
+    ).rejects.toThrow("requires an approved revision")
+  })
+
   test("keeps an outage-planned old-plan intent frozen throughout a pending revision", async () => {
     const original = workflow([command("planned")])
     const persisted = await persistPlanned(original)
@@ -1177,5 +1227,77 @@ describe("crank shell", () => {
     expect(afterFirst.state.sessions["shared-session"]?.sourceNodeId).toBe("first")
     expect(surface.requests.at(-1)?.intent.nodeId).toBe("second")
     expect(surface.requests.at(-1)?.placement.reusePane?.paneId).toBe("pane:first:a1")
+  })
+
+  test("inherits the committed session head and pane across persistent repeat rounds", async () => {
+    class RepeatSessionSurface extends FakeSurface {
+      async recoverOrSpawn(request: SpawnRequest) {
+        const observation = await super.recoverOrSpawn(request)
+        return {
+          ...observation,
+          providerSessionId: `session:${request.intent.nodeId}:a${request.intent.attempt}`
+        }
+      }
+    }
+    const seed = {
+      ...agent("seed"),
+      session: { mode: "fresh", from: null, saveAs: "reviewer" }
+    } satisfies AgentNode
+    const review = {
+      ...agent("review", ["seed"]),
+      session: { mode: "resume", from: "reviewer", saveAs: null }
+    } satisfies AgentNode
+    const verdict = {
+      ...agent("verdict", ["review"]),
+      session: { mode: "resume", from: "reviewer", saveAs: null }
+    } satisfies AgentNode
+    const spec: WorkflowSpec = {
+      ...workflow([seed, review, verdict]),
+      repeats: [
+        {
+          id: "review-loop",
+          members: ["review", "verdict"],
+          until: { type: "agent-output", node: "verdict", pointer: "/clean", equals: true },
+          maxRounds: 2
+        }
+      ]
+    }
+    const surface = new RepeatSessionSurface()
+    const started = await start(spec, surface)
+    const runDir = runDirectory(started.state.id)
+
+    const finish = async (nodeId: string, result: { readonly clean: boolean }) => {
+      const attempt = (await readRunState(runDir)).nodes[nodeId]?.attempts.at(-1)
+      if (attempt === undefined) {
+        throw new Error(`missing ${nodeId} attempt`)
+      }
+      await mkdir(path.dirname(attempt.resultPath), { recursive: true })
+      await writeFile(attempt.resultPath, `${JSON.stringify(result)}\n`)
+      await submitNodeDone(runDir, nodeId, attempt.token, "completed")
+      return reconcileRun(runDir, { surface })
+    }
+
+    await finish("seed", { clean: false })
+    expect(surface.requests.at(-1)?.intent.nodeId).toBe("review--r1")
+    expect(surface.requests.at(-1)?.state.sessions.reviewer?.sessionId).toBe("session:seed:a1")
+    expect(surface.requests.at(-1)?.placement.reusePane?.paneId).toBe("pane:seed:a1")
+
+    await finish("review--r1", { clean: false })
+    expect(surface.requests.at(-1)?.intent.nodeId).toBe("verdict--r1")
+    expect(surface.requests.at(-1)?.state.sessions.reviewer?.sessionId).toBe(
+      "session:review--r1:a1"
+    )
+    expect(surface.requests.at(-1)?.placement.reusePane?.paneId).toBe("pane:review--r1:a1")
+
+    const nextRound = await finish("verdict--r1", { clean: false })
+    expect(nextRound.state.sessions.reviewer).toMatchObject({
+      sessionId: "session:verdict--r1:a1",
+      sourceNodeId: "verdict--r1"
+    })
+    expect(surface.requests.at(-1)?.intent.nodeId).toBe("review--r2")
+    expect(surface.requests.at(-1)?.state.sessions.reviewer?.sessionId).toBe(
+      "session:verdict--r1:a1"
+    )
+    expect(surface.requests.at(-1)?.placement.reusePane?.paneId).toBe("pane:verdict--r1:a1")
   })
 })

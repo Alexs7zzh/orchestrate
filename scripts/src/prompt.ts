@@ -50,6 +50,17 @@ function resultContent(value: unknown): string {
   return typeof value === "string" ? value : JSON.stringify(value, null, 2)
 }
 
+export function renderAgentDirective(
+  state: RunState,
+  runtimeNodeId: string,
+  node: AgentNode
+): string {
+  const round = state.nodes[runtimeNodeId]?.round
+  return round === null || round === undefined
+    ? node.prompt
+    : node.prompt.replaceAll("{{round}}", String(round))
+}
+
 export function renderInputs(
   workflow: WorkflowSpec,
   state: RunState,
@@ -63,6 +74,15 @@ export function renderInputs(
       continue
     }
     const source = state.nodes[sourceId]
+    if (source?.status === "skipped") {
+      if (input.include === "path") {
+        throw new Error(
+          `Input "${input.from}" for node "${runtimeNodeId}" requests a path from a skipped node.`
+        )
+      }
+      sections.push(`## ${input.as}\n\n[skipped]`)
+      continue
+    }
     if (source === undefined || source.resultPath === null) {
       throw new Error(`Input "${input.from}" for node "${runtimeNodeId}" has no completed result.`)
     }
@@ -80,7 +100,9 @@ export function renderNodeContent(
 ): string {
   const inputs = renderInputs(workflow, state, runtimeNodeId, node.inputs)
   if (node.type === "agent") {
-    return [node.prompt, inputs].filter((part) => part.length > 0).join("\n\n")
+    return [renderAgentDirective(state, runtimeNodeId, node), inputs]
+      .filter((part) => part.length > 0)
+      .join("\n\n")
   }
   return [
     `Command: ${JSON.stringify(node.argv)}`,

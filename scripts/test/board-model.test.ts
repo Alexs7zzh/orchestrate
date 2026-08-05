@@ -15,7 +15,8 @@ import {
   gateApprovalCommand,
   mapBoardInput,
   nodeDoneCommand,
-  revisionApprovalCommand
+  revisionApprovalCommand,
+  runtimeDependencyIds
 } from "../src/board-model.js"
 import { classifyLivePane, renderBoardFrame, startClockRefresh } from "../src/board.js"
 
@@ -46,7 +47,7 @@ function attempt(overrides: Partial<AttemptState> = {}): AttemptState {
 }
 
 function node(id: string, status: NodeStatus, overrides: Partial<NodeRunState> = {}): NodeRunState {
-  const terminal = ["completed", "failed", "cancelled"].includes(status)
+  const terminal = ["completed", "skipped", "failed", "cancelled"].includes(status)
   return {
     id,
     templateId: id,
@@ -59,7 +60,10 @@ function node(id: string, status: NodeStatus, overrides: Partial<NodeRunState> =
     round: null,
     status,
     attempts:
-      status === "pending" || status === "ready" || status === "awaiting-approval"
+      status === "pending" ||
+      status === "ready" ||
+      status === "awaiting-approval" ||
+      status === "skipped"
         ? []
         : [
             attempt({
@@ -73,7 +77,7 @@ function node(id: string, status: NodeStatus, overrides: Partial<NodeRunState> =
               finishedAt: terminal ? NOW : null
             })
           ],
-    resultPath: terminal ? `nodes/${id}/result.txt` : null,
+    resultPath: terminal && status !== "skipped" ? `nodes/${id}/result.txt` : null,
     result: null,
     error: status === "failed" ? "failed" : null,
     ...overrides
@@ -176,6 +180,7 @@ describe("board view model", () => {
       "running",
       "awaiting-approval",
       "completed",
+      "skipped",
       "failed",
       "cancelled",
       "paused"
@@ -186,6 +191,35 @@ describe("board view model", () => {
 
     expect(model.nodes.map((value) => value.status)).toEqual([...statuses])
     expect(new Set(model.nodes.map((value) => value.glyph)).size).toBe(statuses.length)
+  })
+
+  test("shows scheduler skip provenance and a held skipped release barrier", () => {
+    const skipped = node("optional", "skipped", {
+      skip: {
+        reason: "condition-false",
+        conditionNode: "verdict",
+        pointer: "/done",
+        skippedAt: NOW
+      }
+    })
+    const model = buildBoardModel(
+      state([skipped], {
+        holds: { optional: { target: "optional", scope: "instance", setAt: NOW } }
+      }),
+      [],
+      { now: NOW }
+    )
+    expect(model.nodes[0]).toMatchObject({
+      id: "optional",
+      status: "skipped",
+      downstreamHeld: true,
+      skip: {
+        reason: "condition-false",
+        conditionNode: "verdict",
+        pointer: "/done"
+      }
+    })
+    expect(model.needsYou[0]).toMatchObject({ kind: "downstream-held", nodeId: "optional" })
   })
 
   test("sorts by runtime dependencies and derives indentation", () => {
@@ -400,6 +434,8 @@ describe("board view model", () => {
 
     expect(model.nodes.find((value) => value.id === "review--r2")?.needs).toEqual(["draft--r2"])
     expect(model.nodes.find((value) => value.id === "after")?.needs).toEqual(["review--r2"])
+    expect(runtimeDependencyIds(loopState, loopState.nodes["review--r2"]!)).toEqual(["draft--r2"])
+    expect(runtimeDependencyIds(loopState, loopState.nodes.after!)).toEqual(["review--r2"])
     expect(model.rows.map((row) => [row.kind, row.key])).toEqual([
       ["repeat-history", "loop:r1"],
       ["node", "draft--r2"],

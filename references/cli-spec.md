@@ -76,6 +76,10 @@ run candidates and node candidates occupy disjoint positions.
 Status and board JSON keep outcome and dependency release separate: a successful node has
 `status: "completed"`, while `downstreamHeld`, `holdTargets`, and the top-level durable `holds`
 collection describe its release barrier. `result --json` reports the same axes with the output.
+Scheduler-derived conditions add `status: "skipped"` and `skip` reason metadata with no attempt or
+result path; human result output prints `[skipped]`. Preview JSON includes each node's full `when`,
+and text preview prints its source, pointer, and expected value. A condition-contract pause is
+reported in status as actionable revision-or-stop work; unchanged resume is rejected.
 The board renders a completion check and a separate `downstream held` indicator. A Herdr agent
 reported as done while durable status is still running is shown as actionable `result missing`.
 Human `status` text and the noninteractive `board` snapshot mark a not-yet-started gated node with

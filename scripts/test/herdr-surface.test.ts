@@ -639,7 +639,7 @@ describe("herdr surface", () => {
       },
       providerSessionId: "session-1"
     })
-    expect(log).toContain("agent start review --kind codex --pane p1")
+    expect(log).toContain("agent start o-review-7f87e2e85f26e92d --kind codex --pane p1")
     const submissionDirectory = path.dirname(state(node.id).nodes[node.id]!.attempts[0]!.resultPath)
     const runDirectory = path.join(process.env.ORCHESTRATE_STATE_DIR!, "runs", state(node.id).id)
     const profileDocument = await readFile(profileCapturePath, "utf8")
@@ -659,6 +659,7 @@ describe("herdr surface", () => {
     expect(log).not.toContain(`--add-dir ${process.env.ORCHESTRATE_STATE_DIR}`)
     expect(log).toContain("agent get p1")
     expect(log).toContain("agent prompt p1 Rendered prompt and node-done contract.")
+    expect(log).toContain("--until working --until done --until blocked")
     expect(log.lastIndexOf("agent get p1")).toBeGreaterThan(log.indexOf("agent prompt p1"))
   })
 
@@ -679,6 +680,102 @@ describe("herdr surface", () => {
     expect(observation.providerSessionId).toBeNull()
     expect(log).toContain("agent prompt p1 Run without preserving this session.")
     expect(log.slice(log.indexOf("agent prompt p1"))).not.toContain("agent get p1")
+  })
+
+  test("forks and captures a repeat resume without mutating its committed Codex head", async () => {
+    const node = {
+      ...agent(),
+      session: { mode: "resume" as const, from: "reviewer", saveAs: null }
+    }
+    const runtime = {
+      ...runtimeNode("review--r1"),
+      templateId: "review",
+      repeatId: "loop",
+      round: 1
+    }
+    const runState: RunState = {
+      ...state("review--r1"),
+      nodes: { "review--r1": runtime },
+      sessions: {
+        reviewer: {
+          alias: "reviewer",
+          provider: "codex",
+          sessionId: "committed-session",
+          sourceNodeId: "seed"
+        }
+      }
+    }
+    const observation = await new HerdrSurface().spawn({
+      workflow: {
+        ...workflow(node),
+        repeats: [
+          {
+            id: "loop",
+            members: ["review"],
+            until: { type: "agent-output", node: "review", pointer: "/done", equals: true },
+            maxRounds: 2
+          }
+        ]
+      },
+      state: runState,
+      intent: intent("review--r1"),
+      prompt: "REVIEW s1 r1.",
+      placement: placement("review--r1")
+    })
+    const log = await readFile(logPath, "utf8")
+    expect(observation.providerSessionId).toBe("session-1")
+    expect(log).toContain("fork committed-session")
+    expect(log).not.toContain("resume committed-session")
+  })
+
+  test("launches a repeat resume as a named Claude fork", async () => {
+    const node = {
+      ...claudeAgent(),
+      session: { mode: "resume" as const, from: "reviewer", saveAs: null }
+    }
+    const runtime = {
+      ...runtimeNode("review--r1"),
+      templateId: "review",
+      provider: "claude" as const,
+      repeatId: "loop",
+      round: 1
+    }
+    const runState: RunState = {
+      ...state("review--r1"),
+      nodes: { "review--r1": runtime },
+      sessions: {
+        reviewer: {
+          alias: "reviewer",
+          provider: "claude",
+          sessionId: "committed-session",
+          sourceNodeId: "seed"
+        }
+      }
+    }
+    const observation = await new HerdrSurface().spawn({
+      workflow: {
+        ...workflow(node),
+        repeats: [
+          {
+            id: "loop",
+            members: ["review"],
+            until: { type: "agent-output", node: "review", pointer: "/done", equals: true },
+            maxRounds: 2
+          }
+        ]
+      },
+      state: runState,
+      intent: intent("review--r1"),
+      prompt: "REVIEW s1 r1.",
+      placement: placement("review--r1")
+    })
+    const log = await readFile(logPath, "utf8")
+    expect(observation.providerSessionId).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
+    )
+    expect(log).toContain("--resume committed-session")
+    expect(log).toContain("--fork-session")
+    expect(log).toContain(`--session-id ${observation.providerSessionId}`)
   })
 
   test("confines a workspace-write Codex node to declared roots and its submission", async () => {
@@ -931,7 +1028,7 @@ describe("herdr surface", () => {
       placement: placement(node.id)
     })
     const log = await readFile(logPath, "utf8")
-    expect(log.match(/agent start review/g)).toHaveLength(2)
+    expect(log.match(/agent start o-review-7f87e2e85f26e92d/g)).toHaveLength(2)
     expect(log).toContain("--timeout 120000")
   })
 
@@ -1239,7 +1336,7 @@ describe("herdr surface", () => {
     )
     const log = await readFile(logPath, "utf8")
     expect(log.match(/tab create/g)).toHaveLength(1)
-    expect(log.match(/agent start review/g)).toHaveLength(1)
+    expect(log.match(/agent start o-review-7f87e2e85f26e92d/g)).toHaveLength(1)
     expect(log.match(/agent prompt p1 Execute exactly once\./g)).toHaveLength(1)
     expect(log).not.toContain("pane close p1")
   })
@@ -1592,8 +1689,9 @@ describe("herdr surface", () => {
       /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
     )
 
-    // The agent finishes out of band and submits; recovery must adopt the
-    // recorded id without observing herdr or re-prompting.
+    // The agent finishes out of band and submits, then its pane disappears.
+    // Recovery must adopt the exact launcher-chosen id without observing a
+    // replacement session or re-prompting.
     await mkdir(path.dirname(attempt.resultPath), { recursive: true })
     await writeFile(
       completionSubmissionPath(attempt.resultPath),
@@ -1605,6 +1703,7 @@ describe("herdr surface", () => {
         hold: false
       })
     )
+    await writeShim(false, false, true, "none", "p1", false, "always")
     const before = await readFile(logPath, "utf8")
     const observation = await surface.recoverOrSpawn(request)
     expect(observation.providerSessionId).toBe(receipt.providerSessionId)
@@ -1612,6 +1711,48 @@ describe("herdr surface", () => {
     expect(after.split("agent get p1").length).toBe(before.split("agent get p1").length)
     expect(after.split("agent prompt").length).toBe(before.split("agent prompt").length)
     expect(after.split("agent start").length).toBe(before.split("agent start").length)
+  })
+
+  test("fails a dead prompt-bearing receipt instead of cross-wiring its completion token", async () => {
+    await writeShim(false, false, true, "none", null, false, "always")
+    const node = agent()
+    const runState = state(node.id)
+    const activeIntent = intent(node.id)
+    const request = {
+      workflow: workflow(node),
+      state: runState,
+      intent: activeIntent,
+      prompt: "Review and report completion.",
+      placement: placement(node.id)
+    }
+    const surface = new HerdrSurface()
+    await expect(surface.spawn(request)).rejects.toBeInstanceOf(HerdrObservationError)
+    const attempt = runState.nodes[node.id]!.attempts[0]!
+    await mkdir(path.dirname(attempt.resultPath), { recursive: true })
+    await writeFile(attempt.resultPath, '{"clean":true}\n')
+    await writeFile(
+      completionSubmissionPath(attempt.resultPath),
+      `${JSON.stringify({
+        runId: runState.id,
+        nodeId: node.id,
+        token: activeIntent.token,
+        outcome: "completed",
+        hold: false
+      })}\n`
+    )
+    await writeShim(true, false, true, "none", "p1")
+    const before = await readFile(logPath, "utf8")
+
+    await expect(surface.recoverOrSpawn(request)).rejects.toThrow(
+      "failing this attempt instead of reusing its completion token"
+    )
+    const after = await readFile(logPath, "utf8")
+    expect(after.split("agent prompt").length).toBe(before.split("agent prompt").length)
+    expect(after.split("agent start").length).toBe(before.split("agent start").length)
+    const receipt = JSON.parse(
+      await readFile(path.join(path.dirname(attempt.outputPath), "spawn.json"), "utf8")
+    ) as { status: string; providerSessionId: string | null }
+    expect(receipt).toMatchObject({ status: "ambiguous", providerSessionId: null })
   })
 
   test("chooses the Claude session id at launch instead of observing herdr", async () => {

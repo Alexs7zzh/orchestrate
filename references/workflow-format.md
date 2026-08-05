@@ -22,7 +22,7 @@ schema requires them.
 ## Common node fields
 
 Every node declares `id`, `type`, `title`, `needs`, nullable `cwd`, `workspace`, `inputs`, `retry`,
-and `gate`. IDs are unique and dependencies must form a DAG.
+and `gate`, and may declare `when`. IDs are unique and dependencies must form a DAG.
 
 Naming convention: `parent--sub` (for example `api--test`) marks a sub-node of `api`. The default
 UI placement written by `ui wizard` keys on this: sub-nodes open as splits in their parent's tab
@@ -34,6 +34,23 @@ An input declares `from`, the prompt/result name `as`, `include` (`content` or `
 first round.
 
 `retry.maxAttempts` includes the first attempt. `gate` is `none` or `approval`.
+
+`when` is a scheduler-owned condition over a direct dependency's schema-validated JSON result:
+
+```json
+{ "type": "agent-output", "node": "verdict", "pointer": "/done", "equals": false }
+```
+
+The scheduler evaluates it after dependencies release and before a gate, attempt, session, pane,
+resource, or start is consumed. Deep equality runs the node; a different value records a terminal,
+zero-attempt `skipped` outcome. A skipped condition source propagates a skip. A missing pointer is
+a condition-contract error: the run pauses for an approved condition change or stop, rejects an
+unchanged resume, and never silently interprets malformed data as a skip. A paused repeat member may
+revise only that template's `when` for its current and future unstarted instances; settled earlier
+rounds remain immutable. The source must be a direct dependency and a JSON agent with
+a non-null output schema. Conditional session producers and conditional repeat verdicts are
+invalid. Content inputs from a skipped node render as `[skipped]`; path inputs are rejected because
+there is no synthetic result artifact.
 
 ## Workspaces
 
@@ -54,9 +71,9 @@ an approval override. An exclusive resource serializes all nodes that name it.
 
 Approved mid-run revisions may reorder, insert, remove, or change dependencies for nodes that have
 not started. Their runtime entries are rebuilt in revised declaration order and rescheduled from
-`pending`. Templates for nodes with an attempt are immutable; unsafe removal or rewriting is
-rejected so journal history and session lineage remain valid. The proposal and approval mechanics
-are in [runtime-operations.md](runtime-operations.md).
+`pending`. Templates for nodes with an attempt or a scheduler-derived skip are immutable; unsafe
+removal or rewriting is rejected so journal history, decisions, and session lineage remain valid.
+The proposal and approval mechanics are in [runtime-operations.md](runtime-operations.md).
 
 ## Agent nodes
 
@@ -73,6 +90,16 @@ same source twice.
 When a resumed session's previous Herdr pane is still live, Orchestrate replaces the provider in
 that pane's existing UI slot instead of opening another configured tab or split. A missing pane
 falls back to the normal placement rules.
+
+A repeat member may resume an alias seeded by an unconditional node outside the repeat. Members
+sharing one alias must form a total dependency order; they cannot fork, replace the alias name, or
+seed it from inside the repeat. At launch, every repeated resume is executed as a provider fork of
+the alias's committed session head. Schema-valid success atomically promotes the alias to that
+child session and current runtime node; failure leaves the prior head unchanged, so a retry forks
+the same committed parent rather than inheriting a possibly poisoned attempt. Pane reuse follows
+the committed `sourceNodeId`. Different aliases advance independently. The repeat declaration is
+revision-immutable for the run, and each member template becomes immutable after its first attempt
+or skip.
 
 Permissions deliberately separate two axes:
 
@@ -141,6 +168,13 @@ A repeat declares `id`, ordered `members`, `maxRounds`, and `until`:
 
 Members instantiate as `<id>--r<N>`. Dependencies from outside to a member wait for the entire
 repeat, then resolve the final-round instance. Reaching the bound pauses for explicit human action.
+An agent repeat member may use `{{round}}` in its approved prompt; rendering replaces it with the
+instance's decimal round number. The placeholder is invalid outside a repeat.
+For `when`, a source and consumer in the same repeat bind to their `--r<N>` instances; a non-repeat
+source keeps its stable ID, and an outside consumer of a repeat source observes the settled final
+round. Conditions across two different repeats are invalid. Each member is evaluated anew per
+round. Completed and skipped members both settle their dependency edge, subject to holds, while the
+unconditional verdict member always runs and determines whether another round is instantiated.
 
 ## Stable prompts and planning
 

@@ -34,6 +34,7 @@ const ALL_EVENT_TYPES = [
   "node.spawn-planned",
   "node.started",
   "node.completed",
+  "node.skipped",
   "node.failed",
   "node.retrying",
   "node.cancelled",
@@ -98,6 +99,7 @@ describe("event severity", () => {
     expect(classifyEvent("node.completed")).toBe("milestone")
     expect(classifyEvent("repeat.completed")).toBe("milestone")
     expect(classifyEvent("node.spawn-planned")).toBe("progress")
+    expect(classifyEvent("node.skipped")).toBe("progress")
     expect(classifyEvent("ui.degraded")).toBe("progress")
   })
 })

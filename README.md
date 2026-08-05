@@ -126,6 +126,13 @@ round ID. Default targets live in a run-unique temporary worktree root outside a
 Any pre-existing target must be the canonical worktree root for the expected repository and exact
 expanded branch or launch fails before pane creation.
 
+Nodes may declare a scheduler-owned `when` over a direct schema-validated JSON dependency. A false
+condition records a first-class zero-attempt `skipped` state; a missing pointer pauses as a contract
+error instead of silently choosing a branch, and resume requires an approved condition change. In
+repeats, conditions bind to the same-round source and are reevaluated each round. Persistent repeat
+sessions use copy-on-write provider forks: only a successful result advances the alias, so a failed
+retry cannot contaminate the next attempt or round.
+
 Compilation embeds the build identity used by run state. Ambient environment variables cannot
 change `--version`, and a different binary refuses that state.
 

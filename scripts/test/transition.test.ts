@@ -13,6 +13,7 @@ import type {
 import { reconcileApprovedRevisionState } from "../src/crank.js"
 import {
   createInitialRunState,
+  resolveConditionSourceId,
   resolveInputSourceId,
   transition,
   type TransitionContext
@@ -148,7 +149,12 @@ function crank(
   return transition(state, spec, event, NOW, prepared)
 }
 
-function observe(state: RunState, spec: WorkflowSpec, id: string) {
+function observe(
+  state: RunState,
+  spec: WorkflowSpec,
+  id: string,
+  providerSessionId: string | null = null
+) {
   const attempt = state.nodes[id]?.attempts.at(-1)
   if (attempt === undefined) {
     throw new Error(`No planned attempt for ${id}`)
@@ -164,7 +170,7 @@ function observe(state: RunState, spec: WorkflowSpec, id: string) {
       group: id,
       surface: "tab"
     },
-    providerSessionId: null
+    providerSessionId
   })
 }
 
@@ -224,6 +230,285 @@ describe("pure crank transition", () => {
   test("refuses to plan a pane without caller-prepared durable paths and a random token", () => {
     const spec = workflow([command("work")])
     expect(() => start(spec)).toThrow('Prepared execution content is required for node "work"')
+  })
+
+  test("derives conditional skips before attempts and pauses on a missing pointer", () => {
+    const decision = agent("decision", {
+      output: {
+        format: "json",
+        schema: {
+          type: "object",
+          properties: { run: { type: "boolean" } },
+          additionalProperties: false
+        }
+      }
+    })
+    const optional = command("optional", {
+      needs: ["decision"],
+      gate: "approval",
+      when: { type: "agent-output", node: "decision", pointer: "/run", equals: true }
+    })
+    const spec = workflow([decision, optional])
+    const started = observe(start(spec, context("decision")).state, spec, "decision")
+    const skipped = crank(started.state, spec, {
+      type: "node-done",
+      nodeId: "decision",
+      token: token(started.state, "decision"),
+      outcome: "completed",
+      hold: false,
+      result: { run: false },
+      error: null,
+      providerSessionId: null
+    })
+    expect(skipped.state.nodes.optional?.status).toBe("skipped")
+    expect(skipped.state.nodes.optional?.attempts).toEqual([])
+    expect(skipped.state.gates.optional).toBeUndefined()
+    expect(skipped.events.map((event) => event.type)).toContain("node.skipped")
+    expect(skipped.state.status).toBe("completed")
+
+    const missingStarted = observe(start(spec, context("decision")).state, spec, "decision")
+    const missing = crank(missingStarted.state, spec, {
+      type: "node-done",
+      nodeId: "decision",
+      token: token(missingStarted.state, "decision"),
+      outcome: "completed",
+      hold: false,
+      result: {},
+      error: null,
+      providerSessionId: null
+    })
+    expect(missing.state.status).toBe("paused")
+    expect(missing.state.pause?.kind).toBe("condition")
+    expect(missing.state.nodes.optional?.status).toBe("pending")
+    expect(missing.state.nodes.optional?.attempts).toEqual([])
+  })
+
+  test("requires an approved condition change before resuming a missing-pointer pause", () => {
+    const decision = agent("decision", {
+      output: {
+        format: "json",
+        schema: {
+          type: "object",
+          properties: { run: { type: "boolean" } },
+          additionalProperties: false
+        }
+      }
+    })
+    const optional = command("optional", {
+      needs: ["decision"],
+      when: { type: "agent-output", node: "decision", pointer: "/run", equals: true }
+    })
+    const base = workflow([decision, optional])
+    const started = observe(start(base, context("decision")).state, base, "decision")
+    const paused = crank(started.state, base, {
+      type: "node-done",
+      nodeId: "decision",
+      token: token(started.state, "decision"),
+      outcome: "completed",
+      hold: false,
+      result: {},
+      error: null,
+      providerSessionId: null
+    })
+    expect(paused.state.pause).toMatchObject({
+      kind: "condition",
+      conditionNodeId: "optional",
+      condition: { node: "decision", pointer: "/run", equals: true }
+    })
+    expect(() =>
+      crank(paused.state, base, {
+        type: "resume",
+        overrideFuse: false,
+        continueRounds: null,
+        acceptRepeat: null
+      })
+    ).toThrow("requires an approved revision")
+
+    const { when: _removedCondition, ...unconditionalOptional } = optional
+    const revised = workflow([{ ...decision }, unconditionalOptional])
+    const proposed = crank(paused.state, base, {
+      type: "propose-revision",
+      workflow: revised,
+      digest: "condition-revision",
+      summary: ["remove malformed condition"]
+    })
+    const approved = crank(proposed.state, base, {
+      type: "approve-revision",
+      digest: "condition-revision"
+    })
+    expect(approved.state.status).toBe("paused")
+    const resumed = crank(
+      approved.state,
+      revised,
+      {
+        type: "resume",
+        overrideFuse: false,
+        continueRounds: null,
+        acceptRepeat: null
+      },
+      context("optional")
+    )
+    expect(resumed.state.nodes.optional?.status).toBe("running")
+  })
+
+  test("revises only the current and future condition after prior repeat history", () => {
+    const decision = agent("decision", {
+      output: {
+        format: "json",
+        schema: {
+          type: "object",
+          required: ["done"],
+          properties: { done: { type: "boolean" }, run: { type: "boolean" } },
+          additionalProperties: false
+        }
+      }
+    })
+    const optional = command("optional", {
+      needs: ["decision"],
+      when: { type: "agent-output", node: "decision", pointer: "/run", equals: true }
+    })
+    const repeat = {
+      id: "loop",
+      members: ["decision", "optional"],
+      until: { type: "agent-output" as const, node: "decision", pointer: "/done", equals: true },
+      maxRounds: 2
+    }
+    const base = workflow([decision, optional], { repeats: [repeat] })
+    const round1Decision = observe(start(base, context("decision--r1")).state, base, "decision--r1")
+    const round1Optional = crank(
+      round1Decision.state,
+      base,
+      {
+        type: "node-done",
+        nodeId: "decision--r1",
+        token: token(round1Decision.state, "decision--r1"),
+        outcome: "completed",
+        hold: false,
+        result: { done: false, run: true },
+        error: null,
+        providerSessionId: null
+      },
+      context("optional--r1")
+    )
+    const observedOptional = observe(round1Optional.state, base, "optional--r1")
+    const round2Planned = crank(
+      observedOptional.state,
+      base,
+      {
+        type: "node-exit",
+        nodeId: "optional--r1",
+        token: token(observedOptional.state, "optional--r1"),
+        code: 0,
+        error: null
+      },
+      context("decision--r2")
+    )
+    const round2Decision = observe(round2Planned.state, base, "decision--r2")
+    const paused = crank(round2Decision.state, base, {
+      type: "node-done",
+      nodeId: "decision--r2",
+      token: token(round2Decision.state, "decision--r2"),
+      outcome: "completed",
+      hold: false,
+      result: { done: true },
+      error: null,
+      providerSessionId: null
+    })
+    expect(paused.state.pause).toMatchObject({
+      kind: "condition",
+      conditionNodeId: "optional--r2"
+    })
+
+    const revisedOptional = {
+      ...optional,
+      when: { type: "agent-output" as const, node: "decision", pointer: "/done", equals: true }
+    }
+    const revised = workflow([decision, revisedOptional], { repeats: [repeat] })
+    const proposed = crank(paused.state, base, {
+      type: "propose-revision",
+      workflow: revised,
+      digest: "repeat-condition-revision",
+      summary: ["repair current repeat condition"]
+    })
+    const approved = crank(proposed.state, base, {
+      type: "approve-revision",
+      digest: "repeat-condition-revision"
+    })
+    expect(approved.state.nodes["optional--r1"]?.status).toBe("completed")
+    const resumed = crank(
+      approved.state,
+      revised,
+      {
+        type: "resume",
+        overrideFuse: false,
+        continueRounds: null,
+        acceptRepeat: null
+      },
+      context("optional--r2")
+    )
+    expect(resumed.state.nodes["optional--r2"]?.status).toBe("running")
+  })
+
+  test("runs matching conditions and propagates a skipped condition source", () => {
+    const decision = agent("decision", {
+      output: {
+        format: "json",
+        schema: {
+          type: "object",
+          required: ["run"],
+          properties: { run: { type: "boolean" } }
+        }
+      }
+    })
+    const branch = agent("branch", {
+      needs: ["decision"],
+      when: { type: "agent-output", node: "decision", pointer: "/run", equals: true },
+      output: {
+        format: "json",
+        schema: {
+          type: "object",
+          required: ["run"],
+          properties: { run: { type: "boolean" } }
+        }
+      }
+    })
+    const leaf = command("leaf", {
+      needs: ["branch"],
+      when: { type: "agent-output", node: "branch", pointer: "/run", equals: true }
+    })
+    const spec = workflow([decision, branch, leaf])
+    const started = observe(start(spec, context("decision")).state, spec, "decision")
+    const matched = crank(
+      started.state,
+      spec,
+      {
+        type: "node-done",
+        nodeId: "decision",
+        token: token(started.state, "decision"),
+        outcome: "completed",
+        hold: false,
+        result: { run: true },
+        error: null,
+        providerSessionId: null
+      },
+      context("branch")
+    )
+    expect(matched.state.nodes.branch?.status).toBe("running")
+
+    const falseStarted = observe(start(spec, context("decision")).state, spec, "decision")
+    const propagated = crank(falseStarted.state, spec, {
+      type: "node-done",
+      nodeId: "decision",
+      token: token(falseStarted.state, "decision"),
+      outcome: "completed",
+      hold: false,
+      result: { run: false },
+      error: null,
+      providerSessionId: null
+    })
+    expect(propagated.state.nodes.branch?.status).toBe("skipped")
+    expect(propagated.state.nodes.leaf?.status).toBe("skipped")
+    expect(propagated.state.status).toBe("completed")
   })
 
   test("journals a board placement fallback without changing scheduling", () => {
@@ -535,6 +820,392 @@ describe("pure crank transition", () => {
     expect(completed.state.nodes["review--r1"]?.result).toEqual({ verdict: { clean: true } })
     expect(completed.state.sessions["review-session"]?.sessionId).toBe("session-r1")
     expect(completed.state.status).toBe("completed")
+  })
+
+  test("binds repeat-member conditions to the current round and reevaluates next round", () => {
+    const decision = agent("decision", {
+      output: {
+        format: "json",
+        schema: {
+          type: "object",
+          required: ["run"],
+          properties: { run: { type: "boolean" } }
+        }
+      }
+    })
+    const optional = command("optional", {
+      needs: ["decision"],
+      when: { type: "agent-output", node: "decision", pointer: "/run", equals: true }
+    })
+    const verdict = agent("verdict", {
+      needs: ["optional"],
+      output: {
+        format: "json",
+        schema: {
+          type: "object",
+          required: ["done"],
+          properties: { done: { type: "boolean" } }
+        }
+      }
+    })
+    const spec = workflow([decision, optional, verdict], {
+      repeats: [
+        {
+          id: "loop",
+          members: ["decision", "optional", "verdict"],
+          until: { type: "agent-output", node: "verdict", pointer: "/done", equals: true },
+          maxRounds: 2
+        }
+      ]
+    })
+    const firstDecision = observe(start(spec, context("decision--r1")).state, spec, "decision--r1")
+    const firstSkipped = crank(
+      firstDecision.state,
+      spec,
+      {
+        type: "node-done",
+        nodeId: "decision--r1",
+        token: token(firstDecision.state, "decision--r1"),
+        outcome: "completed",
+        hold: false,
+        result: { run: false },
+        error: null,
+        providerSessionId: null
+      },
+      context("verdict--r1")
+    )
+    expect(firstSkipped.state.nodes["optional--r1"]?.status).toBe("skipped")
+    expect(resolveConditionSourceId(firstSkipped.state, spec, "optional--r1", "decision")).toBe(
+      "decision--r1"
+    )
+
+    const firstVerdict = observe(firstSkipped.state, spec, "verdict--r1")
+    const secondPlanned = crank(
+      firstVerdict.state,
+      spec,
+      {
+        type: "node-done",
+        nodeId: "verdict--r1",
+        token: token(firstVerdict.state, "verdict--r1"),
+        outcome: "completed",
+        hold: false,
+        result: { done: false },
+        error: null,
+        providerSessionId: null
+      },
+      context("decision--r2")
+    )
+    expect(secondPlanned.state.nodes["decision--r2"]?.status).toBe("running")
+    expect(secondPlanned.state.nodes["optional--r2"]?.status).toBe("pending")
+
+    const secondDecision = observe(secondPlanned.state, spec, "decision--r2")
+    const secondMatched = crank(
+      secondDecision.state,
+      spec,
+      {
+        type: "node-done",
+        nodeId: "decision--r2",
+        token: token(secondDecision.state, "decision--r2"),
+        outcome: "completed",
+        hold: false,
+        result: { run: true },
+        error: null,
+        providerSessionId: null
+      },
+      context("optional--r2")
+    )
+    expect(secondMatched.state.nodes["optional--r2"]?.status).toBe("running")
+    expect(resolveConditionSourceId(secondMatched.state, spec, "optional--r2", "decision")).toBe(
+      "decision--r2"
+    )
+  })
+
+  test("uses a stable condition source and propagates skips inside a repeat", () => {
+    const decision = agent("decision", {
+      output: {
+        format: "json",
+        schema: {
+          type: "object",
+          required: ["run"],
+          properties: { run: { type: "boolean" } },
+          additionalProperties: false
+        }
+      }
+    })
+    const branch = agent("branch", {
+      needs: ["decision"],
+      when: { type: "agent-output", node: "decision", pointer: "/run", equals: true },
+      output: {
+        format: "json",
+        schema: {
+          type: "object",
+          required: ["run"],
+          properties: { run: { type: "boolean" } },
+          additionalProperties: false
+        }
+      }
+    })
+    const leaf = command("leaf", {
+      needs: ["branch"],
+      when: { type: "agent-output", node: "branch", pointer: "/run", equals: true }
+    })
+    const verdict = command("verdict", { needs: ["leaf"] })
+    const spec = workflow([decision, branch, leaf, verdict], {
+      repeats: [
+        {
+          id: "loop",
+          members: ["branch", "leaf", "verdict"],
+          until: { type: "command-success", node: "verdict" },
+          maxRounds: 1
+        }
+      ]
+    })
+    const running = observe(start(spec, context("decision")).state, spec, "decision")
+    const propagated = crank(
+      running.state,
+      spec,
+      {
+        type: "node-done",
+        nodeId: "decision",
+        token: token(running.state, "decision"),
+        outcome: "completed",
+        hold: false,
+        result: { run: false },
+        error: null,
+        providerSessionId: null
+      },
+      context("verdict--r1")
+    )
+    expect(propagated.state.nodes["branch--r1"]?.skip?.reason).toBe("condition-false")
+    expect(propagated.state.nodes["leaf--r1"]?.skip?.reason).toBe("source-skipped")
+    expect(propagated.state.nodes["verdict--r1"]?.status).toBe("running")
+  })
+
+  test("a hold on a skipped repeat member blocks settlement until release", () => {
+    const decision = agent("decision", {
+      output: {
+        format: "json",
+        schema: {
+          type: "object",
+          required: ["run"],
+          properties: { run: { type: "boolean" } },
+          additionalProperties: false
+        }
+      }
+    })
+    const work = command("work", {
+      needs: ["decision"],
+      when: { type: "agent-output", node: "decision", pointer: "/run", equals: true }
+    })
+    const verdict = command("verdict", { needs: ["work"] })
+    const spec = workflow([decision, work, verdict], {
+      repeats: [
+        {
+          id: "loop",
+          members: ["work", "verdict"],
+          until: { type: "command-success", node: "verdict" },
+          maxRounds: 1
+        }
+      ]
+    })
+    const running = observe(start(spec, context("decision")).state, spec, "decision")
+    const held = crank(running.state, spec, { type: "hold", nodeId: "work--r1" })
+    const skipped = crank(held.state, spec, {
+      type: "node-done",
+      nodeId: "decision",
+      token: token(held.state, "decision"),
+      outcome: "completed",
+      hold: false,
+      result: { run: false },
+      error: null,
+      providerSessionId: null
+    })
+    expect(skipped.state.nodes["work--r1"]?.status).toBe("skipped")
+    expect(skipped.state.nodes["verdict--r1"]?.status).toBe("pending")
+    const released = crank(
+      skipped.state,
+      spec,
+      { type: "release", nodeId: "work--r1" },
+      context("verdict--r1")
+    )
+    expect(released.state.nodes["verdict--r1"]?.status).toBe("running")
+  })
+
+  test("binds an outside condition to the repeat's final source instance", () => {
+    const verdict = agent("verdict", {
+      output: {
+        format: "json",
+        schema: {
+          type: "object",
+          required: ["done", "publish"],
+          properties: { done: { type: "boolean" }, publish: { type: "boolean" } },
+          additionalProperties: false
+        }
+      }
+    })
+    const publish = command("publish", {
+      needs: ["verdict"],
+      when: { type: "agent-output", node: "verdict", pointer: "/publish", equals: true }
+    })
+    const spec = workflow([verdict, publish], {
+      repeats: [
+        {
+          id: "loop",
+          members: ["verdict"],
+          until: { type: "agent-output", node: "verdict", pointer: "/done", equals: true },
+          maxRounds: 2
+        }
+      ]
+    })
+    const running = observe(start(spec, context("verdict--r1")).state, spec, "verdict--r1")
+    const settled = crank(running.state, spec, {
+      type: "node-done",
+      nodeId: "verdict--r1",
+      token: token(running.state, "verdict--r1"),
+      outcome: "completed",
+      hold: false,
+      result: { done: true, publish: false },
+      error: null,
+      providerSessionId: null
+    })
+    expect(settled.state.repeats.loop?.status).toBe("completed")
+    expect(settled.state.nodes.publish?.status).toBe("skipped")
+    expect(settled.state.nodes.publish?.skip?.conditionNode).toBe("verdict--r1")
+  })
+
+  test("promotes only successful forked attempts in a persistent repeat session", () => {
+    const seed = agent("seed", {
+      session: { mode: "fresh", from: null, saveAs: "reviewer" }
+    })
+    const review = agent("review", {
+      needs: ["seed"],
+      retry: { maxAttempts: 2 },
+      session: { mode: "resume", from: "reviewer", saveAs: null }
+    })
+    const verdict = agent("verdict", {
+      needs: ["review"],
+      session: { mode: "resume", from: "reviewer", saveAs: null },
+      output: {
+        format: "json",
+        schema: {
+          type: "object",
+          required: ["done"],
+          properties: { done: { type: "boolean" } }
+        }
+      }
+    })
+    const spec = workflow([seed, review, verdict], {
+      repeats: [
+        {
+          id: "review-loop",
+          members: ["review", "verdict"],
+          until: { type: "agent-output", node: "verdict", pointer: "/done", equals: true },
+          maxRounds: 2
+        }
+      ]
+    })
+    const seeded = observe(start(spec, context("seed")).state, spec, "seed", "session-seed")
+    const reviewOnePlanned = crank(
+      seeded.state,
+      spec,
+      {
+        type: "node-done",
+        nodeId: "seed",
+        token: token(seeded.state, "seed"),
+        outcome: "completed",
+        hold: false,
+        result: "ready",
+        error: null,
+        providerSessionId: "session-seed"
+      },
+      context("review--r1")
+    )
+    const reviewOne = observe(reviewOnePlanned.state, spec, "review--r1", "session-review-r1")
+    const verdictOnePlanned = crank(
+      reviewOne.state,
+      spec,
+      {
+        type: "node-done",
+        nodeId: "review--r1",
+        token: token(reviewOne.state, "review--r1"),
+        outcome: "completed",
+        hold: false,
+        result: "reviewed",
+        error: null,
+        providerSessionId: "session-review-r1"
+      },
+      context("verdict--r1")
+    )
+    expect(verdictOnePlanned.state.sessions.reviewer).toMatchObject({
+      sessionId: "session-review-r1",
+      sourceNodeId: "review--r1"
+    })
+
+    const verdictOne = observe(verdictOnePlanned.state, spec, "verdict--r1", "session-verdict-r1")
+    const heldVerdict = crank(verdictOne.state, spec, {
+      type: "node-done",
+      nodeId: "verdict--r1",
+      token: token(verdictOne.state, "verdict--r1"),
+      outcome: "completed",
+      hold: true,
+      result: { done: false },
+      error: null,
+      providerSessionId: "session-verdict-r1"
+    })
+    expect(heldVerdict.state.sessions.reviewer).toMatchObject({
+      sessionId: "session-verdict-r1",
+      sourceNodeId: "verdict--r1"
+    })
+    expect(heldVerdict.state.nodes["review--r2"]).toBeUndefined()
+    const reviewTwoPlanned = crank(
+      heldVerdict.state,
+      spec,
+      { type: "release", nodeId: "verdict--r1" },
+      context("review--r2")
+    )
+
+    const failedFork = observe(reviewTwoPlanned.state, spec, "review--r2", "session-failed-fork")
+    const retryPlanned = crank(
+      failedFork.state,
+      spec,
+      {
+        type: "node-done",
+        nodeId: "review--r2",
+        token: token(failedFork.state, "review--r2"),
+        outcome: "failed",
+        hold: false,
+        result: "provider restarted",
+        error: "provider restarted",
+        providerSessionId: "session-failed-fork"
+      },
+      context("review--r2")
+    )
+    expect(retryPlanned.state.sessions.reviewer).toMatchObject({
+      sessionId: "session-verdict-r1",
+      sourceNodeId: "verdict--r1"
+    })
+    expect(retryPlanned.state.nodes["review--r2"]?.attempts).toHaveLength(2)
+
+    const successfulRetry = observe(retryPlanned.state, spec, "review--r2", "session-review-r2")
+    const promoted = crank(
+      successfulRetry.state,
+      spec,
+      {
+        type: "node-done",
+        nodeId: "review--r2",
+        token: token(successfulRetry.state, "review--r2"),
+        outcome: "completed",
+        hold: false,
+        result: "reviewed again",
+        error: null,
+        providerSessionId: "session-review-r2"
+      },
+      context("verdict--r2")
+    )
+    expect(promoted.state.sessions.reviewer).toMatchObject({
+      sessionId: "session-review-r2",
+      sourceNodeId: "review--r2"
+    })
   })
 
   test("treats reordered object keys as the same agent-output verdict", () => {
@@ -955,6 +1626,57 @@ describe("pure crank transition", () => {
     expect(approved.state.nodes["review--r1"]?.status).toBe("running")
     expect(approved.state.nodes["review--r1"]?.title).toBe("Revised repeat review")
     expect(approved.workflow).toEqual(revised)
+  })
+
+  test("preserves a zero-attempt skipped node as immutable revision history", () => {
+    const decision = agent("decision", {
+      output: {
+        format: "json",
+        schema: {
+          type: "object",
+          required: ["run"],
+          properties: { run: { type: "boolean" } }
+        }
+      }
+    })
+    const optional = command("optional", {
+      needs: ["decision"],
+      when: { type: "agent-output", node: "decision", pointer: "/run", equals: true }
+    })
+    const gate = command("gate", { needs: ["optional"], gate: "approval" })
+    const base = workflow([decision, optional, gate])
+    const running = observe(start(base, context("decision")).state, base, "decision")
+    const skipped = crank(
+      running.state,
+      base,
+      {
+        type: "node-done",
+        nodeId: "decision",
+        token: token(running.state, "decision"),
+        outcome: "completed",
+        hold: false,
+        result: { run: false },
+        error: null,
+        providerSessionId: null
+      },
+      context("gate")
+    )
+    expect(skipped.state.nodes.optional?.status).toBe("skipped")
+    expect(skipped.state.nodes.optional?.attempts).toEqual([])
+
+    const revised = workflow([decision, { ...optional, title: "changed after skip" }, gate])
+    const proposed = crank(skipped.state, base, {
+      type: "propose-revision",
+      workflow: revised,
+      digest: "revision-digest",
+      summary: ["change skipped node"]
+    })
+    expect(() =>
+      crank(proposed.state, base, {
+        type: "approve-revision",
+        digest: "revision-digest"
+      })
+    ).toThrow('Revision changes already-started node template "optional"')
   })
 
   test("fails exhausted nodes and rejects the wrong completion event kind", () => {

@@ -53,6 +53,10 @@ import { validateWorkflow } from "./validation.js"
 
 export const MAX_RESULT_BYTES = 1024 * 1024
 
+function hasResolvedHistory(node: RunState["nodes"][string]): boolean {
+  return node.attempts.length > 0 || node.status === "skipped"
+}
+
 export async function readBoundedResult(file: string, label: string): Promise<string> {
   const flags = constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0)
   let handle: Awaited<ReturnType<typeof open>>
@@ -166,13 +170,12 @@ export function reconcileApprovedRevisionState(state: RunState, event: CrankEven
   const existing = Object.values(state.nodes)
   const reconciled: [string, RunState["nodes"][string]][] = []
   const included = new Set<string>()
-
   for (const template of revised.nodes) {
     if (repeatMembers.has(template.id)) {
       for (const runtimeNode of existing.filter((node) => node.templateId === template.id)) {
         reconciled.push([
           runtimeNode.id,
-          runtimeNode.attempts.length > 0
+          hasResolvedHistory(runtimeNode)
             ? runtimeNode
             : {
                 ...runtimeNode,
@@ -192,7 +195,7 @@ export function reconcileApprovedRevisionState(state: RunState, event: CrankEven
     }
     const current = state.nodes[template.id]
     const runtimeNode =
-      current !== undefined && current.attempts.length > 0
+      current !== undefined && hasResolvedHistory(current)
         ? current
         : {
             id: template.id,
@@ -218,7 +221,7 @@ export function reconcileApprovedRevisionState(state: RunState, event: CrankEven
   // immutable-history checks can reject the unsafe rewrite. Never hide them by
   // eagerly reconciling only the revised declaration.
   for (const runtimeNode of existing) {
-    if (!included.has(runtimeNode.id) && runtimeNode.attempts.length > 0) {
+    if (!included.has(runtimeNode.id) && hasResolvedHistory(runtimeNode)) {
       reconciled.push([runtimeNode.id, runtimeNode])
     }
   }

@@ -114,7 +114,8 @@
               "enum": [
                 "human",
                 "fuse",
-                "max-rounds"
+                "max-rounds",
+                "condition"
               ]
             },
             "message": {
@@ -142,6 +143,52 @@
                   "minLength": 1
                 }
               ]
+            },
+            "conditionNodeId": {
+              "type": "string",
+              "allOf": [
+                {
+                  "minLength": 1
+                }
+              ]
+            },
+            "condition": {
+              "type": "object",
+              "properties": {
+                "type": {
+                  "type": "string",
+                  "enum": [
+                    "agent-output"
+                  ]
+                },
+                "node": {
+                  "type": "string",
+                  "allOf": [
+                    {
+                      "minLength": 1
+                    },
+                    {
+                      "pattern": "^(?!.*--r[1-9][0-9]*$)[a-z0-9][a-z0-9-]*$"
+                    }
+                  ]
+                },
+                "pointer": {
+                  "type": "string",
+                  "allOf": [
+                    {
+                      "pattern": "^(?:\\/(?:[^~/]|~[01])*)*$"
+                    }
+                  ]
+                },
+                "equals": {}
+              },
+              "required": [
+                "type",
+                "node",
+                "pointer",
+                "equals"
+              ],
+              "additionalProperties": false
             }
           },
           "required": [
@@ -486,6 +533,9 @@
                               "approval"
                             ]
                           },
+                          "when": {
+                            "$ref": "#/$defs/Objects_1"
+                          },
                           "type": {
                             "type": "string",
                             "enum": [
@@ -514,10 +564,10 @@
                             "type": "string"
                           },
                           "session": {
-                            "$ref": "#/$defs/Objects_1"
+                            "$ref": "#/$defs/Objects_2"
                           },
                           "output": {
-                            "$ref": "#/$defs/Objects_2"
+                            "$ref": "#/$defs/Objects_3"
                           },
                           "provider": {
                             "type": "string",
@@ -559,7 +609,7 @@
                                 "$ref": "#/$defs/Arrays_4"
                               },
                               "env": {
-                                "$ref": "#/$defs/Objects_3"
+                                "$ref": "#/$defs/Objects_4"
                               }
                             },
                             "required": [
@@ -651,6 +701,9 @@
                               "approval"
                             ]
                           },
+                          "when": {
+                            "$ref": "#/$defs/Objects_1"
+                          },
                           "type": {
                             "type": "string",
                             "enum": [
@@ -679,10 +732,10 @@
                             "type": "string"
                           },
                           "session": {
-                            "$ref": "#/$defs/Objects_1"
+                            "$ref": "#/$defs/Objects_2"
                           },
                           "output": {
-                            "$ref": "#/$defs/Objects_2"
+                            "$ref": "#/$defs/Objects_3"
                           },
                           "provider": {
                             "type": "string",
@@ -728,7 +781,7 @@
                                 "$ref": "#/$defs/Arrays_4"
                               },
                               "env": {
-                                "$ref": "#/$defs/Objects_3"
+                                "$ref": "#/$defs/Objects_4"
                               }
                             },
                             "required": [
@@ -819,6 +872,9 @@
                               "none",
                               "approval"
                             ]
+                          },
+                          "when": {
+                            "$ref": "#/$defs/Objects_1"
                           },
                           "type": {
                             "type": "string",
@@ -1065,328 +1121,340 @@
     "nodes": {
       "type": "object",
       "additionalProperties": {
-        "type": "object",
-        "properties": {
-          "id": {
-            "type": "string",
-            "allOf": [
-              {
-                "minLength": 1
-              }
-            ]
-          },
-          "templateId": {
-            "type": "string",
-            "allOf": [
-              {
-                "minLength": 1
-              }
-            ]
-          },
-          "title": {
-            "type": "string",
-            "allOf": [
-              {
-                "minLength": 1
-              }
-            ]
-          },
-          "type": {
-            "type": "string",
-            "enum": [
-              "agent",
-              "command"
-            ]
-          },
-          "provider": {
-            "anyOf": [
-              {
+        "anyOf": [
+          {
+            "type": "object",
+            "properties": {
+              "id": {
                 "type": "string",
-                "enum": [
-                  "codex",
-                  "claude"
-                ]
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "needs": {
-            "type": "array",
-            "items": {
-              "type": "string",
-              "allOf": [
-                {
-                  "minLength": 1
-                }
-              ]
-            }
-          },
-          "origin": {
-            "type": "string",
-            "enum": [
-              "initial",
-              "loop-round"
-            ]
-          },
-          "repeatId": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "round": {
-            "anyOf": [
-              {
-                "type": "integer",
                 "allOf": [
                   {
-                    "exclusiveMinimum": 0
+                    "minLength": 1
                   }
                 ]
               },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "status": {
-            "type": "string",
-            "enum": [
-              "pending",
-              "ready",
-              "running",
-              "awaiting-approval",
-              "completed",
-              "failed",
-              "cancelled",
-              "paused"
-            ]
-          },
-          "attempts": {
-            "type": "array",
-            "items": {
-              "type": "object",
-              "properties": {
-                "attempt": {
-                  "type": "integer",
-                  "allOf": [
-                    {
-                      "exclusiveMinimum": 0
-                    }
-                  ]
-                },
-                "status": {
-                  "type": "string",
-                  "enum": [
-                    "planned",
-                    "running",
-                    "completed",
-                    "failed",
-                    "cancelled"
-                  ]
-                },
-                "token": {
-                  "type": "string",
-                  "allOf": [
-                    {
-                      "minLength": 1
-                    }
-                  ]
-                },
-                "pane": {
-                  "anyOf": [
-                    {
-                      "type": "object",
-                      "properties": {
-                        "workspaceId": {
-                          "type": "string",
-                          "allOf": [
-                            {
-                              "minLength": 1
-                            }
-                          ]
-                        },
-                        "tabId": {
-                          "type": "string",
-                          "allOf": [
-                            {
-                              "minLength": 1
-                            }
-                          ]
-                        },
-                        "paneId": {
-                          "type": "string",
-                          "allOf": [
-                            {
-                              "minLength": 1
-                            }
-                          ]
-                        },
-                        "group": {
-                          "type": "string",
-                          "allOf": [
-                            {
-                              "minLength": 1
-                            }
-                          ]
-                        },
-                        "surface": {
-                          "type": "string",
-                          "enum": [
-                            "tab",
-                            "split"
-                          ]
-                        }
-                      },
-                      "required": [
-                        "workspaceId",
-                        "tabId",
-                        "paneId",
-                        "group",
-                        "surface"
-                      ],
-                      "additionalProperties": false
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ]
-                },
-                "providerSessionId": {
-                  "anyOf": [
-                    {
-                      "type": "string"
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ]
-                },
-                "startedAt": {
-                  "anyOf": [
-                    {
-                      "type": "string"
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ]
-                },
-                "finishedAt": {
-                  "anyOf": [
-                    {
-                      "type": "string"
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ]
-                },
-                "exitCode": {
-                  "anyOf": [
-                    {
-                      "type": "integer"
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ]
-                },
-                "error": {
-                  "anyOf": [
-                    {
-                      "type": "string"
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ]
-                },
-                "resultPath": {
-                  "type": "string",
-                  "allOf": [
-                    {
-                      "minLength": 1
-                    }
-                  ]
-                },
-                "outputPath": {
-                  "type": "string",
-                  "allOf": [
-                    {
-                      "minLength": 1
-                    }
-                  ]
-                }
+              "templateId": {
+                "type": "string",
+                "allOf": [
+                  {
+                    "minLength": 1
+                  }
+                ]
               },
-              "required": [
-                "attempt",
-                "status",
-                "token",
-                "pane",
-                "providerSessionId",
-                "startedAt",
-                "finishedAt",
-                "exitCode",
-                "error",
-                "resultPath",
-                "outputPath"
-              ],
-              "additionalProperties": false
-            }
-          },
-          "resultPath": {
-            "anyOf": [
-              {
-                "type": "string"
+              "title": {
+                "type": "string",
+                "allOf": [
+                  {
+                    "minLength": 1
+                  }
+                ]
               },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "result": {
-            "anyOf": [
-              {},
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "error": {
-            "anyOf": [
-              {
-                "type": "string"
+              "type": {
+                "type": "string",
+                "enum": [
+                  "agent",
+                  "command"
+                ]
               },
-              {
-                "type": "null"
+              "provider": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "enum": [
+                      "codex",
+                      "claude"
+                    ]
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "needs": {
+                "$ref": "#/$defs/Arrays_5"
+              },
+              "origin": {
+                "type": "string",
+                "enum": [
+                  "initial",
+                  "loop-round"
+                ]
+              },
+              "repeatId": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "round": {
+                "anyOf": [
+                  {
+                    "type": "integer",
+                    "allOf": [
+                      {
+                        "exclusiveMinimum": 0
+                      }
+                    ]
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "attempts": {
+                "$ref": "#/$defs/Arrays_6"
+              },
+              "resultPath": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "result": {
+                "anyOf": [
+                  {},
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "error": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "status": {
+                "type": "string",
+                "enum": [
+                  "skipped"
+                ]
+              },
+              "skip": {
+                "type": "object",
+                "properties": {
+                  "reason": {
+                    "type": "string",
+                    "enum": [
+                      "condition-false",
+                      "source-skipped"
+                    ]
+                  },
+                  "conditionNode": {
+                    "type": "string",
+                    "allOf": [
+                      {
+                        "minLength": 1
+                      }
+                    ]
+                  },
+                  "pointer": {
+                    "type": "string",
+                    "allOf": [
+                      {
+                        "pattern": "^(?:\\/(?:[^~/]|~[01])*)*$"
+                      }
+                    ]
+                  },
+                  "skippedAt": {
+                    "type": "string",
+                    "allOf": [
+                      {
+                        "minLength": 1
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "reason",
+                  "conditionNode",
+                  "pointer",
+                  "skippedAt"
+                ],
+                "additionalProperties": false
               }
-            ]
+            },
+            "required": [
+              "id",
+              "templateId",
+              "title",
+              "type",
+              "provider",
+              "needs",
+              "origin",
+              "repeatId",
+              "round",
+              "attempts",
+              "resultPath",
+              "result",
+              "error",
+              "status",
+              "skip"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "allOf": [
+                  {
+                    "minLength": 1
+                  }
+                ]
+              },
+              "templateId": {
+                "type": "string",
+                "allOf": [
+                  {
+                    "minLength": 1
+                  }
+                ]
+              },
+              "title": {
+                "type": "string",
+                "allOf": [
+                  {
+                    "minLength": 1
+                  }
+                ]
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "agent",
+                  "command"
+                ]
+              },
+              "provider": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "enum": [
+                      "codex",
+                      "claude"
+                    ]
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "needs": {
+                "$ref": "#/$defs/Arrays_5"
+              },
+              "origin": {
+                "type": "string",
+                "enum": [
+                  "initial",
+                  "loop-round"
+                ]
+              },
+              "repeatId": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "round": {
+                "anyOf": [
+                  {
+                    "type": "integer",
+                    "allOf": [
+                      {
+                        "exclusiveMinimum": 0
+                      }
+                    ]
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "attempts": {
+                "$ref": "#/$defs/Arrays_6"
+              },
+              "resultPath": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "result": {
+                "anyOf": [
+                  {},
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "error": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "status": {
+                "type": "string",
+                "enum": [
+                  "pending",
+                  "ready",
+                  "running",
+                  "awaiting-approval",
+                  "completed",
+                  "failed",
+                  "cancelled",
+                  "paused"
+                ]
+              },
+              "skip": {
+                "not": {}
+              }
+            },
+            "required": [
+              "id",
+              "templateId",
+              "title",
+              "type",
+              "provider",
+              "needs",
+              "origin",
+              "repeatId",
+              "round",
+              "attempts",
+              "resultPath",
+              "result",
+              "error",
+              "status"
+            ],
+            "additionalProperties": false
           }
-        },
-        "required": [
-          "id",
-          "templateId",
-          "title",
-          "type",
-          "provider",
-          "needs",
-          "origin",
-          "repeatId",
-          "round",
-          "status",
-          "attempts",
-          "resultPath",
-          "result",
-          "error"
-        ],
-        "additionalProperties": false
+        ]
       }
     },
     "sessions": {
@@ -1941,6 +2009,44 @@
     "Objects_1": {
       "type": "object",
       "properties": {
+        "type": {
+          "type": "string",
+          "enum": [
+            "agent-output"
+          ]
+        },
+        "node": {
+          "type": "string",
+          "allOf": [
+            {
+              "minLength": 1
+            },
+            {
+              "pattern": "^(?!.*--r[1-9][0-9]*$)[a-z0-9][a-z0-9-]*$"
+            }
+          ]
+        },
+        "pointer": {
+          "type": "string",
+          "allOf": [
+            {
+              "pattern": "^(?:\\/(?:[^~/]|~[01])*)*$"
+            }
+          ]
+        },
+        "equals": {}
+      },
+      "required": [
+        "type",
+        "node",
+        "pointer",
+        "equals"
+      ],
+      "additionalProperties": false
+    },
+    "Objects_2": {
+      "type": "object",
+      "properties": {
         "mode": {
           "type": "string",
           "enum": [
@@ -1987,7 +2093,7 @@
       ],
       "additionalProperties": false
     },
-    "Objects_2": {
+    "Objects_3": {
       "type": "object",
       "properties": {
         "format": {
@@ -2028,12 +2134,196 @@
         ]
       }
     },
-    "Objects_3": {
+    "Objects_4": {
       "type": "object",
       "patternProperties": {
         "^[A-Za-z_][A-Za-z0-9_]*$": {
           "type": "string"
         }
+      }
+    },
+    "Arrays_5": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "allOf": [
+          {
+            "minLength": 1
+          }
+        ]
+      }
+    },
+    "Arrays_6": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "attempt": {
+            "type": "integer",
+            "allOf": [
+              {
+                "exclusiveMinimum": 0
+              }
+            ]
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "planned",
+              "running",
+              "completed",
+              "failed",
+              "cancelled"
+            ]
+          },
+          "token": {
+            "type": "string",
+            "allOf": [
+              {
+                "minLength": 1
+              }
+            ]
+          },
+          "pane": {
+            "anyOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "workspaceId": {
+                    "type": "string",
+                    "allOf": [
+                      {
+                        "minLength": 1
+                      }
+                    ]
+                  },
+                  "tabId": {
+                    "type": "string",
+                    "allOf": [
+                      {
+                        "minLength": 1
+                      }
+                    ]
+                  },
+                  "paneId": {
+                    "type": "string",
+                    "allOf": [
+                      {
+                        "minLength": 1
+                      }
+                    ]
+                  },
+                  "group": {
+                    "type": "string",
+                    "allOf": [
+                      {
+                        "minLength": 1
+                      }
+                    ]
+                  },
+                  "surface": {
+                    "type": "string",
+                    "enum": [
+                      "tab",
+                      "split"
+                    ]
+                  }
+                },
+                "required": [
+                  "workspaceId",
+                  "tabId",
+                  "paneId",
+                  "group",
+                  "surface"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "providerSessionId": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "startedAt": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "finishedAt": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "exitCode": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "resultPath": {
+            "type": "string",
+            "allOf": [
+              {
+                "minLength": 1
+              }
+            ]
+          },
+          "outputPath": {
+            "type": "string",
+            "allOf": [
+              {
+                "minLength": 1
+              }
+            ]
+          }
+        },
+        "required": [
+          "attempt",
+          "status",
+          "token",
+          "pane",
+          "providerSessionId",
+          "startedAt",
+          "finishedAt",
+          "exitCode",
+          "error",
+          "resultPath",
+          "outputPath"
+        ],
+        "additionalProperties": false
       }
     }
   }

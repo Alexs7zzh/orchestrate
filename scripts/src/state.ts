@@ -523,7 +523,7 @@ export async function listRunStates(): Promise<RunListing> {
 export function holdBlocksDependencies(state: RunState, hold: HoldState): boolean {
   return Object.values(state.nodes).some(
     (node) =>
-      node.status === "completed" &&
+      (node.status === "completed" || node.status === "skipped") &&
       (hold.scope === "instance" ? node.id === hold.target : node.templateId === hold.target) &&
       (node.repeatId === null || node.round === state.repeats[node.repeatId]?.round)
   )

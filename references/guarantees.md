@@ -48,6 +48,15 @@ time is safe, and correctness never depends on receiving a wake-up.
   rerunning `reconcile` is safe.
 - A successful node outcome and a downstream hold are separate facts. Releasing a hold never
   rewrites the historical outcome.
+- Agents report only successful or failed completion. The trusted scheduler alone derives a
+  zero-attempt `skipped` outcome from a digest-approved `when` condition; a missing JSON pointer
+  pauses as a condition-contract error and never silently selects or skips work.
+- A repeated resume attempt forks the committed provider-session head. Only a schema-valid success
+  promotes the alias; failure and retry leave the prior head unchanged. This isolates conversation
+  lineage, not arbitrary workspace writes made by an attempt.
+- A dead prompt-bearing receipt is never re-prompted under its old completion token. Reconciliation
+  adopts its submission only with exact child-session attribution; otherwise retry uses a fresh
+  token and the unchanged committed parent.
 - Reconciliation either adopts an unambiguous observed Herdr resource or reports human attention.
   It does not silently guess after an ambiguous failure.
 - Explicit human pause, stop, hold, gate, revision, and repeat-limit decisions remain explicit.

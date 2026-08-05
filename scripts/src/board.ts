@@ -254,9 +254,10 @@ export function renderBoardFrame(
     const dependencyRelease = node.downstreamHeld
       ? ` ${node.continuationGlyph} downstream held`
       : ` ${node.continuationGlyph}`
+    const skipped = node.skip === null ? "" : `  ${node.skip.reason}`
     rowNodeIds[lines.length] = node.id
     lines.push(
-      `${prefix} ${"  ".repeat(row.depth)}${node.glyph} ${node.id}  ${node.status}${dependencyRelease}  ${duration(node.elapsedMs)}${stalled}`
+      `${prefix} ${"  ".repeat(row.depth)}${node.glyph} ${node.id}  ${node.status}${dependencyRelease}  ${duration(node.elapsedMs)}${skipped}${stalled}`
     )
   }
   lines.push("", "↑/↓ select  enter open  p pause/resume  h hold/release  s stop  q quit")

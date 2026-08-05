@@ -51,7 +51,18 @@ interface EventOptions {
   readonly root?: boolean
 }
 
-const TERMINAL_NODE_STATUSES = new Set(["completed", "failed", "cancelled"])
+const TERMINAL_NODE_STATUSES = new Set(["completed", "skipped", "failed", "cancelled"])
+const RELEASING_NODE_STATUSES = new Set(["completed", "skipped"])
+
+function hasResolvedHistory(node: NodeRunState): boolean {
+  return node.attempts.length > 0 || node.status === "skipped"
+}
+
+function sameNodeExceptWhen(before: WorkflowNode, after: WorkflowNode): boolean {
+  const { when: _beforeWhen, ...beforeRest } = before
+  const { when: _afterWhen, ...afterRest } = after
+  return same(beforeRest, afterRest)
+}
 
 function nodeState(
   node: WorkflowNode,
@@ -205,13 +216,36 @@ export function resolveInputSourceId(
   return repeatState?.status === "completed" ? instanceId(input.from, repeatState.round) : null
 }
 
+export function resolveConditionSourceId(
+  state: RunState,
+  workflow: WorkflowSpec,
+  consumerId: string,
+  sourceTemplateId: string
+): string | null {
+  const consumer = state.nodes[consumerId]
+  if (consumer === undefined) {
+    throw new Error(`Unknown condition consumer "${consumerId}".`)
+  }
+  const sourceRepeat = repeatForTemplate(workflow, sourceTemplateId)
+  if (sourceRepeat === undefined) {
+    return sourceTemplateId
+  }
+  if (consumer.repeatId === sourceRepeat.id && consumer.round !== null) {
+    return instanceId(sourceTemplateId, consumer.round)
+  }
+  const repeatState = state.repeats[sourceRepeat.id]
+  return repeatState?.status === "completed"
+    ? instanceId(sourceTemplateId, repeatState.round)
+    : null
+}
+
 function held(state: RunState, node: NodeRunState): boolean {
   return state.holds[node.id] !== undefined || state.holds[node.templateId] !== undefined
 }
 
 function nodeReleasesDependencies(state: RunState, id: string): boolean {
   const node = state.nodes[id]
-  return node?.status === "completed" && !held(state, node)
+  return node !== undefined && RELEASING_NODE_STATUSES.has(node.status) && !held(state, node)
 }
 
 function repeatReleasesDependencies(
@@ -279,25 +313,31 @@ function conflicts(left: WorkflowNode, right: WorkflowNode, allowWrites: boolean
   return left.workspace.writes.some((a) => right.workspace.writes.some((b) => pathsOverlap(a, b)))
 }
 
-function pointerValue(document: unknown, pointer: string): unknown {
+function pointerValue(
+  document: unknown,
+  pointer: string
+): { readonly found: boolean; readonly value: unknown } {
   if (pointer === "") {
-    return document
+    return { found: true, value: document }
   }
   let cursor = document
   for (const encoded of pointer.slice(1).split("/")) {
     const part = encoded.replaceAll("~1", "/").replaceAll("~0", "~")
     if (Array.isArray(cursor)) {
-      if (!/^\d+$/.test(part)) {
-        return undefined
+      if (!/^\d+$/.test(part) || Number(part) >= cursor.length) {
+        return { found: false, value: undefined }
       }
       cursor = cursor[Number(part)]
     } else if (cursor !== null && typeof cursor === "object") {
+      if (!Object.hasOwn(cursor, part)) {
+        return { found: false, value: undefined }
+      }
       cursor = (cursor as Record<string, unknown>)[part]
     } else {
-      return undefined
+      return { found: false, value: undefined }
     }
   }
-  return cursor
+  return { found: true, value: cursor }
 }
 
 function repeatVerdictClean(
@@ -323,7 +363,8 @@ function repeatVerdictClean(
       template.allowedExitCodes.includes(code)
     )
   }
-  return same(pointerValue(node.result, verdict.pointer), verdict.equals)
+  const pointed = pointerValue(node.result, verdict.pointer)
+  return pointed.found && same(pointed.value, verdict.equals)
 }
 
 function isSettled(state: RunState, workflow: WorkflowSpec): boolean {
@@ -331,7 +372,7 @@ function isSettled(state: RunState, workflow: WorkflowSpec): boolean {
     Object.values(state.holds).some((hold) =>
       Object.values(state.nodes).some(
         (node) =>
-          node.status === "completed" &&
+          RELEASING_NODE_STATUSES.has(node.status) &&
           (hold.scope === "instance" ? node.id === hold.target : node.templateId === hold.target) &&
           (node.repeatId === null || node.round === state.repeats[node.repeatId]?.round)
       )
@@ -345,7 +386,10 @@ function isSettled(state: RunState, workflow: WorkflowSpec): boolean {
   const repeatMembers = new Set(workflow.repeats.flatMap((repeat) => repeat.members))
   return workflow.nodes
     .filter((node) => !repeatMembers.has(node.id))
-    .every((node) => state.nodes[node.id]?.status === "completed")
+    .every((node) => {
+      const runtime = state.nodes[node.id]
+      return runtime !== undefined && RELEASING_NODE_STATUSES.has(runtime.status)
+    })
 }
 
 function requirePreparedNode(
@@ -635,6 +679,73 @@ export function transition(
         ) {
           continue
         }
+        const condition = template.when
+        if (condition !== undefined) {
+          const sourceId = resolveConditionSourceId(state, workflow, candidate.id, condition.node)
+          const source = sourceId === null ? undefined : state.nodes[sourceId]
+          if (source === undefined) {
+            throw new Error(
+              `Condition source "${condition.node}" for node "${candidate.id}" is not resolved.`
+            )
+          }
+          const skip = (reason: "condition-false" | "source-skipped"): void => {
+            emit(
+              "node.skipped",
+              `Skipped node "${candidate.id}" because its approved condition did not select it.`,
+              (current) =>
+                replaceNode(current, {
+                  ...candidate,
+                  status: "skipped",
+                  skip: {
+                    reason,
+                    conditionNode: source.id,
+                    pointer: condition.pointer,
+                    skippedAt: now
+                  }
+                }),
+              {
+                nodeId: candidate.id,
+                data: {
+                  conditionNode: source.id,
+                  pointer: condition.pointer,
+                  reason
+                }
+              }
+            )
+          }
+          if (source.status === "skipped") {
+            skip("source-skipped")
+            madeProgress = true
+            continue
+          }
+          const pointed = pointerValue(source.result, condition.pointer)
+          if (!pointed.found) {
+            const message = `Condition for node "${candidate.id}" could not resolve pointer "${condition.pointer}" in result of "${source.id}". Revise the unstarted node condition, then resume; or stop the run.`
+            emit(
+              "run.paused",
+              message,
+              (current) => ({
+                ...current,
+                status: "paused",
+                pause: {
+                  kind: "condition",
+                  message,
+                  repeatId: candidate.repeatId,
+                  createdAt: now,
+                  conditionNodeId: candidate.id,
+                  condition
+                }
+              }),
+              { data: { kind: "condition" } }
+            )
+            return
+          }
+          if (!same(pointed.value, condition.equals)) {
+            skip("condition-false")
+            madeProgress = true
+            continue
+          }
+        }
         if (template.gate === "approval") {
           const gate = state.gates[candidate.id]
           if (gate === undefined) {
@@ -823,6 +934,16 @@ export function transition(
         failAttempt(node, event.error ?? "Agent reported failure.", null, undefined, event.result)
         break
       }
+      const transactionalRepeatResume =
+        node.repeatId !== null &&
+        template.session.mode === "resume" &&
+        template.session.from !== null
+      if (transactionalRepeatResume && event.providerSessionId === null) {
+        throw new Error(
+          `Persistent repeat node "${node.id}" completed without a forked provider session id.`
+        )
+      }
+      const promotedSessionId = transactionalRepeatResume ? event.providerSessionId : null
       const completedAttempt: AttemptState = {
         ...attempt,
         status: "completed",
@@ -846,6 +967,7 @@ export function transition(
               : {
                   [resumedAlias]: {
                     ...resumedSession,
+                    ...(promotedSessionId === null ? {} : { sessionId: promotedSessionId }),
                     sourceNodeId: node.id
                   }
                 }),
@@ -1108,6 +1230,25 @@ export function transition(
       if (state.pause.kind === "fuse" && !event.overrideFuse) {
         throw new Error("Resuming a fuse pause requires overrideFuse.")
       }
+      if (state.pause.kind === "condition") {
+        const conditionNodeId = state.pause.conditionNodeId
+        const pausedCondition = state.pause.condition
+        const target = conditionNodeId === undefined ? undefined : state.nodes[conditionNodeId]
+        const template =
+          target === undefined
+            ? undefined
+            : workflow.nodes.find((candidate) => candidate.id === target.templateId)
+        if (
+          target === undefined ||
+          template === undefined ||
+          pausedCondition === undefined ||
+          same(template.when, pausedCondition)
+        ) {
+          throw new Error(
+            "A condition pause requires an approved revision that changes the paused node condition before resume."
+          )
+        }
+      }
       if (pausedRepeatId !== null && event.continueRounds === null && event.acceptRepeat === null) {
         throw new Error("A max-rounds pause requires continueRounds or acceptRepeat.")
       }
@@ -1227,13 +1368,32 @@ export function transition(
       }
       const oldTemplates = templateMap(workflow)
       const revisedTemplates = templateMap(revised)
+      const pausedConditionTarget =
+        state.pause?.kind === "condition" && state.pause.conditionNodeId !== undefined
+          ? state.nodes[state.pause.conditionNodeId]
+          : undefined
+      const conditionOnlyRevisionTemplate =
+        pausedConditionTarget !== undefined &&
+        pausedConditionTarget.status === "pending" &&
+        !hasResolvedHistory(pausedConditionTarget)
+          ? pausedConditionTarget.templateId
+          : null
       for (const node of Object.values(state.nodes)) {
-        if (node.attempts.length === 0) {
+        if (!hasResolvedHistory(node)) {
           continue
         }
         const before = oldTemplates.get(node.templateId)
         const after = revisedTemplates.get(node.templateId)
-        if (before === undefined || after === undefined || !same(before, after)) {
+        const changesOnlyPausedCondition =
+          conditionOnlyRevisionTemplate === node.templateId &&
+          before !== undefined &&
+          after !== undefined &&
+          sameNodeExceptWhen(before, after)
+        if (
+          before === undefined ||
+          after === undefined ||
+          (!same(before, after) && !changesOnlyPausedCondition)
+        ) {
           throw new Error(`Revision changes already-started node template "${node.templateId}".`)
         }
       }
@@ -1259,7 +1419,7 @@ export function transition(
           reconciledNodes[node.id] =
             existing === undefined
               ? nodeState(node)
-              : existing.attempts.length === 0
+              : !hasResolvedHistory(existing)
                 ? { ...existing, title: node.title }
                 : existing
         }

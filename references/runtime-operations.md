@@ -23,14 +23,18 @@ waits for the agent to report interactive readiness first, requires the prompt t
 the pane transcript before trusting the observation, and delivers a prompt beyond the PTY-safe
 typed budget as a short pointer to a prompt copy in the attempt submission directory. A prompt
 error or wait timeout is recorded as `ambiguous`. A failure after the prompt was observed taken —
-such as a provider reporting the session id required by `session.saveAs` late — is recorded as
+such as a provider reporting a required lineage session id late — is recorded as
 `session-pending`: reconcile retries only the session capture on that live pane and promotes the
-receipt to ready without re-prompting. Reconcile adopts a live ready pane or a token-valid
-completed submission, retries when the recorded pane is explicitly absent, and stops for
-agent-assisted inspection for every other live incomplete or ambiguous receipt. It does not infer
-prompt acceptance from provider lifecycle status or close label-matched tabs. One node's ambiguous
-or pending spawn is surfaced after the other planned intents of the same reconciliation have
-started; it never starves independent ready work.
+receipt to ready without re-prompting. Reconcile adopts a live ready pane. If a prompt-bearing
+receipt's pane is gone, it adopts a token-valid submission only when the receipt also carries the
+exact required child session id; otherwise it fails that attempt, and retry allocates a fresh token
+and forks the unchanged committed parent. It never re-prompts a possibly accepted agent attempt
+under the same completion token. A dead `created` receipt, which predates command start or prompt
+delivery, may still be retried in place. Every other live incomplete or ambiguous receipt stops for
+agent-assisted inspection. Reconcile does not infer prompt acceptance from provider lifecycle
+status or close label-matched tabs. One node's ambiguous or pending spawn is surfaced after the
+other planned intents of the same reconciliation have started; it never starves independent ready
+work.
 
 New agent panes may briefly exist before their interactive shell is ready; the surface retries only
 Herdr's explicit `agent_pane_busy` readiness response within a fixed bound. Other unambiguous start
@@ -107,15 +111,17 @@ crash may lose or duplicate presentation without changing authoritative run stat
 
 ## Scheduling
 
-A node becomes ready when every dependency has status `completed` and no matching instance or
-template hold blocks dependency release, its gate is satisfied, and starting it would fit the
-concurrency, write-set, resource, and start-fuse constraints. A successful node always remains
-`completed`; a matching durable hold independently marks its downstream dependencies held.
+A node becomes ready when every dependency has status `completed` or `skipped` and no matching
+instance or template hold blocks dependency release, its condition selects it, its gate is
+satisfied, and starting it would fit the concurrency, write-set, resource, and start-fuse
+constraints. A successful node always remains `completed`; a matching durable hold independently
+marks its downstream dependencies held.
 `node-done --hold` commits the `completed` outcome and an instance-scoped hold in one authenticated
 transaction as separate `node.completed` and `hold.set` journal events before reconciliation. A
 release removes only the hold, never the historical outcome, and then cranks newly ready work.
 
-Repeat rounds advance only after every current-round member is completed and releases dependencies.
+Repeat rounds advance only after every current-round member is completed or skipped and releases
+dependencies.
 A template hold applies to each matching repeat instance; an instance hold applies only to that
 runtime instance. Historical-round instance holds do not block a settled repeat's final-round
 dependency release. Gates, restore, revision reconciliation, and replay consume the same two axes.
@@ -134,12 +140,26 @@ is cranked. Herdr transport/service failures abort restore without treating a li
 Retries reuse their placement slot after the old pane is closed. Command exit codes outside
 `allowedExitCodes` fail an ordinary node. In a repeat condition, an allowed exit settles the repeat;
 another numeric exit begins the next round. Provider failures use the same bounded retry path.
+Repeated session resumes are copy-on-write: each attempt forks the alias's committed provider
+session, a schema-valid success promotes that child and its pane source, and any failed attempt
+leaves the parent head unchanged. A retry therefore forks the same committed parent. This protects
+provider conversation lineage; it does not roll back source-workspace mutations performed by a
+failed attempt.
 
 ## Repeats and limits
 
 A repeat instantiates its member subgraph one round at a time. Runtime IDs append `--r<N>`.
 `round: previous` inputs are absent in round one and resolve to the prior instance thereafter.
 External dependents wait for the repeat to settle and receive final-round output.
+The approved `{{round}}` placeholder in an agent member's prompt renders to that instance's round;
+all other directive text remains unchanged.
+
+A member-level `when` uses the same-round source instance when both nodes belong to the repeat,
+uses a stable non-repeat source directly, and resolves a repeat source to its final instance for an
+outside consumer. Different repeats cannot be joined by a condition. The scheduler evaluates every
+member anew each round before gates and attempts; a skip in one round does not force a skip in the
+next. The verdict member cannot be conditional, so every settled round has an actual result for
+`until`.
 
 The condition is either a command result or a JSON pointer into a schema-validated agent result.
 At `maxRounds`, the run pauses. Resume requires `--continue-rounds <n>` or
@@ -149,6 +169,24 @@ Already-planned starts within the budget are reconciled before a later candidate
 Repeat-member Git worktree branch templates and explicit paths must contain `{{nodeId}}`, whose
 runtime value includes the round suffix; both are expanded for creation and cleanup. Default
 worktrees use a run/runtime-unique temporary target outside authoritative state.
+
+## Conditional nodes and skipped outcomes
+
+`when` compares an approved expected value with an RFC 6901 pointer in a direct dependency's
+schema-validated JSON result. A match continues normal scheduling. A mismatch, or an explicitly
+skipped source, journals `node.skipped` and records a terminal zero-attempt node with scheduler-owned
+reason metadata. It consumes no gate, retry, start, pane, session, workspace, or resource. The
+agent completion command remains `completed|failed`; no agent can assert `skipped`.
+
+A missing pointer is malformed control data, not a false predicate. Orchestrate pauses the run with
+kind `condition`, leaves the target unstarted, and rejects resume until an approved revision changes
+that condition, or the run is explicitly stopped. For a repeat member with prior-round history,
+approval may change only `when` on the paused template; the current and future unstarted instances
+use the revision while settled earlier instances remain immutable. This is the precise fail-closed
+behavior: it never silently chooses either branch. A skipped dependency releases dependents unless
+held; content inputs render `[skipped]`, while path inputs are invalid because skipped nodes have no
+result file.
+Status, result JSON, events, and the board expose the skipped state and reason.
 
 ## Gates and revisions
 
@@ -165,8 +203,11 @@ intents nor reconciliation/spawn of already-planned old-plan intents may start a
 discarding the proposal removes that scheduling barrier.
 Approval rewrites every unstarted runtime node from the revised declaration, including its
 dependencies, resets it to pending for fresh scheduling, and rebuilds stable declaration order.
-Already-started runtime history is preserved byte-for-byte; removing or changing its template is
-rejected. Thus newly inserted barriers affect scheduling as well as board edges.
+Already-started or skipped runtime history is preserved byte-for-byte; removing or changing its
+template is rejected. The repeat declaration is immutable for the entire active run, and a member
+template becomes immutable after its first attempt or skip, so approval cannot redirect a committed
+provider lineage between rounds. Thus newly inserted barriers affect scheduling as well as board
+edges.
 
 ## Herdr presentation
 

@@ -16,7 +16,7 @@ import type {
   WorkflowSpec
 } from "./types.js"
 
-import { buildBoardModel } from "./board-model.js"
+import { buildBoardModel, runtimeDependencyIds } from "./board-model.js"
 import { observePaneGarnish, runBoardTui } from "./board.js"
 import {
   crankRun,
@@ -427,6 +427,7 @@ function previewPlan(workflow: WorkflowSpec, digest: string, issues: readonly Va
       depth: depths.get(node.id) ?? 1,
       needs: node.needs,
       gate: node.gate,
+      when: node.when ?? null,
       provider: node.type === "agent" ? node.provider : null,
       permissions: node.type === "agent" ? node.permissions : null,
       workspace: node.workspace,
@@ -443,7 +444,7 @@ function previewText(plan: ReturnType<typeof previewPlan>): string {
     .toSorted((left, right) => left.depth - right.depth)
     .map(
       (node) =>
-        `  ${String(node.depth).padStart(2)} ${node.id} [${node.type}${node.provider === null ? "" : `/${node.provider}`}] needs=${node.needs.join(",") || "-"} gate=${node.gate}${
+        `  ${String(node.depth).padStart(2)} ${node.id} [${node.type}${node.provider === null ? "" : `/${node.provider}`}] needs=${node.needs.join(",") || "-"} gate=${node.gate}${node.when === null ? "" : ` when=${node.when.node}${node.when.pointer}==${JSON.stringify(node.when.equals)}`}${
           node.permissions === null
             ? ""
             : ` escalation=${node.permissions.escalation} execution=${JSON.stringify(node.permissions.execution)}`
@@ -630,7 +631,13 @@ function dependencyDepths(
 }
 
 function statusValue(state: RunState, observedAttention = runNeedsAttention(state)) {
-  const depths = dependencyDepths(state.nodes)
+  const runtimeNodes = Object.fromEntries(
+    Object.values(state.nodes).map((node) => [
+      node.id,
+      { needs: runtimeDependencyIds(state, node) }
+    ])
+  )
+  const depths = dependencyDepths(runtimeNodes)
   return {
     runId: state.id,
     name: state.workflowName,
@@ -648,20 +655,27 @@ function statusValue(state: RunState, observedAttention = runNeedsAttention(stat
           },
     starts: state.starts,
     updatedAt: state.updatedAt,
-    nodes: Object.values(state.nodes).map((node) => ({
-      id: node.id,
-      title: node.title,
-      type: node.type,
-      status: node.status,
-      depth: depths.get(node.id) ?? 1,
-      needs: node.needs,
-      waitingOn: node.needs.filter((need) => state.nodes[need]?.status !== "completed"),
-      downstreamHeld: holdsForNode(state, node).length > 0,
-      holdTargets: holdsForNode(state, node).map((hold) => hold.target),
-      attempt: node.attempts.at(-1)?.attempt ?? null,
-      resultPath: node.resultPath,
-      error: node.error
-    })),
+    nodes: Object.values(state.nodes).map((node) => {
+      const runtimeNeeds = runtimeDependencyIds(state, node)
+      return {
+        id: node.id,
+        title: node.title,
+        type: node.type,
+        status: node.status,
+        depth: depths.get(node.id) ?? 1,
+        needs: node.needs,
+        waitingOn: runtimeNeeds.filter((need) => {
+          const status = state.nodes[need]?.status
+          return status !== "completed" && status !== "skipped"
+        }),
+        downstreamHeld: holdsForNode(state, node).length > 0,
+        holdTargets: holdsForNode(state, node).map((hold) => hold.target),
+        attempt: node.attempts.at(-1)?.attempt ?? null,
+        resultPath: node.resultPath,
+        error: node.error,
+        skip: node.skip ?? null
+      }
+    }),
     gates: Object.values(state.gates).filter((gate) => gate.approvedAt === null),
     holds: Object.values(state.holds),
     repeats: Object.values(state.repeats)
@@ -687,6 +701,7 @@ function statusText(
           `              orchestrate resume ${state.id} --accept-repeat ${state.pause.repeatId}`
         ]
       : []),
+    ...(state.pause?.kind === "condition" ? [`  condition: ${state.pause.message}`] : []),
     ...value.holds
       .filter((hold) => holdBlocksDependencies(state, hold))
       .map(
@@ -719,7 +734,7 @@ function statusText(
           (node.status === "pending" || node.status === "ready") && node.waitingOn.length > 0
             ? ` — waiting on ${node.waitingOn.join(", ")}`
             : ""
-        return `  ${String(node.depth).padStart(2)} ${node.id.padEnd(24)} ${node.status}${gateAhead ? " — approval gate ahead" : ""}${waiting}${node.downstreamHeld ? " — downstream held" : ""}${node.error === null ? "" : ` — ${node.error}`}`
+        return `  ${String(node.depth).padStart(2)} ${node.id.padEnd(24)} ${node.status}${gateAhead ? " — approval gate ahead" : ""}${waiting}${node.downstreamHeld ? " — downstream held" : ""}${node.skip === null ? "" : ` — ${node.skip.reason} (${node.skip.conditionNode}${node.skip.pointer})`}${node.error === null ? "" : ` — ${node.error}`}`
       })
   ].join("\n")
 }
@@ -1430,6 +1445,25 @@ export async function runCli(
       requested === null
         ? node.attempts.at(-1)
         : node.attempts.find((candidate) => candidate.attempt === requested)
+    if (attempt === undefined && requested === null && node.status === "skipped") {
+      const content = `[skipped: ${nodeId}]`
+      output(
+        json,
+        {
+          runId: state.id,
+          nodeId,
+          attempt: null,
+          status: node.status,
+          downstreamHeld: holdsForNode(state, node).length > 0,
+          holds: holdsForNode(state, node),
+          path: null,
+          content: null,
+          skip: node.skip ?? null
+        },
+        node.skip === undefined ? content : `${content} — ${node.skip.reason}`
+      )
+      return EXIT_OK
+    }
     if (attempt === undefined) {
       throw new Error(`Node "${nodeId}" has no requested attempt.`)
     }

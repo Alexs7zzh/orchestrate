@@ -123,7 +123,8 @@
               "type": "string",
               "enum": [
                 "human",
-                "fuse"
+                "fuse",
+                "condition"
               ]
             }
           },
@@ -459,7 +460,7 @@
               "minLength": 1
             },
             {
-              "pattern": "^(?!.*--r[1-9][0-9]*$)[a-z0-9][a-z0-9-]*$"
+              "pattern": "^[a-z0-9][a-z0-9-]*$"
             }
           ]
         },
@@ -533,7 +534,7 @@
               "minLength": 1
             },
             {
-              "pattern": "^(?!.*--r[1-9][0-9]*$)[a-z0-9][a-z0-9-]*$"
+              "pattern": "^[a-z0-9][a-z0-9-]*$"
             }
           ]
         },
@@ -608,7 +609,7 @@
               "minLength": 1
             },
             {
-              "pattern": "^(?!.*--r[1-9][0-9]*$)[a-z0-9][a-z0-9-]*$"
+              "pattern": "^[a-z0-9][a-z0-9-]*$"
             }
           ]
         },
@@ -683,7 +684,7 @@
               "minLength": 1
             },
             {
-              "pattern": "^(?!.*--r[1-9][0-9]*$)[a-z0-9][a-z0-9-]*$"
+              "pattern": "^[a-z0-9][a-z0-9-]*$"
             }
           ]
         },
@@ -787,6 +788,112 @@
         "type": {
           "type": "string",
           "enum": [
+            "node.skipped"
+          ]
+        },
+        "nodeId": {
+          "type": "string",
+          "allOf": [
+            {
+              "minLength": 1
+            },
+            {
+              "pattern": "^[a-z0-9][a-z0-9-]*$"
+            }
+          ]
+        },
+        "data": {
+          "type": "object",
+          "properties": {
+            "conditionNode": {
+              "type": "string",
+              "allOf": [
+                {
+                  "minLength": 1
+                }
+              ]
+            },
+            "pointer": {
+              "type": "string",
+              "allOf": [
+                {
+                  "pattern": "^(?:\\/(?:[^~/]|~[01])*)*$"
+                }
+              ]
+            },
+            "reason": {
+              "type": "string",
+              "enum": [
+                "condition-false",
+                "source-skipped"
+              ]
+            }
+          },
+          "required": [
+            "conditionNode",
+            "pointer",
+            "reason"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "runtimeVersion",
+        "sequence",
+        "timestamp",
+        "runId",
+        "message",
+        "patch",
+        "type",
+        "nodeId",
+        "data"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "runtimeVersion": {
+          "type": "string",
+          "allOf": [
+            {
+              "minLength": 1
+            }
+          ]
+        },
+        "sequence": {
+          "type": "integer",
+          "allOf": [
+            {
+              "exclusiveMinimum": 0
+            }
+          ]
+        },
+        "timestamp": {
+          "type": "string",
+          "allOf": [
+            {
+              "minLength": 1
+            }
+          ]
+        },
+        "runId": {
+          "type": "string",
+          "allOf": [
+            {
+              "minLength": 1
+            }
+          ]
+        },
+        "message": {
+          "type": "string"
+        },
+        "patch": {
+          "$ref": "#/$defs/Arrays_"
+        },
+        "type": {
+          "type": "string",
+          "enum": [
             "node.failed"
           ]
         },
@@ -797,7 +904,7 @@
               "minLength": 1
             },
             {
-              "pattern": "^(?!.*--r[1-9][0-9]*$)[a-z0-9][a-z0-9-]*$"
+              "pattern": "^[a-z0-9][a-z0-9-]*$"
             }
           ]
         },
@@ -897,7 +1004,7 @@
               "minLength": 1
             },
             {
-              "pattern": "^(?!.*--r[1-9][0-9]*$)[a-z0-9][a-z0-9-]*$"
+              "pattern": "^[a-z0-9][a-z0-9-]*$"
             }
           ]
         },
@@ -986,7 +1093,7 @@
               "minLength": 1
             },
             {
-              "pattern": "^(?!.*--r[1-9][0-9]*$)[a-z0-9][a-z0-9-]*$"
+              "pattern": "^[a-z0-9][a-z0-9-]*$"
             }
           ]
         },
@@ -1060,7 +1167,7 @@
               "minLength": 1
             },
             {
-              "pattern": "^(?!.*--r[1-9][0-9]*$)[a-z0-9][a-z0-9-]*$"
+              "pattern": "^[a-z0-9][a-z0-9-]*$"
             }
           ]
         },
@@ -1135,7 +1242,7 @@
               "minLength": 1
             },
             {
-              "pattern": "^(?!.*--r[1-9][0-9]*$)[a-z0-9][a-z0-9-]*$"
+              "pattern": "^[a-z0-9][a-z0-9-]*$"
             }
           ]
         },
@@ -1210,7 +1317,7 @@
               "minLength": 1
             },
             {
-              "pattern": "^(?!.*--r[1-9][0-9]*$)[a-z0-9][a-z0-9-]*$"
+              "pattern": "^[a-z0-9][a-z0-9-]*$"
             }
           ]
         },
@@ -1306,7 +1413,7 @@
               "minLength": 1
             },
             {
-              "pattern": "^(?!.*--r[1-9][0-9]*$)[a-z0-9][a-z0-9-]*$"
+              "pattern": "^[a-z0-9][a-z0-9-]*$"
             }
           ]
         },
@@ -1725,6 +1832,9 @@
                               "approval"
                             ]
                           },
+                          "when": {
+                            "$ref": "#/$defs/Objects_3"
+                          },
                           "type": {
                             "type": "string",
                             "enum": [
@@ -1753,10 +1863,10 @@
                             "type": "string"
                           },
                           "session": {
-                            "$ref": "#/$defs/Objects_3"
+                            "$ref": "#/$defs/Objects_4"
                           },
                           "output": {
-                            "$ref": "#/$defs/Objects_4"
+                            "$ref": "#/$defs/Objects_5"
                           },
                           "provider": {
                             "type": "string",
@@ -1798,7 +1908,7 @@
                                 "$ref": "#/$defs/Arrays_5"
                               },
                               "env": {
-                                "$ref": "#/$defs/Objects_5"
+                                "$ref": "#/$defs/Objects_6"
                               }
                             },
                             "required": [
@@ -1890,6 +2000,9 @@
                               "approval"
                             ]
                           },
+                          "when": {
+                            "$ref": "#/$defs/Objects_3"
+                          },
                           "type": {
                             "type": "string",
                             "enum": [
@@ -1918,10 +2031,10 @@
                             "type": "string"
                           },
                           "session": {
-                            "$ref": "#/$defs/Objects_3"
+                            "$ref": "#/$defs/Objects_4"
                           },
                           "output": {
-                            "$ref": "#/$defs/Objects_4"
+                            "$ref": "#/$defs/Objects_5"
                           },
                           "provider": {
                             "type": "string",
@@ -1967,7 +2080,7 @@
                                 "$ref": "#/$defs/Arrays_5"
                               },
                               "env": {
-                                "$ref": "#/$defs/Objects_5"
+                                "$ref": "#/$defs/Objects_6"
                               }
                             },
                             "required": [
@@ -2058,6 +2171,9 @@
                               "none",
                               "approval"
                             ]
+                          },
+                          "when": {
+                            "$ref": "#/$defs/Objects_3"
                           },
                           "type": {
                             "type": "string",
@@ -3067,6 +3183,44 @@
     "Objects_3": {
       "type": "object",
       "properties": {
+        "type": {
+          "type": "string",
+          "enum": [
+            "agent-output"
+          ]
+        },
+        "node": {
+          "type": "string",
+          "allOf": [
+            {
+              "minLength": 1
+            },
+            {
+              "pattern": "^(?!.*--r[1-9][0-9]*$)[a-z0-9][a-z0-9-]*$"
+            }
+          ]
+        },
+        "pointer": {
+          "type": "string",
+          "allOf": [
+            {
+              "pattern": "^(?:\\/(?:[^~/]|~[01])*)*$"
+            }
+          ]
+        },
+        "equals": {}
+      },
+      "required": [
+        "type",
+        "node",
+        "pointer",
+        "equals"
+      ],
+      "additionalProperties": false
+    },
+    "Objects_4": {
+      "type": "object",
+      "properties": {
         "mode": {
           "type": "string",
           "enum": [
@@ -3113,7 +3267,7 @@
       ],
       "additionalProperties": false
     },
-    "Objects_4": {
+    "Objects_5": {
       "type": "object",
       "properties": {
         "format": {
@@ -3154,7 +3308,7 @@
         ]
       }
     },
-    "Objects_5": {
+    "Objects_6": {
       "type": "object",
       "patternProperties": {
         "^[A-Za-z_][A-Za-z0-9_]*$": {

@@ -17,6 +17,7 @@ export type NodeStatus =
   | "running"
   | "awaiting-approval"
   | "completed"
+  | "skipped"
   | "failed"
   | "cancelled"
   | "paused"
@@ -118,6 +119,7 @@ export interface CommonNode {
   readonly inputs: readonly InputSpec[]
   readonly retry: RetrySpec
   readonly gate: "none" | "approval"
+  readonly when?: AgentOutputCondition
 }
 
 interface AgentFields extends CommonNode {
@@ -243,6 +245,13 @@ export interface AttemptState {
   readonly outputPath: string
 }
 
+export interface NodeSkipState {
+  readonly reason: "condition-false" | "source-skipped"
+  readonly conditionNode: string
+  readonly pointer: string
+  readonly skippedAt: string
+}
+
 export interface NodeRunState {
   readonly id: string
   readonly templateId: string
@@ -258,6 +267,7 @@ export interface NodeRunState {
   readonly resultPath: string | null
   readonly result: unknown
   readonly error: string | null
+  readonly skip?: NodeSkipState
 }
 
 export interface SessionState {
@@ -307,10 +317,12 @@ export interface PendingRevision {
 }
 
 export interface PauseState {
-  readonly kind: "human" | "fuse" | "max-rounds"
+  readonly kind: "human" | "fuse" | "max-rounds" | "condition"
   readonly message: string
   readonly repeatId: string | null
   readonly createdAt: string
+  readonly conditionNodeId?: string
+  readonly condition?: AgentOutputCondition
 }
 
 export interface RunOrigin {
@@ -321,7 +333,10 @@ export interface RunOrigin {
   readonly sessionId: string
 }
 
-export type RunState = Schema.Schema.Type<typeof RunStateSchema>
+type DecodedRunState = Schema.Schema.Type<typeof RunStateSchema>
+export type RunState = Omit<DecodedRunState, "nodes"> & {
+  readonly nodes: Readonly<Record<string, NodeRunState>>
+}
 
 export type StatePatchOperation =
   | { readonly op: "add" | "replace"; readonly path: string; readonly value: unknown }

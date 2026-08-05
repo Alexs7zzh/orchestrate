@@ -167,6 +167,56 @@ describe("state and event contract", () => {
     )
   })
 
+  test("accepts scheduler-owned skipped events for instantiated repeat nodes", () => {
+    const current = state()
+    const validateEvent = new Ajv2020({ allErrors: true, strict: false }).compile(eventSchema)
+    expect(
+      validateEvent({
+        ...event(current, null, "node.skipped"),
+        nodeId: "review--r2",
+        data: {
+          conditionNode: "verdict--r2",
+          pointer: "/done",
+          reason: "condition-false"
+        }
+      })
+    ).toBe(true)
+  })
+
+  test("requires skip metadata exactly for skipped authoritative node state", () => {
+    const validateState = new Ajv2020({ allErrors: true, strict: false }).compile(stateSchema)
+    const skippedNode = {
+      id: "optional",
+      templateId: "optional",
+      title: "Optional",
+      type: "command",
+      provider: null,
+      needs: ["decision"],
+      origin: "initial",
+      repeatId: null,
+      round: null,
+      status: "skipped",
+      attempts: [],
+      resultPath: null,
+      result: null,
+      error: null,
+      skip: {
+        reason: "condition-false",
+        conditionNode: "decision",
+        pointer: "/run",
+        skippedAt: "2026-08-02T12:01:00.000Z"
+      }
+    }
+    expect(validateState(state({ nodes: { optional: skippedNode } } as never))).toBe(true)
+    const { skip: _skip, ...missingMetadata } = skippedNode
+    expect(validateState(state({ nodes: { optional: missingMetadata } } as never))).toBe(false)
+    expect(
+      validateState(
+        state({ nodes: { optional: { ...skippedNode, status: "completed" } } } as never)
+      )
+    ).toBe(false)
+  })
+
   test("omits the removed compound vocabulary from source, tests, schemas, and documents", async () => {
     const compound = ["completed", "held"].join("-")
     const roots = ["scripts/src", "scripts/test", "references", "agents", "herdr-plugin"] as const

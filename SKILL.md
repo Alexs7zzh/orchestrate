@@ -38,13 +38,19 @@ Use Orchestrate only when the task is materially clearer or safer as an explicit
 - Keep the graph static. If downstream work is unknowable, add a planner that emits
   schema-validated JSON and put an approval gate on the executor that consumes it.
 - Use `session.saveAs` and `session.from` only for intentional provider lineage. A fork preserves
-  the source and creates a new session; resume continues the source.
+  the source and creates a new session; resume continues the source. A repeat may resume an
+  unconditional alias seeded outside the repeat when every consumer of that alias is dependency-
+  ordered. Orchestrate executes those repeated resumes as copy-on-write forks and promotes the
+  alias only after schema-valid success, so failed retries cannot poison later rounds.
 - Use `shared` only for safe shared access, `existing` for an explicit directory, and
   `git-worktree` for isolated Git writes. Set `removeOnClean` deliberately.
 - Declare the narrowest honest `workspace.writes` and all exclusive external resources. Never use
   `allow-with-approval` as a substitute for understanding overlapping writes.
 - Use structured JSON results for machine decisions. Agent nodes write the declared result file
   and invoke the exact completion command embedded in their prompt.
+- Use node `when` for an approved branch over a direct schema-validated JSON dependency. A false
+  value becomes scheduler-owned `skipped`; a missing pointer pauses as a contract error and resume
+  requires an approved condition change. Never ask an agent to assert scheduler state in free text.
 - Set execution and escalation separately. Use `escalation: "deny"` for unattended nodes so an
   out-of-policy action fails instead of opening a human approval dialog. Use `ask-user` only when
   the approved workflow intentionally requires live human approvals.
@@ -61,7 +67,10 @@ Use Orchestrate only when the task is materially clearer or safer as an explicit
   unroll rounds into copied nodes; declared repeats keep execution and presentation semantics
   aligned. The board also folds exact connected copies from legacy workflows into one active-round
   body with a loop-back footer, but that display compatibility does not add runtime repeat semantics.
-  Round extensions and acceptance are explicit human decisions.
+  A repeat-member `when` binds to the source in the same round and is reevaluated in every round;
+  the verdict member must remain unconditional. Use `{{round}}` in a repeat agent prompt when its
+  terse directive must name the instantiated round. Round extensions and acceptance are explicit
+  human decisions.
 - Holds control dependency release. Pausing prevents new panes but lets running panes finish.
   Stopping closes live panes and settles the run.
 - A human pause or stop does not prompt the launching agent. Completion, exhausted failure, gates,

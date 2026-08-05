@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test"
-import { readFile } from "node:fs/promises"
+import { mkdir, mkdtemp, readFile, rm, symlink } from "node:fs/promises"
+import os from "node:os"
 import path from "node:path"
 
 import type { AgentNode, CommandNode, WorkflowSpec } from "../src/types.js"
@@ -408,6 +409,37 @@ describe("workflow contract", () => {
     }
   })
 
+  test("rejects a non-canonical mutating write prefix before launch", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "orchestrate-write-prefix-"))
+    try {
+      const canonical = path.join(root, "canonical")
+      const linked = path.join(root, "linked")
+      await mkdir(canonical)
+      await symlink(canonical, linked)
+      const writer = agent("writer", {
+        workspace: {
+          mode: "existing",
+          path: canonical,
+          vcs: "none",
+          writes: [path.join(linked, "subject.txt")],
+          exclusiveResources: []
+        },
+        permissions: {
+          execution: { sandbox: "workspace-write" },
+          escalation: "deny",
+          extraArgs: [],
+          inheritEnv: [],
+          env: {}
+        }
+      })
+      expect(validateWorkflow(workflow([writer])).issues.map((issue) => issue.code)).toContain(
+        "workspace-write-symlink"
+      )
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
   test("rejects empty aliases and unordered mutable session fanout", () => {
     const emptyAlias = structuredClone(workflow([agent("empty")])) as unknown as {
       nodes: Array<{ session: { saveAs: string } }>
@@ -502,7 +534,7 @@ describe("workflow contract", () => {
     expect(validateWorkflow(spec).issues).toEqual([])
   })
 
-  test("rejects cross-loop previous inputs and non-fresh loop sessions", () => {
+  test("rejects cross-loop previous inputs and unknown repeat session sources", () => {
     const first = agent("first", {
       session: { mode: "resume", from: "outside-session", saveAs: null },
       inputs: [{ from: "other", as: "Other", include: "content", round: "previous" }]
@@ -526,8 +558,160 @@ describe("workflow contract", () => {
       ]
     }
     const codes = validateWorkflow(spec).issues.map((issue) => issue.code)
-    expect(codes).toContain("repeat-session")
+    expect(codes).toContain("session-source")
     expect(codes).toContain("input-round")
+  })
+
+  test("accepts linear persistent sessions in repeats and rejects ambiguous lineage shapes", () => {
+    const seed = agent("seed", {
+      session: { mode: "fresh", from: null, saveAs: "reviewer" }
+    })
+    const review = agent("review", {
+      needs: ["seed"],
+      prompt: "REVIEW s1 r{{round}}.",
+      session: { mode: "resume", from: "reviewer", saveAs: null }
+    })
+    const verdict = agent("verdict", {
+      needs: ["review"],
+      session: { mode: "resume", from: "reviewer", saveAs: null },
+      output: {
+        format: "json",
+        schema: {
+          type: "object",
+          required: ["done"],
+          properties: { done: { type: "boolean" } }
+        }
+      }
+    })
+    const persistent = {
+      ...workflow([seed, review, verdict]),
+      repeats: [
+        {
+          id: "review-loop",
+          members: ["review", "verdict"],
+          until: { type: "agent-output" as const, node: "verdict", pointer: "/done", equals: true },
+          maxRounds: 2
+        }
+      ]
+    }
+    expect(
+      validateWorkflow(persistent).issues.filter((issue) => issue.severity === "error")
+    ).toEqual([])
+
+    const retrying = {
+      ...persistent,
+      nodes: persistent.nodes.map((node) =>
+        node.id === "review" ? { ...node, retry: { maxAttempts: 2 } } : node
+      )
+    }
+    expect(validateWorkflow(retrying).issues.filter((issue) => issue.severity === "error")).toEqual(
+      []
+    )
+
+    const forked = {
+      ...persistent,
+      nodes: persistent.nodes.map((node) =>
+        node.id === "review"
+          ? {
+              ...node,
+              session: { mode: "fork" as const, from: "reviewer", saveAs: "forked-reviewer" }
+            }
+          : node
+      )
+    }
+    expect(validateWorkflow(forked).issues.map((issue) => issue.code)).toContain("repeat-session")
+
+    const renamed = {
+      ...persistent,
+      nodes: persistent.nodes.map((node) =>
+        node.id === "review"
+          ? Object.assign({}, node, {
+              session: { mode: "resume" as const, from: "reviewer", saveAs: "next" }
+            })
+          : node
+      )
+    }
+    expect(validateWorkflow(renamed).issues.map((issue) => issue.code)).toContain("repeat-session")
+
+    const outsidePlaceholder = agent("outside-placeholder", {
+      prompt: "REVIEW s1 r{{round}}."
+    })
+    expect(
+      validateWorkflow(workflow([outsidePlaceholder])).issues.map((issue) => issue.code)
+    ).toContain("prompt-round")
+  })
+
+  test("validates conditional nodes, repeat verdicts, and skipped path inputs", () => {
+    const decision = agent("decision", {
+      output: {
+        format: "json",
+        schema: {
+          type: "object",
+          required: ["run"],
+          properties: { run: { type: "boolean" } }
+        }
+      }
+    })
+    const optional = agent("optional", {
+      needs: ["decision"],
+      when: { type: "agent-output", node: "decision", pointer: "/run", equals: true }
+    })
+    expect(
+      validateWorkflow(workflow([decision, optional])).issues.filter(
+        (issue) => issue.severity === "error"
+      )
+    ).toEqual([])
+
+    const untypedDecision = agent("untyped-decision", {
+      output: { format: "json", schema: null }
+    })
+    const untypedOptional = agent("untyped-optional", {
+      needs: ["untyped-decision"],
+      when: {
+        type: "agent-output",
+        node: "untyped-decision",
+        pointer: "/run",
+        equals: true
+      }
+    })
+    expect(
+      validateWorkflow(workflow([untypedDecision, untypedOptional])).issues.map(
+        (issue) => issue.code
+      )
+    ).toContain("condition-source")
+
+    const indirect = agent("indirect", {
+      needs: ["optional"],
+      when: { type: "agent-output", node: "decision", pointer: "/run", equals: true }
+    })
+    expect(
+      validateWorkflow(workflow([decision, optional, indirect])).issues.map((issue) => issue.code)
+    ).toContain("condition-order")
+
+    const pathConsumer = agent("path-consumer", {
+      needs: ["optional"],
+      inputs: [{ from: "optional", as: "Optional path", include: "path", round: "current" }]
+    })
+    expect(
+      validateWorkflow(workflow([decision, optional, pathConsumer])).issues.map(
+        (issue) => issue.code
+      )
+    ).toContain("conditional-input-path")
+
+    const conditionalVerdict = {
+      ...workflow([decision, optional]),
+      repeats: [
+        {
+          id: "conditional-loop",
+          members: ["decision", "optional"],
+          until: { type: "agent-output" as const, node: "optional", pointer: "", equals: true },
+          maxRounds: 2
+        }
+      ]
+    }
+    expect(validateWorkflow(conditionalVerdict).issues.map((issue) => issue.code)).toContain(
+      "condition-verdict"
+    )
   })
 
   test("accepts composed verdict schemas and rejects an invalid JSON pointer", () => {

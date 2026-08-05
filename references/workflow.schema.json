@@ -239,6 +239,9 @@
                   "approval"
                 ]
               },
+              "when": {
+                "$ref": "#/$defs/Objects_1"
+              },
               "type": {
                 "type": "string",
                 "enum": [
@@ -267,10 +270,10 @@
                 "type": "string"
               },
               "session": {
-                "$ref": "#/$defs/Objects_1"
+                "$ref": "#/$defs/Objects_2"
               },
               "output": {
-                "$ref": "#/$defs/Objects_2"
+                "$ref": "#/$defs/Objects_3"
               },
               "provider": {
                 "type": "string",
@@ -312,7 +315,7 @@
                     "$ref": "#/$defs/Arrays_4"
                   },
                   "env": {
-                    "$ref": "#/$defs/Objects_3"
+                    "$ref": "#/$defs/Objects_4"
                   }
                 },
                 "required": [
@@ -404,6 +407,9 @@
                   "approval"
                 ]
               },
+              "when": {
+                "$ref": "#/$defs/Objects_1"
+              },
               "type": {
                 "type": "string",
                 "enum": [
@@ -432,10 +438,10 @@
                 "type": "string"
               },
               "session": {
-                "$ref": "#/$defs/Objects_1"
+                "$ref": "#/$defs/Objects_2"
               },
               "output": {
-                "$ref": "#/$defs/Objects_2"
+                "$ref": "#/$defs/Objects_3"
               },
               "provider": {
                 "type": "string",
@@ -481,7 +487,7 @@
                     "$ref": "#/$defs/Arrays_4"
                   },
                   "env": {
-                    "$ref": "#/$defs/Objects_3"
+                    "$ref": "#/$defs/Objects_4"
                   }
                 },
                 "required": [
@@ -572,6 +578,9 @@
                   "none",
                   "approval"
                 ]
+              },
+              "when": {
+                "$ref": "#/$defs/Objects_1"
               },
               "type": {
                 "type": "string",
@@ -1041,6 +1050,44 @@
     "Objects_1": {
       "type": "object",
       "properties": {
+        "type": {
+          "type": "string",
+          "enum": [
+            "agent-output"
+          ]
+        },
+        "node": {
+          "type": "string",
+          "allOf": [
+            {
+              "minLength": 1
+            },
+            {
+              "pattern": "^(?!.*--r[1-9][0-9]*$)[a-z0-9][a-z0-9-]*$"
+            }
+          ]
+        },
+        "pointer": {
+          "type": "string",
+          "allOf": [
+            {
+              "pattern": "^(?:\\/(?:[^~/]|~[01])*)*$"
+            }
+          ]
+        },
+        "equals": {}
+      },
+      "required": [
+        "type",
+        "node",
+        "pointer",
+        "equals"
+      ],
+      "additionalProperties": false
+    },
+    "Objects_2": {
+      "type": "object",
+      "properties": {
         "mode": {
           "type": "string",
           "enum": [
@@ -1087,7 +1134,7 @@
       ],
       "additionalProperties": false
     },
-    "Objects_2": {
+    "Objects_3": {
       "type": "object",
       "properties": {
         "format": {
@@ -1128,7 +1175,7 @@
         ]
       }
     },
-    "Objects_3": {
+    "Objects_4": {
       "type": "object",
       "patternProperties": {
         "^[A-Za-z_][A-Za-z0-9_]*$": {

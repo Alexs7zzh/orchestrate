@@ -13,6 +13,7 @@ import type {
   PaneReference,
   RunOrigin,
   RunState,
+  SessionSpec,
   SpawnIntent,
   UiPreferences,
   WorkflowNode,
@@ -472,6 +473,23 @@ function sourceSession(node: AgentNode, state: RunState): string | null {
   return source.sessionId
 }
 
+function sessionLaunchMode(
+  node: AgentNode,
+  state: RunState,
+  intent: SpawnIntent
+): SessionSpec["mode"] {
+  const runtimeNode = state.nodes[intent.nodeId]
+  return runtimeNode !== undefined &&
+    runtimeNode.repeatId !== null &&
+    node.session.mode === "resume"
+    ? "fork"
+    : node.session.mode
+}
+
+function capturesProviderSession(node: AgentNode, state: RunState, intent: SpawnIntent): boolean {
+  return node.session.saveAs !== null || sessionLaunchMode(node, state, intent) === "fork"
+}
+
 function codexControlProfile(paneId: string): string {
   const suffix = createHash("sha256").update(paneId).digest("hex").slice(0, 24)
   return `orchestrate-control-${suffix}`
@@ -544,7 +562,8 @@ function claudeNodeDoneRule(
 function codexArguments(
   node: Extract<AgentNode, { readonly provider: "codex" }>,
   source: string | null,
-  profile: string
+  profile: string,
+  sessionMode: SessionSpec["mode"]
 ) {
   const approval = node.permissions.escalation === "deny" ? "never" : "on-request"
   const args: string[] = ["--ask-for-approval", approval, "--profile", profile]
@@ -558,10 +577,10 @@ function codexArguments(
     args.push("--config", `model_reasoning_effort=${JSON.stringify(node.effort)}`)
   }
   args.push(...node.permissions.extraArgs)
-  if (node.session.mode === "resume") {
+  if (sessionMode === "resume") {
     args.push("resume", source as string)
   }
-  if (node.session.mode === "fork") {
+  if (sessionMode === "fork") {
     args.push("fork", source as string)
   }
   return args
@@ -625,7 +644,8 @@ function claudeArguments(
   node: Extract<AgentNode, { readonly provider: "claude" }>,
   source: string | null,
   settingsPath: string,
-  sessionId: string | null
+  sessionId: string | null,
+  sessionMode: SessionSpec["mode"]
 ) {
   const args: string[] = [
     "--safe-mode",
@@ -639,7 +659,7 @@ function claudeArguments(
   // --safe-mode disables user hooks, including the herdr hook that reports
   // Claude session ids, so a saveAs lineage must be launcher-chosen: fresh
   // and forked sessions get an explicit id, and resume keeps the source id.
-  if (sessionId !== null && node.session.mode !== "resume") {
+  if (sessionId !== null && sessionMode !== "resume") {
     args.push("--session-id", sessionId)
   }
   if (node.model !== "provider-default") {
@@ -651,7 +671,7 @@ function claudeArguments(
   if (source !== null) {
     args.push("--resume", source)
   }
-  if (node.session.mode === "fork") {
+  if (sessionMode === "fork") {
     args.push("--fork-session")
   }
   return args
@@ -668,6 +688,8 @@ async function prepareProviderLaunch(
   readonly providerSessionId: string | null
 }> {
   const source = sourceSession(node, state)
+  const sessionMode = sessionLaunchMode(node, state, intent)
+  const captureSession = capturesProviderSession(node, state, intent)
   const transportDirectory = path.dirname(attemptFor(state, intent).resultPath)
   if (node.provider === "claude") {
     const settingsPath = path.join(transportDirectory, "claude-settings.json")
@@ -678,14 +700,13 @@ async function prepareProviderLaunch(
       settingsPath,
       claudeSettingsDocument(node, state, intent, transportDirectory, sourceRoot, lineageDirectory)
     )
-    const sessionId =
-      node.session.saveAs === null
-        ? null
-        : node.session.mode === "resume"
-          ? (source as string)
-          : randomUUID()
+    const sessionId = !captureSession
+      ? null
+      : sessionMode === "resume"
+        ? (source as string)
+        : randomUUID()
     return {
-      args: claudeArguments(node, source, settingsPath, sessionId),
+      args: claudeArguments(node, source, settingsPath, sessionId, sessionMode),
       providerSessionId: sessionId
     }
   }
@@ -695,7 +716,10 @@ async function prepareProviderLaunch(
     profilePath,
     codexControlProfileDocument(profile, transportDirectory, providerWriteRoots(node, sourceRoot))
   )
-  return { args: codexArguments(node, source, profile), providerSessionId: null }
+  return {
+    args: codexArguments(node, source, profile, sessionMode),
+    providerSessionId: null
+  }
 }
 
 const AGENT_INTERACTIVE_READY_TIMEOUT_MS = 60_000
@@ -757,12 +781,14 @@ async function promptVisible(paneId: string, marker: string): Promise<boolean> {
   }
 }
 
-// --wait --until working confirms herdr observed the agent take the prompt,
-// but that observation can be a boot flicker, and herdr's internal stall
-// detector fires after 5s of no state change regardless of the requested
-// timeout. Delivery therefore counts only when the prompt's own text appears
-// in the pane transcript; a stalled or invisible delivery was never accepted,
-// so re-prompting within the accept budget is safe.
+// --wait confirms herdr observed the agent take the prompt. Terse directives
+// can finish before the launcher samples `working`, so terminal `done` and
+// `blocked` states are also acceptance evidence. The state transition alone
+// can still be a boot flicker, and herdr's internal stall detector fires after
+// 5s of no state change regardless of the requested timeout. Delivery
+// therefore counts only when the prompt's own text also appears in the pane
+// transcript; a stalled or invisible delivery was never accepted, so
+// re-prompting within the accept budget is safe.
 async function promptUntilWorking(paneId: string, prompt: string): Promise<void> {
   const deadline = Date.now() + AGENT_PROMPT_ACCEPT_TIMEOUT_MS
   const marker = normalizeForScreenMatch(prompt).slice(0, 40)
@@ -777,6 +803,10 @@ async function promptUntilWorking(paneId: string, prompt: string): Promise<void>
         "--wait",
         "--until",
         "working",
+        "--until",
+        "done",
+        "--until",
+        "blocked",
         "--timeout",
         String(remaining)
       ])
@@ -816,6 +846,16 @@ function providerSession(value: unknown, provider: AgentNode["provider"]): strin
   const details = Option.getOrNull(decodeHerdrAgentInfoResponse(value))
   const session = details?.result.agent.agent_session
   return session?.agent === provider && session.kind === "id" ? session.value : null
+}
+
+function runScopedAgentName(runId: string, nodeId: string): string {
+  const scope = createHash("sha256")
+    .update(runId)
+    .update("\0")
+    .update(nodeId)
+    .digest("hex")
+    .slice(0, 16)
+  return `o-${nodeId.slice(0, 12)}-${scope}`
 }
 
 let agentSessionTimeoutForTests: number | null = null
@@ -1308,7 +1348,7 @@ export class HerdrSurface {
       await startAgentWhenShellReady([
         "agent",
         "start",
-        intent.nodeId,
+        runScopedAgentName(state.id, intent.nodeId),
         "--kind",
         node.provider,
         "--pane",
@@ -1346,11 +1386,10 @@ export class HerdrSurface {
       promptMayHaveBeenAccepted = true
       await promptUntilWorking(pane.paneId, prompt)
       promptDeliveryConfirmed = true
-      const sessionId =
-        node.session.saveAs === null
-          ? null
-          : (launchSessionId ??
-            (await waitForProviderSession(pane.paneId, node.provider, intent.nodeId)))
+      const sessionId = !capturesProviderSession(node, state, intent)
+        ? null
+        : (launchSessionId ??
+          (await waitForProviderSession(pane.paneId, node.provider, intent.nodeId)))
       const promptHook = afterAgentPromptForTests
       afterAgentPromptForTests = null
       await promptHook?.()
@@ -1419,15 +1458,14 @@ export class HerdrSurface {
           // A launcher-chosen id recorded in the receipt was fixed before the
           // prompt, so a token-valid submission from that pane necessarily
           // ran under it; only Codex still observes the id from herdr.
-          const sessionId =
-            node.session.saveAs === null
-              ? null
-              : (recorded.providerSessionId ??
-                (await waitForProviderSession(
-                  recorded.pane.paneId,
-                  node.provider,
-                  request.intent.nodeId
-                )))
+          const sessionId = !capturesProviderSession(node, request.state, request.intent)
+            ? null
+            : (recorded.providerSessionId ??
+              (await waitForProviderSession(
+                recorded.pane.paneId,
+                node.provider,
+                request.intent.nodeId
+              )))
           const observation = {
             pane: recorded.pane,
             providerSessionId: sessionId
@@ -1446,7 +1484,8 @@ export class HerdrSurface {
           // the receipt promotes directly; a capture failure falls through to
           // the attention path below.
           const observation =
-            node.session.saveAs === null || recorded.providerSessionId !== null
+            !capturesProviderSession(node, request.state, request.intent) ||
+            recorded.providerSessionId !== null
               ? { pane: recorded.pane, providerSessionId: recorded.providerSessionId }
               : await waitForProviderSession(
                   recorded.pane.paneId,
@@ -1468,6 +1507,27 @@ export class HerdrSurface {
         throw new HerdrObservationError(
           `Spawn for node "${request.intent.nodeId}" is ${recorded.status}; inspect pane "${recorded.pane.paneId}" and resume explicitly.`,
           new Error(recorded.detail ?? "incomplete spawn")
+        )
+      }
+      const node = templateFor(request.workflow, request.state, request.intent.nodeId)
+      const promptOrCommandMayHaveRun = recorded.status !== "created"
+      if (promptOrCommandMayHaveRun) {
+        const submitted = await hasTokenValidSubmission(request.state, request.intent, attempt)
+        const hasExactSessionAttribution =
+          node.type !== "agent" ||
+          !capturesProviderSession(node, request.state, request.intent) ||
+          recorded.providerSessionId !== null
+        if (submitted && hasExactSessionAttribution) {
+          return {
+            pane: recorded.pane,
+            providerSessionId: recorded.providerSessionId
+          }
+        }
+        await rm(codexProfilePath(codexControlProfile(recorded.pane.paneId)), {
+          force: true
+        }).catch(() => undefined)
+        throw new Error(
+          `Spawn for node "${request.intent.nodeId}" lost pane "${recorded.pane.paneId}" after launch; failing this attempt instead of reusing its completion token.`
         )
       }
       await rm(codexProfilePath(codexControlProfile(recorded.pane.paneId)), { force: true }).catch(

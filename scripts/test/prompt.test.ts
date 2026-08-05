@@ -2,7 +2,12 @@ import { afterEach, describe, expect, test } from "bun:test"
 
 import type { AgentNode, NodeRunState, RunState, WorkflowSpec } from "../src/types.js"
 
-import { prepareNode, renderAgentPrompt, renderInputs } from "../src/prompt.js"
+import {
+  prepareNode,
+  renderAgentDirective,
+  renderAgentPrompt,
+  renderInputs
+} from "../src/prompt.js"
 
 function workspace() {
   return {
@@ -155,6 +160,37 @@ describe("prompt rendering", () => {
     expect(renderInputs(spec, current, "summarize", spec.nodes[2]!.inputs)).toContain("clean")
   })
 
+  test("renders a skipped content input explicitly and rejects a skipped path", () => {
+    const spec = workflow()
+    const base = state()
+    const current: RunState = {
+      ...base,
+      nodes: {
+        ...base.nodes,
+        "review--r2": {
+          ...base.nodes["review--r2"]!,
+          status: "skipped",
+          resultPath: null,
+          result: null,
+          skip: {
+            reason: "condition-false",
+            conditionNode: "decision--r2",
+            pointer: "/continue",
+            skippedAt: "2026-08-02T12:01:00.000Z"
+          }
+        }
+      }
+    }
+    expect(renderInputs(spec, current, "summarize", spec.nodes[2]!.inputs)).toContain(
+      "## Final review\n\n[skipped]"
+    )
+    expect(() =>
+      renderInputs(spec, current, "summarize", [
+        { from: "review", as: "Final review path", include: "path", round: "current" }
+      ])
+    ).toThrow("requests a path from a skipped node")
+  })
+
   test("keeps gate content separate from the operational completion contract", () => {
     process.env.ORCHESTRATE_BIN = "/opt/orchestrate"
     const spec = workflow()
@@ -170,5 +206,11 @@ describe("prompt rendering", () => {
     expect(prompt).toContain(prepared.resultPath)
     expect(prompt).toContain("'--hold'")
     expect(prompt).not.toContain("To stop dependents after you finish")
+  })
+
+  test("renders the approved round placeholder for a repeat directive", () => {
+    const current = state()
+    const review = agent("review", { prompt: "REVIEW toy r{{round}}." })
+    expect(renderAgentDirective(current, "review--r2", review)).toBe("REVIEW toy r2.")
   })
 })

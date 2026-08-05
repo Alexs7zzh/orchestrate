@@ -248,6 +248,28 @@ export function providerAuthorityOverlaps(
   })
 }
 
+export function providerNonCanonicalWritePrefixes(
+  workflow: WorkflowSpec,
+  node: WorkflowNode
+): readonly string[] {
+  if (!isMutatingProviderNode(node)) {
+    return []
+  }
+  if (node.workspace.mode === "git-worktree" && node.workspace.path === null) {
+    return []
+  }
+  const effectiveRoot = resolveThroughExistingAncestor(
+    node.workspace.path ?? node.cwd ?? workflow.cwd
+  )
+  return node.workspace.writes.flatMap((pattern) => {
+    const unresolved = path.resolve(effectiveRoot, normalizedStaticPrefix(pattern))
+    const resolved = resolveThroughExistingAncestor(unresolved)
+    return resolved === unresolved
+      ? []
+      : [`declared write ${JSON.stringify(pattern)} resolves through a symlink to ${resolved}`]
+  })
+}
+
 export function assertProviderAuthorityIsolation(
   workflow: WorkflowSpec,
   node: WorkflowNode,
@@ -470,6 +492,16 @@ function validateNode(workflow: WorkflowSpec, node: WorkflowNode, issues: Valida
       [node.id]
     )
   }
+  const nonCanonicalWrites = providerNonCanonicalWritePrefixes(workflow, node)
+  if (nonCanonicalWrites.length > 0) {
+    addIssue(
+      issues,
+      "error",
+      "workspace-write-symlink",
+      `Mutating provider node "${node.id}" has a non-canonical write prefix: ${nonCanonicalWrites.join("; ")}. Use the canonical target.`,
+      [node.id]
+    )
+  }
   if (
     canMutate &&
     node.workspace.vcs === "plastic" &&
@@ -671,14 +703,6 @@ function validateRepeats(
           `Repeat member "${member}" explicit Git worktree path must include {{nodeId}} so every runtime round has a unique directory.`
         )
       }
-      if (node.type === "agent" && node.session.mode !== "fresh") {
-        addIssue(
-          issues,
-          "error",
-          "repeat-session",
-          `Repeat member "${member}" must start a fresh session each round.`
-        )
-      }
     }
     if (!repeat.members.includes(repeat.until.node)) {
       addIssue(
@@ -699,7 +723,11 @@ function validateRepeats(
       )
     }
     if (repeat.until.type === "agent-output") {
-      if (untilNode?.type !== "agent" || untilNode.output.format !== "json") {
+      if (
+        untilNode?.type !== "agent" ||
+        untilNode.output.format !== "json" ||
+        untilNode.output.schema === null
+      ) {
         addIssue(
           issues,
           "error",
@@ -759,10 +787,94 @@ function validateRepeats(
   return memberToRepeat
 }
 
+function validateConditions(
+  workflow: WorkflowSpec,
+  issues: ValidationIssue[],
+  byId: ReadonlyMap<string, WorkflowNode>,
+  memberToRepeat: ReadonlyMap<string, string>
+): void {
+  const verdictNodes = new Set(workflow.repeats.map((repeat) => repeat.until.node))
+  for (const node of workflow.nodes) {
+    if (
+      node.type === "agent" &&
+      node.prompt.includes("{{round}}") &&
+      memberToRepeat.get(node.id) === undefined
+    ) {
+      addIssue(
+        issues,
+        "error",
+        "prompt-round",
+        `Node "${node.id}" uses {{round}} but is not a repeat member.`
+      )
+    }
+    const condition = node.when
+    if (condition !== undefined) {
+      const source = byId.get(condition.node)
+      if (!node.needs.includes(condition.node)) {
+        addIssue(
+          issues,
+          "error",
+          "condition-order",
+          `Node "${node.id}" when condition must name a direct dependency.`
+        )
+      }
+      if (
+        source?.type !== "agent" ||
+        source.output.format !== "json" ||
+        source.output.schema === null
+      ) {
+        addIssue(
+          issues,
+          "error",
+          "condition-source",
+          `Node "${node.id}" when condition must name a schema-validated JSON agent node.`
+        )
+      }
+      if (verdictNodes.has(node.id)) {
+        addIssue(
+          issues,
+          "error",
+          "condition-verdict",
+          `Repeat verdict node "${node.id}" cannot be conditional.`
+        )
+      }
+      if (node.type === "agent" && node.session.saveAs !== null) {
+        addIssue(
+          issues,
+          "error",
+          "condition-session",
+          `Conditional node "${node.id}" cannot produce session alias "${node.session.saveAs}".`
+        )
+      }
+      const nodeRepeat = memberToRepeat.get(node.id)
+      const sourceRepeat = memberToRepeat.get(condition.node)
+      if (nodeRepeat !== undefined && sourceRepeat !== undefined && nodeRepeat !== sourceRepeat) {
+        addIssue(
+          issues,
+          "error",
+          "condition-repeat",
+          `Repeat member "${node.id}" cannot be conditioned by member "${condition.node}" from another repeat.`
+        )
+      }
+    }
+    for (const input of node.inputs) {
+      if (input.include === "path" && byId.get(input.from)?.when !== undefined) {
+        addIssue(
+          issues,
+          "error",
+          "conditional-input-path",
+          `Node "${node.id}" cannot request a path input from conditional node "${input.from}".`
+        )
+      }
+    }
+  }
+}
+
 function validateSessions(
   workflow: WorkflowSpec,
   issues: ValidationIssue[],
-  ancestors: ReadonlyMap<string, ReadonlySet<string>>
+  ancestors: ReadonlyMap<string, ReadonlySet<string>>,
+  memberToRepeat: ReadonlyMap<string, string>
 ): void {
   const aliases = new Map<string, AgentNode>()
   for (const node of workflow.nodes) {
@@ -779,6 +891,48 @@ function validateSessions(
       )
     } else {
       aliases.set(node.session.saveAs, node)
+    }
+  }
+  for (const node of workflow.nodes) {
+    if (
+      node.type !== "agent" ||
+      memberToRepeat.get(node.id) === undefined ||
+      node.session.mode === "fresh"
+    ) {
+      continue
+    }
+    const source = node.session.from === null ? undefined : aliases.get(node.session.from)
+    if (node.session.mode !== "resume") {
+      addIssue(
+        issues,
+        "error",
+        "repeat-session",
+        `Persistent repeat member "${node.id}" must resume an existing session; fork is not supported.`
+      )
+    }
+    if (node.session.saveAs !== null) {
+      addIssue(
+        issues,
+        "error",
+        "repeat-session",
+        `Persistent repeat member "${node.id}" cannot create session alias "${node.session.saveAs}".`
+      )
+    }
+    if (source !== undefined && memberToRepeat.get(source.id) !== undefined) {
+      addIssue(
+        issues,
+        "error",
+        "repeat-session-source",
+        `Persistent repeat member "${node.id}" must resume a session seeded outside its repeat.`
+      )
+    }
+    if (source?.when !== undefined) {
+      addIssue(
+        issues,
+        "error",
+        "repeat-session-source",
+        `Persistent repeat member "${node.id}" cannot resume conditionally produced session alias "${node.session.from ?? ""}".`
+      )
     }
   }
   for (const node of workflow.nodes) {
@@ -949,7 +1103,8 @@ export function validateWorkflow(input: unknown): ValidationResult {
   for (const cycle of cycles) {
     addIssue(issues, "error", "cycle", `Dependency cycle: ${cycle.join(" -> ")}.`)
   }
-  validateRepeats(workflow, issues, byId, ancestors)
+  const memberToRepeat = validateRepeats(workflow, issues, byId, ancestors)
+  validateConditions(workflow, issues, byId, memberToRepeat)
   const unrolled = unrolledRoundGroups(workflow)
   if (unrolled.length >= 2) {
     const sample = (unrolled[0] as readonly string[]).slice(0, 2)
@@ -961,7 +1116,7 @@ export function validateWorkflow(input: unknown): ValidationResult {
       unrolled.flat()
     )
   }
-  validateSessions(workflow, issues, ancestors)
+  validateSessions(workflow, issues, ancestors, memberToRepeat)
   const overlaps = overlappingMutableNodes(workflow)
   if (overlaps.length > 0) {
     addIssue(

@@ -23,6 +23,7 @@ export const EVENT_SEVERITIES = {
   "node.spawn-planned": "progress",
   "node.started": "progress",
   "node.completed": "milestone",
+  "node.skipped": "progress",
   "node.failed": "milestone",
   "node.retrying": "milestone",
   "node.cancelled": "milestone",
