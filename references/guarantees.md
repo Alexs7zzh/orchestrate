@@ -38,6 +38,8 @@ time is safe, and correctness never depends on receiving a wake-up.
   authenticated node submissions, dependency readiness, holds, gates, repeats, workroom/seat
   occupancy, and revisions.
 - The master agent owns reconciliation, debugging, and recovery decisions.
+- A human or master owns steering decisions. A steering message is clarification for one exact
+  running attempt; it does not become workflow authority or transfer completion ownership.
 - The owning workflow agent alone owns its declared task writes and exact token-addressed result
   submission. Provider-native delegation is disabled or denied; delegated workers cannot inherit
   or exercise that completion contract. It never writes authoritative run state or schedules
@@ -52,6 +54,11 @@ time is safe, and correctness never depends on receiving a wake-up.
   installed control assets. Claude exposes only Bash; its required native sandbox is therefore the
   only provider filesystem channel, while Agent/Task delegation and built-in filesystem tools are
   absent from the tool surface.
+- Both providers receive the same approved `read-only` or `workspace-write` intent. Focused
+  provider adapters compile that intent into provider-native controls without making those controls
+  authorable workflow fields. A persisted attempt capability binds the access intent as well as its
+  provider and roots, so it cannot be reused after an access change even if the calculated write
+  roots happen to be identical.
 - Claude session projects are isolated per canonical lineage outside node submission transport;
   resume and fork reuse only their source lineage project, and a session-bearing peer receives no
   sibling-lineage or alternate completion-channel grant. Claude cannot read a sibling attempt or
@@ -79,6 +86,10 @@ time is safe, and correctness never depends on receiving a wake-up.
   tokens rather than applying them to another attempt.
 - The trusted Herdr plugin event hook, not the provider sandbox, performs the best-effort,
   session-checked master wake for blocked and done workflow agents.
+- Steering requires a running agent's exact latest attempt, recorded pane, provider, and persisted
+  provider session to agree at inspection and delivery. Its requested and delivered journal records
+  contain a SHA-256 and byte length, never the message or completion token. Steering cannot alter the
+  approved task, access, escalation, graph, dependencies, output schema, or completion ownership.
 - Concurrent `reconcile` invocations are serialized by the run lock. One commits while later
   invocations observe the committed state and either make the next valid transition or return
   cleanly.
@@ -114,18 +125,26 @@ time is safe, and correctness never depends on receiving a wake-up.
 - While a seatful spawn's occupancy is unresolved, reconciliation starts no sibling seat in that
   workroom. It preserves every planned intent and retry budget while unrelated work may proceed.
 - Explicit human pause, stop, hold, gate, revision, and repeat-limit decisions remain explicit.
+- Plain `doctor` is read-only and launches no providers. `doctor --live` is an explicit billed
+  operation bounded to three serial starts and a 180-second terminal deadline; the probe launches
+  only after the read-only checks pass and is otherwise reported as skipped. In ordinary operation
+  with Herdr available, every recorded diagnostic pane is closed and confirmed absent before return;
+  success additionally removes its run and workspace. Failure retains evidence and never claims
+  cleanup when a stop transition or pane-absence check fails.
 
 ## External side effects and crashes
 
-Orchestrate state changes and Herdr actions are not one transaction. Pane creation and provider
-prompting are at-least-once operations, so a crash may produce a duplicate. Master wake-ups,
+Orchestrate state changes and Herdr actions are not one transaction. Pane creation, provider
+prompting, and steering delivery are at-least-once operations, so a crash may produce a duplicate.
+`steering.requested` can exist without known delivery, and delivery can occur before
+`steering.delivered` is durably committed. Master wake-ups,
 callbacks, and desktop notifications are best effort: they may be lost, and a retried foreground
 operation may duplicate them. Nodes and callbacks should be idempotent where practical.
 
 Orchestrate does not guarantee:
 
 - autonomous scheduling while the master is unavailable;
-- exactly-once pane creation, provider execution, prompting, callbacks, or notifications;
+- exactly-once pane creation, provider execution, prompting, steering, callbacks, or notifications;
 - automatic recovery from a Herdr bug, Herdr restart, machine crash, forced process termination,
   filesystem failure, or ambiguous external side effect;
 - automatic fresh-provider fallback or session-alias rebinding when an approved resume is

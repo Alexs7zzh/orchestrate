@@ -260,7 +260,7 @@ function mutatingWorkflow(cwd: string): WorkflowSpec {
     prompt: "Write.",
     session: { mode: "fresh", from: null, saveAs: null },
     permissions: {
-      execution: { sandbox: "workspace-write" },
+      access: "workspace-write",
       escalation: "deny",
       extraArgs: [],
       inheritEnv: [],

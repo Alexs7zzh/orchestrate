@@ -10,6 +10,8 @@ authoring semantics live in [workflow-format.md](workflow-format.md); runtime me
 - [Command shapes](#command-shapes)
 - [Run selection and environment](#run-selection-and-environment)
 - [Live attention and waiting](#live-attention-and-waiting)
+- [Steering a running attempt](#steering-a-running-attempt)
+- [Live provider diagnosis](#live-provider-diagnosis)
 - [Shell completion](#shell-completion) and [durable outcomes](#durable-outcomes)
 - [Master wake-up and submission transport](#master-wake-up-and-submission-transport)
 
@@ -57,6 +59,7 @@ with an explicit noninteractive error.
 | `board`       | `board [<run>] [--json]`                                                                    | Open the TUI or print a plain snapshot.                                                                     |
 | `reconcile`   | `reconcile <run> [--json]`                                                                  | Consume submissions, commit transitions, and start newly ready panes.                                       |
 | `result`      | `result <run> <node> [--attempt <n>] [--json]`                                              | Read durable output.                                                                                        |
+| `steer`       | `steer <run> <node> (--message <text>\|--file <path>) [--json]`                             | Deliver one bounded human clarification to the exact running agent attempt.                                 |
 | `runs`        | `runs [--active\|--paused\|--needs-attention\|--settled] [--json]`                          | List runs with at most one filter.                                                                          |
 | `approve`     | `approve <run> --gate <node> --digest <sha256> [--json]`                                    | Approve exact rendered gate content.                                                                        |
 | `approve`     | `approve <run> --revision <sha256> [--json]`                                                | Apply an exact proposed revision.                                                                           |
@@ -79,7 +82,7 @@ with an explicit noninteractive error.
 | `clean`       | `clean --settled [--dry-run] [--json]`                                                      | Clean every settled run.                                                                                    |
 | `completion`  | `completion <fish\|zsh\|bash> [--json]`                                                     | Emit shell completion.                                                                                      |
 | `setup`       | `setup [--dry-run] [--remove] [--defaults\|--no-wizard] [--json]`                           | Stage assets and link detected integrations.                                                                |
-| `doctor`      | `doctor [--json]`                                                                           | Check Herdr, providers, state access, and installed build.                                                  |
+| `doctor`      | `doctor [--live] [--json]`                                                                  | Run read-only checks; optionally launch an explicit billed provider diagnostic.                             |
 
 ## Run selection and environment
 
@@ -107,10 +110,59 @@ tabs, or panes.
 `status --wait` and `events --follow` install their filesystem watch before each authoritative scan,
 then rescan, so a terminal state or event cannot be lost between a scan and watch registration.
 
+## Steering a running attempt
+
+`steer` accepts exactly one nonempty UTF-8 message from `--message` or `--file`, with an effective
+64 KiB limit. The run, node, latest attempt, pane, provider, and provider-session identity must all
+still describe the same running agent immediately before delivery. Commands, pending work, settled
+attempts, stale panes, and replaced provider sessions are rejected. Delivery is wrapped as a human
+clarification whose every dynamic line is visibly attributed. It cannot expand the approved task,
+access, escalation, graph, dependencies, output schema, or completion ownership.
+
+Under the run lock, `steer` commits `steering.requested` before calling Herdr and
+`steering.delivered` afterward. Both event records carry the node, exact attempt, provider, pane,
+provider-session ID, SHA-256 content digest, and byte length; neither stores the message or an active
+completion token. A delivery failure leaves only the requested record. A failure after external
+delivery but before the delivered journal commit is explicitly ambiguous and is not retried
+automatically. `steer --json` returns `{runId,nodeId,attempt,provider,pane,providerSessionId,
+contentDigest,byteLength,delivered:true}`.
+
+The CLI rejects steering when an owning-node completion contract or node token is present in its
+environment. That check is defense in depth: a subprocess can unset environment variables. The
+actual authority boundary is the provider sandbox, which denies workflow nodes authoritative run
+state and Herdr control while allowing the human/master CLI to perform the state- and
+session-checked operation.
+
+## Live provider diagnosis
+
+Plain `doctor` is read-only and does not start a run, create state directories, launch providers, or
+trigger staged-install migration. It checks Herdr, plugin registration, provider launch identities,
+existing state-root access, and installed-build identity. A missing provider is reported as optional
+for plain doctor and becomes required only when used.
+
+`doctor --live` is a separate, explicit authorization to launch billed Codex and Claude work. The
+probe launches only when the read-only checks pass; in a known-unhealthy install it is skipped, no
+provider work starts, the human output reports the skip, JSON reports `liveSkipped: true` with no
+`live` object, and the command exits `1`. Human
+output prints the provider-usage warning before launch; with `--json`, supplying `--live` itself is
+the authorization and the warning is returned in the `live` object. The diagnostic disables UI,
+uses one temporary no-VCS workspace, concurrency one, read-only provider access, no retries, a
+three-start fuse, and a 180-second terminal deadline. It authenticates an exact Codex result, passes
+that durable result to Claude, then runs `/usr/bin/true` downstream.
+
+Before either success or failure returns, the diagnostic attempts to mark any active diagnostic run
+stopped, closes every recorded pane, and verifies each exact pane is absent. Success then removes the
+run, submissions, provider-session data, and workspace and returns `cleaned: true`. Failure returns
+exit `1`, retains durable run and workspace evidence for inspection, and reports it in
+`live.artifacts`; a failed stop transition or unconfirmed pane shutdown is an explicit failed check
+and can never be reported as cleaned. The JSON extension is
+`{live:{ok,warning,runId,checks,artifacts,cleaned}}`.
+
 ## Shell completion
 
 Fish, Zsh, and Bash completion routing is generated from the command-shape table used by the CLI.
-Every run-taking form is covered, including `clean`, `node-done`, `node-exit`, and `ui restore`;
+Every run-taking form is covered, including `steer`, `clean`, `node-done`, `node-exit`, and
+`ui restore`;
 run candidates and node candidates occupy disjoint positions.
 
 ## Durable outcomes
@@ -119,12 +171,13 @@ Status and board JSON keep outcome and dependency release separate: a successful
 `status: "completed"`, while `downstreamHeld`, `holdTargets`, and the top-level durable `holds`
 collection describe its release barrier. `result --json` reports the same axes with the output.
 Scheduler-derived conditions add `status: "skipped"` and `skip` reason metadata with no attempt or
-result path; human result output prints `[skipped]`. Preview JSON includes each node's full `when`,
+result path; human result output prints `[skipped: <node>]` plus the skip reason when one is
+recorded. Preview JSON includes each node's full `when`,
 and text preview prints its source, pointer, and expected value. Both approval views expose each
 node's workspace mode/path, declared writes and exclusive resources, and environment key names
-without revealing environment values. Agent rows also show their execution
-and escalation settings. Workroom previews show the floor plan
-and explain the active-to-settled pane lifecycle. A condition-contract pause is reported in status
+without revealing environment values. Agent rows also show their provider-neutral access
+and escalation settings. Workroom previews show the floor plan: each workroom's label, layout,
+ordered seats, and settlement anchors. A condition-contract pause is reported in status
 as actionable revision-or-stop work; unchanged resume is rejected.
 Callback command previews preserve the ordered argv so distinct executables, actions, and routing
 flags remain distinguishable. Environment-assignment values, credential-named option values, and

@@ -38,6 +38,8 @@ const ALL_EVENT_TYPES = [
   "node.failed",
   "node.retrying",
   "node.cancelled",
+  "steering.requested",
+  "steering.delivered",
   "gate.opened",
   "gate.approved",
   "hold.set",

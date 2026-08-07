@@ -9,8 +9,9 @@ Use Orchestrate only when the task is materially clearer or safer as an explicit
 
 ## Workflow
 
-1. Run `orchestrate doctor`; it verifies Herdr, the provider commands, state access, and the
-   installed build. Stop and report if anything is unhealthy.
+1. Run the read-only `orchestrate doctor`; it verifies Herdr, the provider commands, state access,
+   and the installed build. Stop and report if anything is unhealthy. Use `doctor --live` only when
+   the human explicitly wants a real billed Codex-to-Claude diagnostic run.
 2. Inspect project instructions and the current working tree before designing writes.
 3. Start from the validated patterns in `references/examples.md` and the semantic rules in
    `references/workflow-format.md`. Consult `references/workflow.schema.json` only when exact
@@ -26,14 +27,16 @@ Use Orchestrate only when the task is materially clearer or safer as an explicit
    an interactive question tool: terminal output is often collapsed, so the human would be
    approving work they never saw. End your message after the walkthrough and wait for the human to
    reply. Do not start until the user approves that digest.
-8. Start with `orchestrate run <file> --approve <digest>`. Report the run ID. Initial panes run
+8. Start with `orchestrate run <workflow.yaml> --approve <sha256>`. Report the run ID. Initial panes run
    independently. `node-done` writes only the authenticated submission; Herdr's trusted plugin event
    hook wakes the current wake-owning master when a workflow agent becomes blocked or done. An
    authenticated agent-pane `resume` transfers wake ownership to that agent's exact provider
    session; a non-agent resume preserves the current owner.
 9. Run `orchestrate reconcile <run>` after a wake-up or at any time to consume submissions and start
    newly ready work. A missed wake only delays progress. Observe with `board`, `status --wait`, or
-   `events --follow`, and read durable node output with `result`.
+   `events --follow`, read durable node output with `result`, and use `steer` only to give a bounded
+   message to an exact currently running workflow-agent attempt. Steering cannot change its approved
+   task, access, result contract, or completion ownership.
 10. When a gate, round limit, fuse, write conflict, hold, failure, or revision needs judgment,
     explain the exact decision and use the dedicated command. Approval is always digest-bound.
 
@@ -55,9 +58,10 @@ Use Orchestrate only when the task is materially clearer or safer as an explicit
 - Use node `when` for an approved branch over a direct schema-validated JSON dependency. A false
   value becomes scheduler-owned `skipped`; a missing pointer pauses as a contract error and resume
   requires an approved condition change. Never ask an agent to assert scheduler state in free text.
-- Set execution and escalation separately. Use `escalation: "deny"` for unattended nodes so an
-  out-of-policy action fails instead of opening a human approval dialog. Use `ask-user` only when
-  the approved workflow intentionally requires live human approvals.
+- Set provider-neutral `access` and escalation separately. Use the narrowest honest `read-only` or
+  `workspace-write` access, and `escalation: "deny"` for unattended nodes so an out-of-policy action
+  fails instead of opening a human approval dialog. Use `ask-user` only when the approved workflow
+  intentionally requires live human approvals.
 - Do not add Orchestrate state paths or installed control assets to `workspace.writes` or provider
   arguments. The runtime supplies the exact completion channel automatically.
 - Keep every mutating provider cwd, workspace path, sandbox root, and write prefix disjoint from
@@ -69,6 +73,11 @@ Use Orchestrate only when the task is materially clearer or safer as an explicit
   A repeat-member `when` binds to the source in the same round and is reevaluated in every round;
   the verdict member must remain unconditional. Round extensions and acceptance are explicit human
   decisions.
+- For iterative review, make handoffs read like collaboration rather than protocol fragments. Keep
+  finding IDs stable across rounds, label each finding `new`, `recurring`, or `resolved`, and require
+  severity plus concrete evidence. By the second unclean round, ask whether recurring findings share
+  a structural cause. Ignore minor/style churn unless it affects behavior. At the round bound, pause
+  for a human trend review instead of automatically extending the loop.
 - Use optional `presentation.workrooms` for stable human-facing review seats. Seatful nodes name a
   workroom and seat; seatless supporting nodes may name only the workroom. Nodes sharing a seat must
   be dependency-ordered, and every settlement anchor must be a non-repeat node downstream of every
@@ -89,6 +98,11 @@ tab/split rules; it is not a workflow-node field.
 Use `ORCHESTRATE_DISABLE_UI=1` only to suppress presentation. Node execution still requires Herdr.
 For a named Herdr remote, verify that checkout, provider commands, executable path, and state path
 are all reachable from that remote before starting.
+
+`doctor --live` creates exactly one bounded three-node diagnostic and may incur provider charges.
+The probe launches only after the read-only checks pass; otherwise it is skipped and reported. A
+successful probe cleans its temporary run and workspace; a failed probe retains their reported paths
+for diagnosis.
 
 ## Reference routing
 

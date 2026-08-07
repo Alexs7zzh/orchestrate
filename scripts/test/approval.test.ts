@@ -39,7 +39,7 @@ nodes:
   - id: review
     agent: codex
     prompt: "Review\\nexactly."
-    execution: read-only
+    access: read-only
     env:
       PRIVATE_TOKEN: first-secret
     output: { format: text }
@@ -71,7 +71,7 @@ nodes:
   - id: review
     agent: codex
     prompt: Review both inputs.
-    execution: read-only
+    access: read-only
     needs: [explicit]
     inputs:
       - from: inferred
@@ -151,8 +151,8 @@ describe("approval preview", () => {
     expect(JSON.stringify(first)).not.toContain('"value":"value"')
     expect(JSON.stringify(first)).not.toContain("hidden")
     expect(first.origins["/concurrency"]?.kind).toBe("default")
-    expect(originLabel(first.origins["/nodes/0/permissions/execution"])).toBe(
-      "[expanded:execution-profile]"
+    expect(originLabel(first.origins["/nodes/0/permissions/access"])).toBe(
+      "[expanded:access-profile]"
     )
 
     const changed = structuredClone(loaded.workflow)
@@ -389,7 +389,7 @@ describe("approval preview", () => {
     for (const pointer of [
       "/nodes/0/type",
       "/nodes/0/provider",
-      "/nodes/0/permissions/execution",
+      "/nodes/0/permissions/access",
       "/nodes/0/session",
       "/nodes/0/retry"
     ]) {

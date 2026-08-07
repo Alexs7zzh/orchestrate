@@ -96,7 +96,7 @@ function agent(id: string, overrides: Partial<AgentNode> = {}): AgentNode {
     prompt: `Work on ${id}.`,
     session: { mode: "fresh", from: null, saveAs: null },
     permissions: {
-      execution: { sandbox: "read-only" },
+      access: "read-only",
       escalation: "deny",
       extraArgs: [],
       inheritEnv: [],
@@ -104,7 +104,7 @@ function agent(id: string, overrides: Partial<AgentNode> = {}): AgentNode {
     },
     output: { format: "text", schema: null },
     ...overrides
-  } as AgentNode
+  }
 }
 
 function workflow(nodes: readonly WorkflowSpec["nodes"][number][]): WorkflowSpec {
@@ -178,19 +178,23 @@ describe("workflow contract", () => {
     ).toBe(false)
   })
 
-  test("keeps the documented YAML workflow example valid", async () => {
+  test("keeps every documented YAML workflow example valid", async () => {
     const document = await Bun.file(new URL("../../references/examples.md", import.meta.url)).text()
-    const block = document.match(/```yaml\n([\s\S]*?)\n```/)?.[1]
-    expect(block).toBeDefined()
+    const blocks = [...document.matchAll(/```yaml\n([\s\S]*?)\n```/g)].map(
+      (match) => match[1] as string
+    )
+    expect(blocks.length).toBeGreaterThanOrEqual(2)
     const directory = await mkdtemp(path.join(os.tmpdir(), "orchestrate-example-"))
     try {
-      const file = path.join(directory, "example.yaml")
-      await Bun.write(file, block as string)
-      expect(
-        (await loadWorkflowSource(file)).diagnostics.filter(
-          (diagnostic) => diagnostic.severity === "error"
-        )
-      ).toEqual([])
+      for (const [index, block] of blocks.entries()) {
+        const file = path.join(directory, `example-${index}.yaml`)
+        await Bun.write(file, block)
+        expect(
+          (await loadWorkflowSource(file)).diagnostics.filter(
+            (diagnostic) => diagnostic.severity === "error"
+          )
+        ).toEqual([])
+      }
     } finally {
       await rm(directory, { recursive: true, force: true })
     }
@@ -866,7 +870,7 @@ nodes:
               ? agent(id, {
                   provider,
                   permissions: {
-                    execution: { sandbox: "read-only" },
+                    access: "read-only",
                     escalation: "deny",
                     extraArgs: [],
                     inheritEnv: inherited,
@@ -876,7 +880,7 @@ nodes:
               : agent(id, {
                   provider,
                   permissions: {
-                    execution: { permissionMode: "dontAsk" },
+                    access: "read-only",
                     escalation: "deny",
                     extraArgs: [],
                     inheritEnv: inherited,
@@ -914,13 +918,13 @@ nodes:
     expect(validateWorkflow(workflow([source, resumed, forked])).issues).toEqual([])
   })
 
-  test("separates execution from escalation and rejects incoherent Claude modes", () => {
+  test("separates access from escalation and keeps Claude unattended", () => {
     const claude = {
       ...agent("claude-review"),
       provider: "claude" as const,
       workspace: { ...workspace(), writes: ["review-result/**"] },
       permissions: {
-        execution: { permissionMode: "dontAsk" as const },
+        access: "read-only" as const,
         escalation: "deny" as const,
         extraArgs: [],
         inheritEnv: [],
@@ -937,13 +941,13 @@ nodes:
     )
   })
 
-  test("rejects unconfined Claude modes and every caller-controlled permission surface", () => {
+  test("accepts provider-neutral Claude write access and rejects caller-controlled arguments", () => {
     const base = {
       ...agent("claude-review"),
       provider: "claude" as const,
       workspace: { ...workspace(), writes: ["src/**"] },
       permissions: {
-        execution: { permissionMode: "dontAsk" as const },
+        access: "read-only" as const,
         escalation: "deny" as const,
         extraArgs: [],
         inheritEnv: [],
@@ -954,12 +958,10 @@ nodes:
       ...base,
       permissions: {
         ...base.permissions,
-        execution: { permissionMode: "bypassPermissions" as const }
+        access: "workspace-write" as const
       }
     }
-    expect(validateWorkflow(workflow([bypass])).issues.map((issue) => issue.code)).toContain(
-      "unsupported-permission-mode"
-    )
+    expect(validateWorkflow(workflow([bypass])).issues).toEqual([])
     for (const extraArgs of [
       ["--allowedTools", "Edit(/**)"],
       ["--disallowedTools", "Read"],
@@ -997,7 +999,7 @@ nodes:
       const codex = agent("codex-write", {
         workspace: { ...workspace(), writes: ["src/**"] },
         permissions: {
-          execution: { sandbox: "workspace-write" },
+          access: "workspace-write",
           escalation: "deny",
           extraArgs: [],
           inheritEnv: [],
@@ -1009,18 +1011,18 @@ nodes:
         provider: "claude" as const,
         workspace: { ...workspace(), writes: ["src/**"] },
         permissions: {
-          execution: { permissionMode: "bypassPermissions" as const },
+          access: "workspace-write" as const,
           escalation: "deny" as const,
           extraArgs: [],
           inheritEnv: [],
           env: {}
         }
       }
-      const claudeDontAsk = {
+      const claudeReadOnly = {
         ...claude,
         permissions: {
           ...claude.permissions,
-          execution: { permissionMode: "dontAsk" as const }
+          access: "read-only" as const
         }
       }
       const protectedPaths = [
@@ -1049,12 +1051,12 @@ nodes:
         expect(
           validateWorkflow({
             ...workflow([
-              { ...claudeDontAsk, workspace: { ...claudeDontAsk.workspace, path: root } }
+              { ...claudeReadOnly, workspace: { ...claudeReadOnly.workspace, path: root } }
             ]),
             cwd: "/tmp/safe"
           }).issues.map((issue) => issue.code)
-        ).toContain("protected-path")
-        for (const providerNode of [codex, claudeDontAsk]) {
+        ).not.toContain("protected-path")
+        for (const providerNode of [codex, claude]) {
           expect(
             validateWorkflow({
               ...workflow([
@@ -1151,7 +1153,7 @@ nodes:
           exclusiveResources: []
         },
         permissions: {
-          execution: { sandbox: "workspace-write" },
+          access: "workspace-write",
           escalation: "deny",
           extraArgs: [],
           inheritEnv: [],

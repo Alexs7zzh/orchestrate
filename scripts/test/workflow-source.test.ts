@@ -42,7 +42,7 @@ describe("YAML workflow source", () => {
           `${ROOT}nodes:
   - id: inspect
     agent: codex
-    execution: read-only
+    access: read-only
     prompt: Inspect.
 `,
           name
@@ -71,7 +71,7 @@ describe("YAML workflow source", () => {
     mutates: false
   - id: decide
     agent: codex
-    execution: read-only
+    access: read-only
     prompt: Decide.
     output:
       format: json
@@ -80,7 +80,7 @@ describe("YAML workflow source", () => {
   - id: consume
     needs: [collect]
     agent: claude
-    execution: dont-ask
+    access: read-only
     prompt: Consume.
     inputs:
       - from: decide
@@ -118,13 +118,7 @@ describe("YAML workflow source", () => {
         }
       }
     }
-    expect(loaded.diagnostics).toMatchObject([
-      {
-        severity: "warning",
-        code: "unknown-writes",
-        path: "/nodes/2/workspace"
-      }
-    ])
+    expect(loaded.diagnostics).toEqual([])
     expect(loaded.workflow).not.toBeNull()
     expect(loaded.workflow?.concurrency).toBe(1)
     expect(loaded.workflow?.callback).toEqual({ type: "none" })
@@ -155,7 +149,7 @@ describe("YAML workflow source", () => {
 nodes:
   - id: inspect
     agent: codex
-    execution: read-only
+    access: read-only
     prompt: Inspect.
 `)
     )
@@ -169,7 +163,7 @@ nodes:
         `${ROOT}nodes: &nodes
   - id: inspect
     agent: codex
-    execution: read-only
+    access: read-only
     prompt: Inspect.
 `,
         "anchored.yml"
@@ -196,7 +190,7 @@ nodes:
       column: 1
     })
     expect(
-      loaded.diagnostics.find((entry) => entry.path === "/nodes/0/execution")?.location
+      loaded.diagnostics.find((entry) => entry.path === "/nodes/0/access")?.location
     ).toMatchObject({ line: 9, column: 5 })
   })
 
@@ -206,7 +200,7 @@ nodes:
   - id: inspect
     needs: [inspect, inspect]
     agent: codex
-    execution: read-only
+    access: read-only
     prompt: Inspect.
 `)
     )
@@ -276,7 +270,7 @@ presentation:
       await source(`${ROOT}nodes:
   - id: inspect
     agent: codex
-    execution: read-only
+    access: read-only
     prompt: Inspect.
     session: {fresh: review-session}
     extraArgs: [--quiet]
@@ -338,7 +332,7 @@ repeats:
     mutates: false
   - id: consumer
     agent: codex
-    execution: read-only
+    access: read-only
     prompt: Consume.
     when: {type: agent-output, node: source, pointer: /done, equals: true}
 `)
@@ -357,19 +351,19 @@ repeats:
       `${ROOT}nodes:
   - id: source
     agent: codex
-    execution: read-only
+    access: read-only
     prompt: Source.
     output: {format: json, schema: {type: object}}
   - id: consumer
     agent: codex
-    execution: read-only
+    access: read-only
     prompt: Consume.
     when: {type: agent-output, node: source, pointer: /value, equals: -0}
 `,
       `${ROOT}nodes:
   - id: source
     agent: codex
-    execution: read-only
+    access: read-only
     prompt: Source.
     output: {format: json, schema: {type: object}}
 repeats:
@@ -411,7 +405,7 @@ repeats:
       ORCHESTRATE_BIN: authored
   - id: inspect
     agent: codex
-    execution: read-only
+    access: read-only
     prompt: Inspect.
     inheritEnv: [TMPDIR]
 `)
@@ -529,7 +523,7 @@ repeats:
       await source(`${ROOT.replace("maxStarts: null", `maxStarts: ${Number.MAX_SAFE_INTEGER}`)}nodes:
   - id: inspect
     agent: codex
-    execution: read-only
+    access: read-only
     prompt: Inspect.
 `)
     )
@@ -539,7 +533,7 @@ repeats:
       await source(`${ROOT.replace("maxStarts: null", "maxStarts: 9007199254740993")}nodes:
   - id: inspect
     agent: codex
-    execution: read-only
+    access: read-only
     prompt: Inspect.
 `)
     )
@@ -555,7 +549,7 @@ repeats:
       await source(`${ROOT}nodes:
   - id: inspect
     agent: codex
-    execution: read-only
+    access: read-only
     prompt: Inspect.
     env: {BAD-NAME: value}
 `)
@@ -579,7 +573,7 @@ repeats:
       objective: "prove absence",
       cwd: "/tmp",
       limits: { maxStarts: null },
-      nodes: [{ id: "inspect", agent: "codex", execution: "read-only", prompt: "Inspect." }]
+      nodes: [{ id: "inspect", agent: "codex", access: "read-only", prompt: "Inspect." }]
     })
     expect(Result.isSuccess(decoded)).toBe(true)
     if (Result.isFailure(decoded)) {
@@ -594,14 +588,14 @@ repeats:
   test("rejects union leakage and provider-invalid authored fields", async () => {
     const nodes = [
       `id: command\n    command: [/usr/bin/true]`,
-      `id: claude\n    agent: claude\n    execution: read-only\n    prompt: Review.`,
-      `id: claude\n    agent: claude\n    execution: dont-ask\n    escalation: ask-user\n    prompt: Review.`,
-      `id: claude\n    agent: claude\n    execution: dont-ask\n    extraArgs: [--unsafe]\n    prompt: Review.`,
+      `id: claude\n    agent: claude\n    access: execute-anything\n    prompt: Review.`,
+      `id: claude\n    agent: claude\n    access: read-only\n    escalation: ask-user\n    prompt: Review.`,
+      `id: claude\n    agent: claude\n    access: read-only\n    extraArgs: [--unsafe]\n    prompt: Review.`,
       `id: codex\n    agent: codex\n    execution: dont-ask\n    prompt: Review.`,
-      `id: codex\n    type: agent\n    agent: codex\n    execution: read-only\n    prompt: Review.`,
-      `id: codex\n    agent: codex\n    execution: read-only\n    effort: null\n    prompt: Review.`,
-      `id: codex\n    agent: codex\n    command: [/usr/bin/true]\n    execution: read-only\n    prompt: Review.`,
-      `id: codex\n    agent: codex\n    execution: read-only\n    session: {fresh: one, saveAs: two}\n    prompt: Review.`
+      `id: codex\n    type: agent\n    agent: codex\n    access: read-only\n    prompt: Review.`,
+      `id: codex\n    agent: codex\n    access: read-only\n    effort: null\n    prompt: Review.`,
+      `id: codex\n    agent: codex\n    command: [/usr/bin/true]\n    access: read-only\n    prompt: Review.`,
+      `id: codex\n    agent: codex\n    access: read-only\n    session: {fresh: one, saveAs: two}\n    prompt: Review.`
     ]
     for (const node of nodes) {
       const loaded = await loadWorkflowSource(await source(`${ROOT}nodes:\n  - ${node}\n`))

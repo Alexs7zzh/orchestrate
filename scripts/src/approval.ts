@@ -404,8 +404,8 @@ function expectedExpanded(
   if (rest === "/type" || rest === "/provider") {
     return { shorthand: "agent-discriminator", sourcePath: `${base}/agent` }
   }
-  if (rest === "/permissions/execution" || rest.startsWith("/permissions/execution/")) {
-    return { shorthand: "execution-profile", sourcePath: `${base}/execution` }
+  if (rest === "/permissions/access") {
+    return { shorthand: "access-profile", sourcePath: `${base}/access` }
   }
   if (rest === "/session" || rest.startsWith("/session/")) {
     return {
@@ -433,8 +433,7 @@ function explicitSourcePath(workflow: WorkflowSpec, pointer: string): string | n
     rest === "/retry" ||
     rest.startsWith("/retry/") ||
     rest === "/permissions" ||
-    rest === "/permissions/execution" ||
-    rest.startsWith("/permissions/execution/") ||
+    rest === "/permissions/access" ||
     (node.type === "agent" &&
       (rest === "/provider" || rest === "/session" || rest.startsWith("/session/"))) ||
     (node.type === "command" && (rest === "/argv" || rest.startsWith("/argv/")))
@@ -631,13 +630,7 @@ export function approvalPreview(workflow: WorkflowSpec, provenance: WorkflowProv
       prompt: node.prompt,
       session: { ...node.session, ...sessionLineage(workflow, node) },
       output: node.output,
-      executionProfile:
-        node.provider === "codex"
-          ? node.permissions.execution.sandbox
-          : node.permissions.execution.permissionMode === "dontAsk"
-            ? "dont-ask"
-            : node.permissions.execution.permissionMode,
-      execution: node.permissions.execution,
+      access: node.permissions.access,
       escalation: node.permissions.escalation,
       extraArgs: node.permissions.extraArgs,
       inheritEnv: node.permissions.inheritEnv,

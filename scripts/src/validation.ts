@@ -433,11 +433,7 @@ export function orchestrateAuthorityPaths(): readonly string[] {
 }
 
 export function isMutatingProviderNode(node: WorkflowNode): node is AgentNode {
-  return (
-    node.type === "agent" &&
-    ((node.provider === "codex" && node.permissions.execution.sandbox === "workspace-write") ||
-      (node.provider === "claude" && node.permissions.execution.permissionMode !== "plan"))
-  )
+  return node.type === "agent" && node.permissions.access === "workspace-write"
 }
 
 export function providerAuthorityOverlaps(
@@ -800,10 +796,7 @@ function validateNode(workflow: WorkflowSpec, node: WorkflowNode, issues: Valida
     )
   }
   const canMutate =
-    node.type === "command"
-      ? node.mutates
-      : (node.provider === "codex" && node.permissions.execution.sandbox !== "read-only") ||
-        (node.provider === "claude" && node.permissions.execution.permissionMode !== "plan")
+    node.type === "command" ? node.mutates : node.permissions.access === "workspace-write"
   if (canMutate && node.workspace.writes.length === 0) {
     addIssue(
       issues,
@@ -900,28 +893,12 @@ function validateNode(workflow: WorkflowSpec, node: WorkflowNode, issues: Valida
 
   validateProviderArguments(node, issues, nodePointer)
   if (node.provider === "claude") {
-    const mode = node.permissions.execution.permissionMode
-    if (mode !== "dontAsk") {
-      addIssue(
-        issues,
-        "error",
-        "unsupported-permission-mode",
-        `Claude permission mode "${mode}" is not confined enough for workflow execution; use dontAsk with the launcher-owned fail-closed sandbox.`,
-        { path: `${nodePointer}/permissions/execution/permissionMode`, primaryNode: node.id }
-      )
-    }
-    const requiredEscalation =
-      mode === "dontAsk" || mode === "bypassPermissions"
-        ? "deny"
-        : mode === "auto"
-          ? "auto-review"
-          : "ask-user"
-    if (node.permissions.escalation !== requiredEscalation) {
+    if (node.permissions.escalation !== "deny") {
       addIssue(
         issues,
         "error",
         "permission-escalation",
-        `Claude permission mode "${mode}" requires escalation="${requiredEscalation}" for node "${node.id}".`,
+        `Claude unattended execution requires escalation="deny" for node "${node.id}".`,
         { path: `${nodePointer}/permissions/escalation`, primaryNode: node.id }
       )
     }
@@ -1215,7 +1192,11 @@ function validateConditions(
           "error",
           "condition-order",
           `Node "${node.id}" when condition must name a direct dependency.`,
-          { path: `${nodePointer}/when/node`, primaryNode: node.id, relatedNodes: [condition.node] }
+          {
+            path: `${nodePointer}/when/node`,
+            primaryNode: node.id,
+            relatedNodes: [condition.node]
+          }
         )
       }
       if (
@@ -1228,7 +1209,11 @@ function validateConditions(
           "error",
           "condition-source",
           `Node "${node.id}" when condition must name a schema-validated JSON agent node.`,
-          { path: `${nodePointer}/when/node`, primaryNode: node.id, relatedNodes: [condition.node] }
+          {
+            path: `${nodePointer}/when/node`,
+            primaryNode: node.id,
+            relatedNodes: [condition.node]
+          }
         )
       }
       if (verdictNodes.has(node.id)) {
@@ -1257,7 +1242,11 @@ function validateConditions(
           "error",
           "condition-repeat",
           `Repeat member "${node.id}" cannot be conditioned by member "${condition.node}" from another repeat.`,
-          { path: `${nodePointer}/when/node`, primaryNode: node.id, relatedNodes: [condition.node] }
+          {
+            path: `${nodePointer}/when/node`,
+            primaryNode: node.id,
+            relatedNodes: [condition.node]
+          }
         )
       }
     }

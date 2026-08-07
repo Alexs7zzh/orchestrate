@@ -266,7 +266,7 @@ function claudeAgent(
     prompt: "Run the native sandbox probe.",
     session: { mode: "fresh", from: null, saveAs: null },
     permissions: {
-      execution: { permissionMode: "dontAsk" },
+      access: "read-only",
       escalation: "deny",
       extraArgs: [],
       inheritEnv: [],
@@ -286,7 +286,7 @@ function codexAgent(
     provider: "codex",
     permissions: {
       ...base.permissions,
-      execution: { sandbox: declaredWrite ? "workspace-write" : "read-only" }
+      access: declaredWrite ? "workspace-write" : "read-only"
     }
   }
 }

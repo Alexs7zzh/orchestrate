@@ -26,8 +26,10 @@ import {
   handleHerdrAgentStatusEvent,
   readBoundedResult,
   reconcileRun,
+  steerRun,
   startWorkflowRun
 } from "./crank.js"
+import { LIVE_DOCTOR_WARNING, doctorReport, runLiveDoctorDiagnostic } from "./doctor.js"
 import {
   HerdrSurface,
   removeWorkflowWorktrees,
@@ -46,11 +48,10 @@ import {
   compileProviderLaunchIdentityFromPath,
   compileProviderPath
 } from "./provider-launch.js"
-import { herdrPluginHealth, installedBuild, migrateStagedInstallation, runSetup } from "./setup.js"
+import { migrateStagedInstallation, runSetup } from "./setup.js"
 import {
   acquireRunLock,
   createRunId,
-  ensureStateDirectories,
   eventsPath,
   holdBlocksDependencies,
   listRunStates,
@@ -176,6 +177,7 @@ export const PUBLIC_COMMAND_HELP = {
   stop: "Usage: orchestrate stop <run> [--yes] [--json]",
   hold: "Usage: orchestrate hold <run> <node> [--json]",
   release: "Usage: orchestrate release <run> <node> [--json]",
+  steer: "Usage: orchestrate steer <run> <node> (--message <text>|--file <path>) [--json]",
   revise:
     "Usage: orchestrate revise <run> <workflow.yaml> [--json]\n       orchestrate revise <run> --discard [--json]",
   "node-done":
@@ -194,7 +196,7 @@ export const PUBLIC_COMMAND_HELP = {
     "Usage: orchestrate clean <run> [--dry-run] [--json]\n       orchestrate clean --settled [--dry-run] [--json]",
   completion: "Usage: orchestrate completion <fish|zsh|bash> [--json]",
   setup: "Usage: orchestrate setup [--dry-run] [--remove] [--defaults|--no-wizard] [--json]",
-  doctor: "Usage: orchestrate doctor [--json]"
+  doctor: "Usage: orchestrate doctor [--live] [--json]"
 } as const
 
 export type PublicCommand = keyof typeof PUBLIC_COMMAND_HELP
@@ -249,7 +251,9 @@ const VALUE_FLAGS = new Set([
   "token",
   "outcome",
   "code",
-  "project"
+  "project",
+  "message",
+  "file"
 ])
 
 const BOOLEAN_FLAGS = new Set([
@@ -261,6 +265,7 @@ const BOOLEAN_FLAGS = new Set([
   "follow",
   "help",
   "hold",
+  "live",
   "json",
   "needs-attention",
   "no-wizard",
@@ -1056,6 +1061,7 @@ export const COMMAND_COMPLETION_SHAPES = Object.freeze([
   { command: "stop", runWord: 3, nodeWord: null },
   { command: "hold", runWord: 3, nodeWord: 4 },
   { command: "release", runWord: 3, nodeWord: 4 },
+  { command: "steer", runWord: 3, nodeWord: 4 },
   { command: "revise", runWord: 3, nodeWord: null },
   { command: "node-done", runWord: 3, nodeWord: 4 },
   { command: "node-exit", runWord: 3, nodeWord: 4 },
@@ -1123,58 +1129,6 @@ function completionScript(shell: string): string {
     ].join("\n")
   }
   throw new Error(`Unsupported shell "${shell}"; choose fish, zsh, or bash.`)
-}
-
-async function doctorReport(): Promise<{
-  readonly ok: boolean
-  readonly build: string
-  readonly checks: readonly PreflightCheck[]
-}> {
-  const checks: PreflightCheck[] = []
-  try {
-    checks.push({ name: "herdr", ok: true, detail: await requireHerdr() })
-  } catch (error) {
-    checks.push({ name: "herdr", ok: false, detail: String(error) })
-  }
-  const plugin = await herdrPluginHealth()
-  checks.push({ name: "herdr-plugin", ...plugin })
-  for (const provider of ["codex", "claude"] as const) {
-    try {
-      const identity = await compileProviderLaunchIdentity(provider)
-      checks.push({ name: provider, ok: true, detail: identity.entry.canonicalPath })
-    } catch (error) {
-      checks.push({
-        name: provider,
-        ok: false,
-        detail: `${error instanceof Error ? error.message : String(error)} (optional until used)`
-      })
-    }
-  }
-  try {
-    await ensureStateDirectories()
-    await access(stateRoot(), 2)
-    checks.push({ name: "state", ok: true, detail: stateRoot() })
-  } catch (error) {
-    checks.push({ name: "state", ok: false, detail: String(error) })
-  }
-  const staged = await installedBuild()
-  checks.push({
-    name: "installed-build",
-    ok: staged === runtimeBuild(),
-    detail:
-      staged === null
-        ? "not installed; run orchestrate setup"
-        : staged === runtimeBuild()
-          ? staged
-          : `installed ${staged}; CLI ${runtimeBuild()}; rerun orchestrate setup`
-  })
-  return {
-    ok: checks
-      .filter((check) => check.name !== "codex" && check.name !== "claude")
-      .every((check) => check.ok),
-    build: runtimeBuild(),
-    checks
-  }
 }
 
 async function handleUi(parsed: ParsedArgs, json: boolean): Promise<number> {
@@ -1562,6 +1516,31 @@ export async function runCli(
     )
     return EXIT_OK
   }
+  if (command === "steer") {
+    shape(command, parsed, 2, 2, ["message", "file"])
+    if (
+      (process.env.ORCHESTRATE_COMPLETION_CONTRACT?.length ?? 0) > 0 ||
+      (process.env.ORCHESTRATE_NODE_TOKEN?.length ?? 0) > 0
+    ) {
+      throw new Error(
+        "Workflow nodes cannot invoke steer; steering is reserved for a human caller."
+      )
+    }
+    const inline = flag(parsed, "message")
+    const file = flag(parsed, "file")
+    if ((inline === null) === (file === null)) {
+      throw new Error("steer requires exactly one of --message <text> or --file <path>.")
+    }
+    const message = inline ?? (await readBoundedResult(file as string, "Steering message file"))
+    const runDir = await resolveRunDirectory(parsed.positionals[0] as string)
+    const result = await steerRun(runDir, parsed.positionals[1] as string, message)
+    output(
+      json,
+      result,
+      `Delivered steering to ${result.nodeId} attempt ${result.attempt} in session ${result.providerSessionId}.`
+    )
+    return EXIT_OK
+  }
   if (command === "runs") {
     shape(command, parsed, 0, 0, ["active", "paused", "needs-attention", "settled"])
     const filters = ["active", "paused", "needs-attention", "settled"].filter((name) =>
@@ -1836,19 +1815,45 @@ export async function runCli(
     return EXIT_OK
   }
   if (command === "doctor") {
-    shape(command, parsed, 0, 0, [])
+    shape(command, parsed, 0, 0, ["live"])
     const report = await doctorReport()
+    const liveSkipped = has(parsed, "live") && !report.ok
+    if (has(parsed, "live") && !liveSkipped && !json) {
+      console.log(`WARNING: ${LIVE_DOCTOR_WARNING}`)
+    }
+    const live = has(parsed, "live") && !liveSkipped ? await runLiveDoctorDiagnostic() : null
+    const ok = report.ok && (live?.ok ?? true)
     output(
       json,
-      report,
+      {
+        ...report,
+        ok,
+        ...(liveSkipped ? { liveSkipped: true } : {}),
+        ...(live === null ? {} : { live })
+      },
       [
         `Build: ${report.build}`,
         ...report.checks.map(
           (check) => `${check.ok ? "OK" : "FAIL"} ${check.name}: ${check.detail}`
-        )
+        ),
+        ...(liveSkipped
+          ? [
+              "SKIP live-diagnostic: read-only checks failed; no billed provider work was launched. Fix them and rerun doctor --live."
+            ]
+          : []),
+        ...(live === null
+          ? []
+          : [
+              ...live.checks.map(
+                (check) => `${check.ok ? "OK" : "FAIL"} ${check.name}: ${check.detail}`
+              ),
+              live.cleaned
+                ? `Cleaned live diagnostic run ${live.runId} and its temporary workspace.`
+                : `Retained failure artifacts: ${live.artifacts?.runDirectory ?? "no run directory"}; ${live.artifacts?.workspace ?? "no workspace"}.`
+            ])
       ].join("\n")
     )
-    return report.ok ? EXIT_OK : EXIT_ERROR
+    return ok ? EXIT_OK : EXIT_ERROR
   }
   if (command === "setup") {
     shape(command, parsed, 0, 0, ["dry-run", "remove", "defaults", "no-wizard"])

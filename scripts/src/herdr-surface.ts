@@ -33,6 +33,7 @@ import {
   readAuthenticatedCompletionEvidence,
   readBoundedRegularFileEvidence
 } from "./completion-evidence.js"
+import { resolveHandoffs } from "./handoffs.js"
 import {
   decodeHerdrAgentInfoResponse,
   decodeHerdrErrorResponse,
@@ -45,12 +46,17 @@ import {
   decodeHerdrWorkspaceListResponse
 } from "./herdr-api.generated.js"
 import { HERDR_SCHEMA_BASELINE_VERSION, MINIMUM_HERDR_VERSION } from "./herdr-contract.js"
-import { sourceRuntimeId } from "./prompt-inputs.js"
 import {
   compileWorkflowProviderLaunchIdentities,
   materializeProviderRelay,
   revalidateProviderLaunchIdentity
 } from "./provider-launch.js"
+import {
+  compileClaudeProviderArguments,
+  compileClaudeProviderPolicy,
+  compileCodexProviderArguments,
+  compileCodexProviderPolicy
+} from "./provider-policy.js"
 import { SpawnReceiptSchema } from "./schema.js"
 import { claudeSessionLineageId } from "./session-lineage.js"
 import {
@@ -565,12 +571,9 @@ export async function projectAttemptPathInputs(
   token: string
 ): Promise<readonly ProjectedInputCapability[]> {
   const projected: ProjectedInputCapability[] = []
-  for (const [inputIndex, input] of node.inputs.entries()) {
+  for (const handoff of resolveHandoffs(workflow, state, runtimeNodeId, node.inputs)) {
+    const { input, inputIndex, sourceRuntimeId: sourceNodeId } = handoff
     if (input.include !== "path") {
-      continue
-    }
-    const sourceNodeId = sourceRuntimeId(workflow, state, runtimeNodeId, input)
-    if (sourceNodeId === null) {
       continue
     }
     const source = state.nodes[sourceNodeId]
@@ -642,67 +645,12 @@ export async function projectAttemptPathInputs(
   return projected
 }
 
-export function codexControlProfileDocument(
-  profile: string,
-  manifest: AttemptCapabilityManifest
-): string {
-  const filesystem = [
-    ...manifest.access.unreadableRoots.map((protectedPath) => [protectedPath, "deny"] as const),
-    ...manifest.access.readableRoots.map((readRoot) => [readRoot, "read"] as const),
-    ...manifest.access.writableRoots.map((writeRoot) => [writeRoot, "write"] as const)
-  ].map(([candidate, permission]) => `${JSON.stringify(candidate)}=${JSON.stringify(permission)}`)
-  return [
-    `default_permissions=${JSON.stringify(profile)}`,
-    "",
-    `[permissions.${JSON.stringify(profile)}]`,
-    'extends=":read-only"',
-    "",
-    `[permissions.${JSON.stringify(profile)}.filesystem]`,
-    ...filesystem,
-    ""
-  ].join("\n")
-}
-
 function codexProfilePath(profile: string, codexHome = providerControlRoot("codex")): string {
   return path.join(codexHome, `${profile}.config.toml`)
 }
 
 function shellQuote(value: string): string {
   return `'${value.replaceAll("'", `'"'"'`)}'`
-}
-
-function codexArguments(
-  node: Extract<AgentNode, { readonly provider: "codex" }>,
-  source: string | null,
-  profile: string,
-  sessionMode: SessionSpec["mode"]
-) {
-  const approval = node.permissions.escalation === "deny" ? "never" : "on-request"
-  const args: string[] = [
-    "--ask-for-approval",
-    approval,
-    "--profile",
-    profile,
-    "--disable",
-    "multi_agent"
-  ]
-  if (node.permissions.escalation === "auto-review") {
-    args.push("--config", 'approvals_reviewer="auto_review"')
-  }
-  if (node.model !== "provider-default") {
-    args.push("--model", node.model)
-  }
-  if (node.effort !== null) {
-    args.push("--config", `model_reasoning_effort=${JSON.stringify(node.effort)}`)
-  }
-  args.push(...node.permissions.extraArgs)
-  if (sessionMode === "resume") {
-    args.push("resume", source as string)
-  }
-  if (sessionMode === "fork") {
-    args.push("fork", source as string)
-  }
-  return args
 }
 
 // Claude sessions are project-scoped by launch directory. Each canonical
@@ -716,65 +664,6 @@ async function claudeLineageDirectory(runId: string, lineageId: string): Promise
   await mkdir(directory, { recursive: true, mode: 0o700 })
   await chmod(directory, 0o700)
   return realpathSync.native(directory)
-}
-
-function pathContainsOrEquals(relative: string): boolean {
-  return (
-    relative === "" ||
-    (relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative))
-  )
-}
-
-function pathsOverlap(left: string, right: string): boolean {
-  return (
-    pathContainsOrEquals(path.relative(left, right)) ||
-    pathContainsOrEquals(path.relative(right, left))
-  )
-}
-
-export function claudeSettingsDocument(
-  _node: Extract<AgentNode, { readonly provider: "claude" }>,
-  manifest: AttemptCapabilityManifest
-): string {
-  // Claude already denies writes outside its cwd and explicit allowWrite
-  // roots. Keep the explicit deny set bounded to launcher-owned directories
-  // that can themselves be the cwd. Expanding every immutable installation or
-  // provider directory into denyWrite makes the macOS Seatbelt profile grow
-  // with unrelated user state and eventually exceeds execve's argument limit.
-  const protectedWritePaths = [
-    ...new Set([
-      ...manifest.access.unreadableRoots.filter(
-        (root) => !manifest.access.writableRoots.some((writeRoot) => pathsOverlap(root, writeRoot))
-      ),
-      manifest.access.completionExecutablePath,
-      manifest.trust.control.path,
-      manifest.trust.inbox.path,
-      ...(manifest.lineageRoot === null ? [] : [manifest.lineageRoot])
-    ])
-  ]
-  return JSON.stringify({
-    permissions: {
-      allow: ["Bash"],
-      deny: []
-    },
-    sandbox: {
-      enabled: true,
-      failIfUnavailable: true,
-      autoAllowBashIfSandboxed: true,
-      allowUnsandboxedCommands: false,
-      filesystem: {
-        // Claude's allowWrite does not imply read access when a denyRead
-        // parent protects sibling attempts. Read-write roots must therefore
-        // be reopened explicitly as both capabilities.
-        allowRead: [
-          ...new Set([...manifest.access.readableRoots, ...manifest.access.writableRoots])
-        ],
-        allowWrite: [...manifest.access.writableRoots],
-        denyRead: [...manifest.access.unreadableRoots],
-        denyWrite: protectedWritePaths
-      }
-    }
-  })
 }
 
 export interface PreparedAttemptLaunchCapabilities {
@@ -826,6 +715,7 @@ export async function prepareAttemptLaunchCapabilities(
     if (
       manifest.attempt.attempt !== intent.attempt ||
       manifest.attempt.provider !== node.provider ||
+      manifest.accessIntent !== node.permissions.access ||
       manifest.providerControlRoot !== providerRoot ||
       manifest.lineageRoot !== lineageDirectory ||
       JSON.stringify(manifest.sourceRoots) !== JSON.stringify(sourceRoots) ||
@@ -886,6 +776,7 @@ export async function prepareAttemptLaunchCapabilities(
       attempt: intent.attempt,
       token: intent.token,
       provider: node.provider,
+      accessIntent: node.permissions.access,
       sourceRoots,
       declaredWriteRoots,
       providerControlRoot: providerRoot,
@@ -904,14 +795,14 @@ export async function prepareAttemptLaunchCapabilities(
             {
               kind: "codex-profile" as const,
               path: path.join(draft.trust.control.path, "codex-profile.toml"),
-              content: codexControlProfileDocument(profile as string, draft)
+              content: compileCodexProviderPolicy(node.permissions.access, profile as string, draft)
             }
           ]
         : [
             {
               kind: "claude-settings" as const,
               path: draft.assets.claudeSettingsPath,
-              content: claudeSettingsDocument(node, draft)
+              content: compileClaudeProviderPolicy(node.permissions.access, draft)
             }
           ]
   )
@@ -944,52 +835,6 @@ export async function prepareAttemptLaunchCapabilities(
   }
 }
 
-// The launch command is typed into a PTY whose canonical-mode input buffer
-// caps a line at 1024 bytes, so all provider configuration must live in
-// files; only short flags may appear on the command line itself.
-function claudeArguments(
-  node: Extract<AgentNode, { readonly provider: "claude" }>,
-  source: string | null,
-  settingsPath: string,
-  sessionId: string | null,
-  sessionMode: SessionSpec["mode"]
-) {
-  const args: string[] = [
-    "--safe-mode",
-    "--settings",
-    settingsPath,
-    "--permission-mode",
-    // Native sandbox paths are the attempt boundary. Bypass interactive
-    // permission prompts so ordinary sandboxed commands are never stranded in
-    // a non-interactive pane by inherited user defaults.
-    "bypassPermissions",
-    "--tools",
-    // Bash is the only provider tool. Its subprocesses are constrained by the
-    // fail-closed native sandbox; filesystem tools and Agent/Task delegation
-    // never enter the tool surface.
-    "Bash"
-  ]
-  // --safe-mode disables user hooks, including the herdr hook that reports
-  // Claude session ids, so a saveAs lineage must be launcher-chosen: fresh
-  // and forked sessions get an explicit id, and resume keeps the source id.
-  if (sessionId !== null && sessionMode !== "resume") {
-    args.push("--session-id", sessionId)
-  }
-  if (node.model !== "provider-default") {
-    args.push("--model", node.model)
-  }
-  if (node.effort !== null) {
-    args.push("--effort", node.effort)
-  }
-  if (source !== null) {
-    args.push("--resume", source)
-  }
-  if (sessionMode === "fork") {
-    args.push("--fork-session")
-  }
-  return args
-}
-
 export async function prepareProviderLaunchArguments(
   node: AgentNode,
   state: RunState,
@@ -1009,7 +854,7 @@ export async function prepareProviderLaunchArguments(
         ? (source as string)
         : randomUUID()
     return {
-      args: claudeArguments(
+      args: compileClaudeProviderArguments(
         node,
         source,
         capabilities.manifest.assets.claudeSettingsPath,
@@ -1024,7 +869,7 @@ export async function prepareProviderLaunchArguments(
     throw new TypeError("Codex attempt capability has no profile identity.")
   }
   return {
-    args: codexArguments(node, source, profile, sessionMode),
+    args: compileCodexProviderArguments(node, source, profile, sessionMode),
     providerSessionId: null
   }
 }
@@ -1504,6 +1349,45 @@ export class HerdrSurface {
     await runHerdr(["agent", "prompt", origin.paneId, prompt])
   }
 
+  async inspectAgentAttempt(
+    pane: PaneReference,
+    provider: AgentNode["provider"],
+    expectedSessionId: string | null
+  ): Promise<string> {
+    const observedPane = decodeHerdrJson(
+      await runHerdr(["pane", "get", pane.paneId]),
+      "pane get",
+      decodeHerdrPaneInfoResponse
+    ).result.pane
+    if (
+      observedPane.pane_id !== pane.paneId ||
+      observedPane.workspace_id !== pane.workspaceId ||
+      observedPane.tab_id !== pane.tabId
+    ) {
+      throw new Error("The steering target pane no longer matches the active attempt.")
+    }
+    const details = decodeHerdrJson(
+      await runHerdr(["agent", "get", pane.paneId]),
+      "agent get",
+      decodeHerdrAgentInfoResponse
+    )
+    const sessionId = providerSession(details, provider)
+    if (sessionId === null || (expectedSessionId !== null && sessionId !== expectedSessionId)) {
+      throw new Error("The steering target pane no longer hosts the active provider session.")
+    }
+    return sessionId
+  }
+
+  async promptAgentAttempt(
+    pane: PaneReference,
+    provider: AgentNode["provider"],
+    providerSessionId: string,
+    prompt: string
+  ): Promise<void> {
+    await this.inspectAgentAttempt(pane, provider, providerSessionId)
+    await runHerdr(["agent", "prompt", pane.paneId, prompt])
+  }
+
   private async createRunWorkspace(
     workflow: WorkflowSpec,
     runId: string,
@@ -1673,12 +1557,9 @@ export class HerdrSurface {
     if (
       node.type === "agent" &&
       node.provider === "claude" &&
-      (node.permissions.execution.permissionMode !== "dontAsk" ||
-        node.permissions.extraArgs.length > 0)
+      node.permissions.extraArgs.length > 0
     ) {
-      throw new Error(
-        `Claude node "${intent.nodeId}" must use dontAsk and launcher-owned arguments.`
-      )
+      throw new Error(`Claude node "${intent.nodeId}" must use launcher-owned arguments.`)
     }
     if (node.type === "agent") {
       assertAgentEnvironmentAuthority(node)

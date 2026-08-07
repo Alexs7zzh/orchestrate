@@ -81,14 +81,14 @@ function agent(
     permissions:
       provider === "codex"
         ? {
-            execution: { sandbox: "read-only" },
+            access: "read-only",
             escalation: "deny",
             extraArgs: [],
             inheritEnv: [],
             env: {}
           }
         : {
-            execution: { permissionMode: "dontAsk" },
+            access: "read-only",
             escalation: "deny",
             extraArgs: [],
             inheritEnv: [],
@@ -96,7 +96,7 @@ function agent(
           },
     output: { format: "text", schema: null },
     ...overrides
-  } as AgentNode
+  }
 }
 
 function commandNode(id: string): CommandNode {

@@ -436,7 +436,7 @@
                   "codex"
                 ]
               },
-              "execution": {
+              "access": {
                 "type": "string",
                 "enum": [
                   "read-only",
@@ -448,7 +448,7 @@
               "id",
               "prompt",
               "agent",
-              "execution"
+              "access"
             ],
             "additionalProperties": false
           },
@@ -585,10 +585,11 @@
                   "claude"
                 ]
               },
-              "execution": {
+              "access": {
                 "type": "string",
                 "enum": [
-                  "dont-ask"
+                  "read-only",
+                  "workspace-write"
                 ]
               }
             },
@@ -596,7 +597,7 @@
               "id",
               "prompt",
               "agent",
-              "execution"
+              "access"
             ],
             "additionalProperties": false
           },

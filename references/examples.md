@@ -17,7 +17,9 @@ intended. Two provider sessions are seeded once, keep stable workroom seats, and
 bounded repeat. The implementer response is scheduler-skipped when the review reports no findings;
 the unconditional review result decides whether another round is needed. The seatless
 `settle` command is downstream of every other workroom node and is therefore a valid settlement
-anchor.
+anchor. Findings keep stable IDs across rounds and explicitly move through `new`, `recurring`, and
+`resolved`. If the loop reaches its bound, inspect that trend and the structural assessment before
+deciding whether to revise or extend it; do not extend the loop just to pursue stylistic churn.
 
 ```yaml
 name: persistent-paired-review
@@ -60,11 +62,13 @@ nodes:
       maxAttempts: 1
     gate: none
     agent: codex
-    prompt: Learn paired review. RESPOND classifies each finding AGREE or REJECT.
-      Return READY.
+    prompt: >
+      You are the implementation-side collaborator in a paired review. Verify each substantive
+      finding against the code and explain whether you agree, disagree, or need more evidence.
+      Preserve the reviewer's stable finding IDs. Return READY after learning this role.
     model: provider-default
     effort: medium
-    execution: read-only
+    access: read-only
     escalation: deny
     extraArgs: []
     inheritEnv: []
@@ -90,10 +94,13 @@ nodes:
       maxAttempts: 1
     gate: none
     agent: claude
-    prompt: Learn paired review. REVIEW emits done, hasFindings, and findings. Set
-      done only when clean.
+    prompt: >
+      You are the independent reviewer in a paired review. Report only behaviorally meaningful
+      correctness, security, or contract issues with concrete evidence. Give each finding a stable
+      ID and carry it across rounds as new, recurring, or resolved. Return READY after learning
+      this role.
     model: provider-default
-    execution: dont-ask
+    access: read-only
     escalation: deny
     extraArgs: []
     inheritEnv: []
@@ -125,9 +132,15 @@ nodes:
       maxAttempts: 2
     gate: none
     agent: claude
-    prompt: REVIEW r{{round}}
+    prompt: >
+      Here is the implementer's latest response, when one exists. Review the current implementation
+      and verify the response against the code. Keep each finding's ID stable, mark its lifecycle as
+      new, recurring, or resolved, and cite concrete evidence. Ignore minor style churn unless it
+      changes behavior. From round 2 onward, if substantive findings remain, say whether they point
+      to a shared structural cause instead of adding another isolated patch. Set done only when no
+      substantive finding remains, and set hasFindings only when the implementer must respond.
     model: provider-default
-    execution: dont-ask
+    access: read-only
     escalation: deny
     extraArgs: []
     inheritEnv: []
@@ -144,11 +157,43 @@ nodes:
           findings:
             type: array
             items:
-              type: string
+              type: object
+              properties:
+                id:
+                  type: string
+                severity:
+                  type: string
+                  enum:
+                    - critical
+                    - high
+                    - medium
+                    - low
+                lifecycle:
+                  type: string
+                  enum:
+                    - new
+                    - recurring
+                    - resolved
+                summary:
+                  type: string
+                evidence:
+                  type: array
+                  items:
+                    type: string
+              required:
+                - id
+                - severity
+                - lifecycle
+                - summary
+                - evidence
+              additionalProperties: false
+          structuralAssessment:
+            type: string
         required:
           - done
           - hasFindings
           - findings
+          - structuralAssessment
         additionalProperties: false
     session:
       resume: reviewer
@@ -179,10 +224,14 @@ nodes:
       pointer: /hasFindings
       equals: true
     agent: codex
-    prompt: RESPOND r{{round}}
+    prompt: >
+      Here is another code review from the independent reviewer. What do you think? Verify every
+      substantive finding against the implementation, refer to each one by its stable ID, and say
+      whether you agree, disagree, or need more evidence. Address a shared structural cause when the
+      evidence supports one. Do not make or request changes for style alone.
     model: provider-default
     effort: medium
-    execution: read-only
+    access: read-only
     escalation: deny
     extraArgs: []
     inheritEnv: []
@@ -262,7 +311,7 @@ nodes:
     prompt: Inspect the current change. Return concrete correctness findings.
     model: provider-default
     effort: high
-    execution: read-only
+    access: read-only
     escalation: deny
     extraArgs: []
     inheritEnv: []
@@ -287,7 +336,7 @@ nodes:
     agent: claude
     prompt: Inspect the current change. Return concrete usability findings.
     model: provider-default
-    execution: dont-ask
+    access: read-only
     escalation: deny
     extraArgs: []
     inheritEnv: []
@@ -323,7 +372,7 @@ nodes:
     prompt: Reconcile the reviews into one prioritized decision.
     model: provider-default
     effort: medium
-    execution: read-only
+    access: read-only
     escalation: deny
     extraArgs: []
     inheritEnv: []

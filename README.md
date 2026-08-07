@@ -23,7 +23,10 @@ orchestrate doctor
 ```
 
 `setup` installs the matching CLI, agent skill, and required Herdr plugin, then offers a UI
-preference wizard. `doctor` must report healthy after installation or an upgrade. Use
+preference wizard. The ordinary `doctor` is read-only and must report healthy after installation or
+an upgrade. `doctor --live` is a separate, explicit billed three-node Codex-to-Claude diagnostic;
+it warns before human-mode launch, closes its panes before return, cleans success artifacts, and
+retains failure evidence. Use
 `setup --dry-run`, `setup --defaults`, `setup --no-wizard`, or `setup --remove` when needed.
 Staging, migration, rollback, and uninstall behavior is documented under
 [Installation and upgrades](references/runtime-operations.md#installation-and-upgrades).
@@ -77,12 +80,16 @@ cross-field semantics, provider commands, Herdr, paths, output schemas, worktree
 declared write conflicts before state or panes are created. `run --dry-run` performs the same
 read-only preflight without creating state, worktrees, workspaces, tabs, or panes.
 
-Every owning workflow agent receives a stable prompt frame with the objective, node contract,
-declared inputs, result path, and exact authenticated completion command. Provider-native
+Every owning workflow agent receives a stable collaborator briefing with the objective, approved
+task, human title, exact runtime ID and round, attributed handoffs, result path, and exact
+authenticated completion command. Dynamic handoff lines are visibly quoted so result content
+cannot impersonate prompt authority. Provider-native
 delegation is disabled for workflow nodes: delegated workers are never allowed to inherit or act on
 the owner's completion contract. One typed attempt capability separates read-only launcher control,
 projected read-only inputs, the result/completion outbox, and mode-0700 scratch; providers receive no
-write grant to their common parent. The launcher supplies scratch through `TMPDIR`, `TMP`, and `TEMP`.
+write grant to their common parent. Authored `access` is provider-neutral: focused Codex and Claude
+adapters compile the same `read-only` or `workspace-write` intent into their native boundaries. The
+launcher supplies scratch through `TMPDIR`, `TMP`, and `TEMP`.
 Dynamic `include: path` inputs resolve only after their
 dependencies finish. Work that cannot be enumerated in advance should use a planner with a
 schema-validated result and a digest-bound approval gate before execution, not runtime-generated
@@ -94,6 +101,7 @@ nodes.
 orchestrate status <run-id> --wait
 orchestrate events <run-id> --follow
 orchestrate result <run-id> <node-id>
+orchestrate steer <run-id> <node-id> --message "Please verify the reported edge case."
 orchestrate reconcile <run-id>
 orchestrate pause <run-id>
 orchestrate resume <run-id>
@@ -111,6 +119,12 @@ plugin prompts that owner when a workflow agent becomes blocked or done. Wake-up
 but correctness never depends on delivery: a dormant submission waits
 durably for the next explicit reconcile. There is no per-run background controller.
 
+`steer` delivers one bounded human clarification only to an exact currently running agent attempt
+and provider session. It journals requested and delivered phases using a content digest, not the
+message itself. Steering does not expand the approved task, access, graph, output contract, or
+completion ownership; a crash between delivery and its second journal record is reported as
+ambiguous rather than silently replayed.
+
 The board, `board --json`, and `runs --needs-attention` combine durable run state with live Herdr
 observations. A provider that is blocked, done without a result, or missing its pane needs attention;
 startup `idle` and `unknown` states remain transient. `status --wait` and `events --follow` observe
@@ -120,6 +134,9 @@ Repeats are bounded subgraphs with an objective command or schema-validated JSON
 their bound pauses for an explicit extension or acceptance. A node `when` can select an approved
 branch from a direct JSON dependency: false records scheduler-owned `skipped`, while a missing pointer
 pauses as malformed control data. Persistent repeat sessions advance only after schema-valid success.
+For paired review, keep finding IDs stable and classify them as new, recurring, or resolved with
+severity and evidence. By the second unclean round, test for a structural cause; ignore stylistic
+churn without behavioral impact, and review the trend before extending a bounded loop.
 See [Runtime operations](references/runtime-operations.md) for the detailed lifecycle and recovery
 model.
 

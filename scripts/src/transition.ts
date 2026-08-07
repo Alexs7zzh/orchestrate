@@ -5,7 +5,6 @@ import type {
   CrankEvent,
   EventRecord,
   EventType,
-  InputSpec,
   NodeRunState,
   RepeatSpec,
   RunOrigin,
@@ -18,6 +17,7 @@ import type {
 
 import { approvalPreview, validateWorkflowProvenance } from "./approval.js"
 import { digestGate, digestWorkflow } from "./digest.js"
+import { handoffsReady, resolveHandoffs } from "./handoffs.js"
 import { claudeSessionLineageIdAtCompletion } from "./session-lineage.js"
 import { diffState } from "./state-patch.js"
 import { hasResolvedHistory } from "./state.js"
@@ -195,41 +195,6 @@ function instanceId(templateId: string, round: number): string {
   return `${templateId}--r${round}`
 }
 
-// Resolves a workflow-level input source to the immutable runtime instance
-// whose result the renderer must bind. Round one has no previous result, and
-// consumers outside a repeat see only its final (settled) round.
-export function resolveInputSourceId(
-  state: RunState,
-  workflow: WorkflowSpec,
-  consumerId: string,
-  input: InputSpec
-): string | null {
-  const consumer = state.nodes[consumerId]
-  if (consumer === undefined) {
-    throw new Error(`Unknown input consumer "${consumerId}".`)
-  }
-  const sourceRepeat = repeatForTemplate(workflow, input.from)
-  if (input.round === "previous") {
-    if (consumer.repeatId === null || consumer.round === null || consumer.round === 1) {
-      return null
-    }
-    if (sourceRepeat?.id !== consumer.repeatId) {
-      throw new Error(
-        `Previous-round input "${input.from}" is outside repeat "${consumer.repeatId}".`
-      )
-    }
-    return instanceId(input.from, consumer.round - 1)
-  }
-  if (sourceRepeat === undefined) {
-    return input.from
-  }
-  if (consumer.repeatId === sourceRepeat.id && consumer.round !== null) {
-    return instanceId(input.from, consumer.round)
-  }
-  const repeatState = state.repeats[sourceRepeat.id]
-  return repeatState?.status === "completed" ? instanceId(input.from, repeatState.round) : null
-}
-
 export function resolveConditionSourceId(
   state: RunState,
   workflow: WorkflowSpec,
@@ -298,8 +263,9 @@ function dependenciesSatisfied(
   node: NodeRunState,
   template: WorkflowNode
 ): boolean {
-  return template.needs.every((dependency) =>
-    dependencySatisfied(state, workflow, node, dependency)
+  return (
+    template.needs.every((dependency) => dependencySatisfied(state, workflow, node, dependency)) &&
+    handoffsReady(resolveHandoffs(workflow, state, node.id, template.inputs))
   )
 }
 
@@ -1689,6 +1655,41 @@ export function transition(
           }
         }
       }
+      break
+    }
+    case "steer-requested":
+    case "steer-delivered": {
+      const node = state.nodes[event.nodeId]
+      const attempt = node?.attempts.at(-1)
+      if (
+        node?.type !== "agent" ||
+        node.status !== "running" ||
+        attempt?.status !== "running" ||
+        attempt.attempt !== event.attempt ||
+        attempt.pane === null ||
+        !isDeepStrictEqual(attempt.pane, event.pane) ||
+        (attempt.providerSessionId !== null &&
+          attempt.providerSessionId !== event.providerSessionId) ||
+        node.provider !== event.provider
+      ) {
+        throw new Error(`Steering target "${event.nodeId}" is not its exact active attempt.`)
+      }
+      emit(
+        event.type === "steer-requested" ? "steering.requested" : "steering.delivered",
+        `${event.type === "steer-requested" ? "Requested" : "Delivered"} steering for node "${node.id}" attempt ${attempt.attempt}.`,
+        (current) => current,
+        {
+          nodeId: node.id,
+          data: {
+            attempt: event.attempt,
+            provider: event.provider,
+            pane: event.pane,
+            providerSessionId: event.providerSessionId,
+            contentDigest: event.contentDigest,
+            byteLength: event.byteLength
+          }
+        }
+      )
       break
     }
   }

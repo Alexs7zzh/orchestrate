@@ -27,6 +27,8 @@ export const EVENT_SEVERITIES = {
   "node.skipped": "progress",
   "node.failed": "milestone",
   "node.retrying": "milestone",
+  "steering.requested": "progress",
+  "steering.delivered": "progress",
   "node.cancelled": "milestone",
   "gate.opened": "attention",
   "gate.approved": "progress",

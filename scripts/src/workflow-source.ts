@@ -710,16 +710,16 @@ function normalizeWorkflow(
       )
     }
     const permissions = {
-      execution: provider === "codex" ? { sandbox: node.execution } : { permissionMode: "dontAsk" },
+      access: node.access,
       escalation: nodeValue("escalation", "deny", "agent.escalation.deny"),
       extraArgs: nodeValue("extraArgs", [], "agent.extra-args.empty"),
       inheritEnv: nodeValue("inheritEnv", [], "agent.inherit-env.empty"),
       env: nodeValue("env", {}, "agent.env.empty")
     }
     markTree(
-      `${irBase}/permissions/execution`,
-      permissions.execution,
-      expanded("execution-profile", `${sourceBase}/execution`)
+      `${irBase}/permissions/access`,
+      permissions.access,
+      expanded("access-profile", `${sourceBase}/access`)
     )
     markTree(
       `${irBase}/permissions/escalation`,

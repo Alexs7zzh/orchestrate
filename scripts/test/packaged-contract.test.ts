@@ -78,7 +78,7 @@ function agentWorkflow(): WorkflowSpec {
         prompt: "Complete the result contract.",
         session: { mode: "fresh", from: null, saveAs: null },
         permissions: {
-          execution: { sandbox: "read-only" },
+          access: "read-only",
           escalation: "deny",
           extraArgs: [],
           inheritEnv: [],
@@ -500,7 +500,7 @@ describe("packaged CLI", () => {
       },
       permissions: {
         ...agentBase.permissions,
-        execution: { sandbox: "workspace-write" as const }
+        access: "workspace-write" as const
       }
     }
     const later: Extract<AgentNode, { readonly provider: "claude" }> = {
@@ -510,7 +510,7 @@ describe("packaged CLI", () => {
       retry: { maxAttempts: 3 },
       provider: "claude" as const,
       permissions: {
-        execution: { permissionMode: "dontAsk" as const },
+        access: "read-only" as const,
         escalation: "deny" as const,
         extraArgs: [],
         inheritEnv: [],
@@ -609,6 +609,7 @@ describe("packaged CLI", () => {
       stop: ["stop", "invalid!", "extra", "--json"],
       hold: ["hold", "invalid!", "--json"],
       release: ["release", "invalid!", "--json"],
+      steer: ["steer", "invalid!", "node", "--message", "clarify", "--json"],
       revise: ["revise", "--json"],
       "node-done": ["node-done", "invalid!", "--json"],
       "node-exit": ["node-exit", "invalid!", "--json"],

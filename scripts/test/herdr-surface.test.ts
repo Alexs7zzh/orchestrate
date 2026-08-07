@@ -38,6 +38,7 @@ import {
   injectAfterAgentPromptForTests,
   injectBeforeProviderBoundaryForTests,
   injectProviderAncestorInspectionForTests,
+  prepareAttemptLaunchCapabilities,
   removeWorkflowWorktrees,
   setAgentSessionTimeoutForTests
 } from "../src/herdr-surface.js"
@@ -99,7 +100,7 @@ function agent(): Extract<AgentNode, { readonly provider: "codex" }> {
     prompt: "Review the work.",
     session: { mode: "fresh", from: null, saveAs: "review-session" },
     permissions: {
-      execution: { sandbox: "read-only" },
+      access: "read-only",
       escalation: "deny",
       extraArgs: [],
       inheritEnv: [],
@@ -115,7 +116,7 @@ function claudeAgent(): Extract<AgentNode, { readonly provider: "claude" }> {
     provider: "claude",
     session: { mode: "fresh", from: null, saveAs: null },
     permissions: {
-      execution: { permissionMode: "dontAsk" },
+      access: "read-only",
       escalation: "deny",
       extraArgs: [],
       inheritEnv: [],
@@ -961,6 +962,34 @@ describe("herdr surface", () => {
     }
   })
 
+  test("rejects reuse when provider-neutral access intent changes with identical write roots", async () => {
+    const readOnly = agent()
+    const runState = state(readOnly.id)
+    const spawnIntent = intent(readOnly.id)
+    await prepareAttemptLaunchCapabilities(
+      workflow(readOnly),
+      readOnly,
+      runState,
+      spawnIntent,
+      temporaryRoot,
+      null
+    )
+    const workspaceWrite = {
+      ...readOnly,
+      permissions: { ...readOnly.permissions, access: "workspace-write" as const }
+    }
+    await expect(
+      prepareAttemptLaunchCapabilities(
+        workflow(workspaceWrite),
+        workspaceWrite,
+        runState,
+        spawnIntent,
+        temporaryRoot,
+        null
+      )
+    ).rejects.toThrow("Existing attempt capability does not match the planned provider launch")
+  })
+
   test("rejects persisted control environment for both providers before Herdr launch", async () => {
     const codex = agent()
     const claude = claudeAgent()
@@ -1115,7 +1144,7 @@ describe("herdr surface", () => {
       workspace: { ...workspace(), writes: ["allowed/**"] },
       permissions: {
         ...agent().permissions,
-        execution: { sandbox: "workspace-write" as const }
+        access: "workspace-write" as const
       }
     }
     const runState = state(node.id)
@@ -1165,7 +1194,7 @@ describe("herdr surface", () => {
       workspace: { ...workspace(), path: protectedRoot, writes: ["**"] },
       permissions: {
         ...agent().permissions,
-        execution: { sandbox: "workspace-write" as const }
+        access: "workspace-write" as const
       }
     }
     const claude = {
@@ -1177,7 +1206,7 @@ describe("herdr surface", () => {
       },
       permissions: {
         ...claudeAgent().permissions,
-        execution: { permissionMode: "bypassPermissions" as const }
+        access: "workspace-write" as const
       }
     }
     for (const node of [codex, claude]) {
@@ -1215,7 +1244,7 @@ describe("herdr surface", () => {
       workspace: { ...workspace(), path: canonicalControlParent, writes: ["source/**"] },
       permissions: {
         ...agent().permissions,
-        execution: { sandbox: "workspace-write" as const }
+        access: "workspace-write" as const
       }
     }
     const claude = {
@@ -1224,7 +1253,8 @@ describe("herdr surface", () => {
       workspace: {
         ...workspace(),
         writes: [path.join(canonicalClaudeConfig, "projects", "**")]
-      }
+      },
+      permissions: { ...claudeAgent().permissions, access: "workspace-write" as const }
     }
     for (const node of [codex, claude]) {
       await expect(
@@ -1259,7 +1289,7 @@ describe("herdr surface", () => {
       workspace: { ...workspace(), writes: ["allowed/**"] },
       permissions: {
         ...agent().permissions,
-        execution: { sandbox: "workspace-write" as const }
+        access: "workspace-write" as const
       }
     }
     const later = {
@@ -1289,15 +1319,8 @@ describe("herdr surface", () => {
     ).not.toContain("agent start")
   })
 
-  test("rejects direct-launch Claude mode and argument adversaries before Herdr access", async () => {
+  test("rejects direct-launch Claude argument adversaries before Herdr access", async () => {
     for (const node of [
-      {
-        ...claudeAgent(),
-        permissions: {
-          ...claudeAgent().permissions,
-          execution: { permissionMode: "bypassPermissions" as const }
-        }
-      },
       {
         ...claudeAgent(),
         permissions: {
@@ -1314,7 +1337,7 @@ describe("herdr surface", () => {
           prompt: "Attempt authority expansion.",
           placement: placement(node.id)
         })
-      ).rejects.toThrow("must use dontAsk and launcher-owned arguments")
+      ).rejects.toThrow("must use launcher-owned arguments")
     }
     expect(
       await Bun.file(logPath)
@@ -1336,7 +1359,7 @@ describe("herdr surface", () => {
       workspace: { ...workspace(), path: providerLink, writes: ["src/**"] },
       permissions: {
         ...agent().permissions,
-        execution: { sandbox: "workspace-write" as const }
+        access: "workspace-write" as const
       }
     }
     injectBeforeProviderBoundaryForTests(async () => {
@@ -1370,7 +1393,7 @@ describe("herdr surface", () => {
       workspace: { ...workspace(), writes: ["linked-write/**"] },
       permissions: {
         ...agent().permissions,
-        execution: { sandbox: "workspace-write" as const }
+        access: "workspace-write" as const
       }
     }
     await expect(
@@ -1402,12 +1425,16 @@ describe("herdr surface", () => {
                   workspace: { ...workspace(), writes: ["allowed/**"] },
                   permissions: {
                     ...agent().permissions,
-                    execution: { sandbox: "workspace-write" as const }
+                    access: "workspace-write" as const
                   }
                 }
               : {
                   ...claudeAgent(),
-                  workspace: { ...workspace(), writes: ["allowed/**"] }
+                  workspace: { ...workspace(), writes: ["allowed/**"] },
+                  permissions: {
+                    ...claudeAgent().permissions,
+                    access: "workspace-write" as const
+                  }
                 }
           injectProviderAncestorInspectionForTests((_nodeId, ancestor) => {
             if (ancestor !== failedAncestor) {
@@ -1446,12 +1473,16 @@ describe("herdr surface", () => {
               workspace: { ...workspace(), writes: ["blocked/target/**"] },
               permissions: {
                 ...agent().permissions,
-                execution: { sandbox: "workspace-write" as const }
+                access: "workspace-write" as const
               }
             }
           : {
               ...claudeAgent(),
-              workspace: { ...workspace(), writes: ["blocked/target/**"] }
+              workspace: { ...workspace(), writes: ["blocked/target/**"] },
+              permissions: {
+                ...claudeAgent().permissions,
+                access: "workspace-write" as const
+              }
             }
       injectPathInspectionForTests((ancestor) => {
         if (ancestor === candidate) {
@@ -1615,6 +1646,35 @@ describe("herdr surface", () => {
     const log = await Bun.file(logPath).text()
     expect(log).toContain("agent get origin-pane")
     expect(log).toContain("agent prompt origin-pane The workflow completed.")
+  })
+
+  test("audits the exact steering pane and provider session before prompting an attempt", async () => {
+    const surface = new HerdrSurface()
+    const pane = {
+      workspaceId: "w1",
+      tabId: "t1",
+      paneId: "p1",
+      group: "run",
+      surface: "split" as const
+    }
+    await expect(
+      surface.inspectAgentAttempt({ ...pane, tabId: "t-moved" }, "codex", "session-1")
+    ).rejects.toThrow("The steering target pane no longer matches the active attempt.")
+    await expect(
+      surface.inspectAgentAttempt({ ...pane, paneId: "p-stale" }, "codex", "session-1")
+    ).rejects.toThrow("The steering target pane no longer matches the active attempt.")
+    await expect(surface.inspectAgentAttempt(pane, "codex", "session-replaced")).rejects.toThrow(
+      "The steering target pane no longer hosts the active provider session."
+    )
+    await expect(
+      surface.promptAgentAttempt(pane, "codex", "session-replaced", "steer message")
+    ).rejects.toThrow("The steering target pane no longer hosts the active provider session.")
+    expect(await Bun.file(logPath).text()).not.toContain("agent prompt p1")
+
+    await expect(surface.inspectAgentAttempt(pane, "codex", null)).resolves.toBe("session-1")
+    await expect(surface.inspectAgentAttempt(pane, "codex", "session-1")).resolves.toBe("session-1")
+    await surface.promptAgentAttempt(pane, "codex", "session-1", "steer message")
+    expect(await Bun.file(logPath).text()).toContain("agent prompt p1 steer message")
   })
 
   test("distinguishes a non-agent origin from invalid or failed Herdr observation", async () => {
@@ -3003,7 +3063,7 @@ describe("herdr surface", () => {
         workspace: { ...workspace(), writes: ["allowed/**"] },
         permissions: {
           ...agent().permissions,
-          execution: { sandbox: "workspace-write" as const }
+          access: "workspace-write" as const
         }
       }
       const runState = state(node.id)

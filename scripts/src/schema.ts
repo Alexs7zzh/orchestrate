@@ -169,13 +169,13 @@ const SourceAgentCommonFields = {
 const CodexAgentSourceSchema = Schema.Struct({
   ...SourceAgentCommonFields,
   agent: Schema.Literal("codex"),
-  execution: Schema.Literals(["read-only", "workspace-write"])
+  access: Schema.Literals(["read-only", "workspace-write"])
 })
 
 const ClaudeAgentSourceSchema = Schema.Struct({
   ...SourceAgentCommonFields,
   agent: Schema.Literal("claude"),
-  execution: Schema.Literal("dont-ask"),
+  access: Schema.Literals(["read-only", "workspace-write"]),
   escalation: Schema.optionalKey(Schema.Literal("deny")),
   extraArgs: Schema.optionalKey(Schema.Array(Schema.String).check(Schema.isMaxLength(0)))
 })
@@ -319,24 +319,8 @@ const PermissionsCommonFields = {
   env: EnvironmentRecord
 }
 
-const CodexPermissionsSchema = Schema.Struct({
-  execution: Schema.Struct({
-    sandbox: Schema.Literals(["read-only", "workspace-write"])
-  }),
-  ...PermissionsCommonFields
-})
-
-const ClaudePermissionModeSchema = Schema.Literals([
-  "acceptEdits",
-  "auto",
-  "bypassPermissions",
-  "dontAsk",
-  "manual",
-  "plan"
-])
-
-const ClaudePermissionsSchema = Schema.Struct({
-  execution: Schema.Struct({ permissionMode: ClaudePermissionModeSchema }),
+const AgentPermissionsSchema = Schema.Struct({
+  access: Schema.Literals(["read-only", "workspace-write"]),
   ...PermissionsCommonFields
 })
 
@@ -379,13 +363,13 @@ const AgentFields = {
 export const CodexAgentNodeSchema = Schema.Struct({
   ...AgentFields,
   provider: Schema.Literal("codex"),
-  permissions: CodexPermissionsSchema
+  permissions: AgentPermissionsSchema
 })
 
 export const ClaudeAgentNodeSchema = Schema.Struct({
   ...AgentFields,
   provider: Schema.Literal("claude"),
-  permissions: ClaudePermissionsSchema
+  permissions: AgentPermissionsSchema
 })
 
 export const AgentNodeSchema = Schema.Union([CodexAgentNodeSchema, ClaudeAgentNodeSchema])
@@ -726,7 +710,7 @@ const ExpandedFieldOriginSchema = Schema.Struct({
     "retry-map",
     "session-scalar",
     "session-map",
-    "execution-profile"
+    "access-profile"
   ]),
   sourcePath: JsonPointer,
   location: SourceLocationSchema
@@ -931,6 +915,14 @@ const AttemptData = Schema.Struct({ attempt: PositiveInteger })
 const SpawnData = Schema.Struct({ intentId: NonEmptyString, attempt: PositiveInteger })
 const DigestData = Schema.Struct({ digest: NonEmptyString })
 const HoldScope = Schema.Literals(["template", "instance"])
+const SteeringData = Schema.Struct({
+  attempt: PositiveInteger,
+  provider: Schema.Literals(["codex", "claude"]),
+  pane: PaneReferenceSchema,
+  providerSessionId: NonEmptyString,
+  contentDigest: Sha256,
+  byteLength: NonNegativeInteger
+})
 
 export const EventRecordSchema = Schema.Union([
   eventWithoutData("run.started"),
@@ -970,6 +962,8 @@ export const EventRecordSchema = Schema.Union([
     Schema.Struct({ attempt: PositiveInteger, exitCode: Schema.NullOr(Schema.Int) })
   ),
   nodeEventWithData("node.retrying", Schema.Struct({ nextAttempt: PositiveInteger })),
+  nodeEventWithData("steering.requested", SteeringData),
+  nodeEventWithData("steering.delivered", SteeringData),
   nodeEventWithoutData("node.cancelled"),
   nodeEventWithData("gate.opened", DigestData),
   nodeEventWithData("gate.approved", DigestData),

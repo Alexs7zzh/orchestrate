@@ -126,6 +126,9 @@ esac
   test("stages assets, flips stable links, detects agents, and is idempotent", async () => {
     const first = await runSetup({ invokedPath: executable, remove: false, dryRun: false })
     expect(
+      (await lstat(path.join(home, ".local", "state", "orchestrate"))).isDirectory()
+    ).toBeTrue()
+    expect(
       first.steps.some((step) => step.action === "plugin-link" && step.status === "done")
     ).toBeTrue()
     const share = path.join(home, ".local", "share", "orchestrate")

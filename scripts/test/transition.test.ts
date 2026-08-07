@@ -12,11 +12,11 @@ import type {
 
 import { reconcileApprovedRevisionState } from "../src/crank.js"
 import { digestGate, digestWorkflow } from "../src/digest.js"
+import { resolveInputSourceId } from "../src/handoffs.js"
 import { runNeedsAttention } from "../src/state.js"
 import {
   createInitialRunState,
   resolveConditionSourceId,
-  resolveInputSourceId,
   transition,
   type TransitionContext
 } from "../src/transition.js"
@@ -72,7 +72,7 @@ function agent(id: string, overrides: Partial<AgentNode> = {}): AgentNode {
     prompt: id,
     session: { mode: "fresh", from: null, saveAs: null },
     permissions: {
-      execution: { sandbox: "read-only" },
+      access: "read-only",
       escalation: "deny",
       extraArgs: [],
       inheritEnv: [],
@@ -80,7 +80,7 @@ function agent(id: string, overrides: Partial<AgentNode> = {}): AgentNode {
     },
     output: { format: "text", schema: null },
     ...overrides
-  } as AgentNode
+  }
 }
 
 function workflow(
@@ -640,6 +640,37 @@ describe("pure crank transition", () => {
     expect(allObserved.state.nodes.first?.attempts.at(-1)?.pane?.paneId).toBe("pane:first:1")
   })
 
+  test("binds steering audit transitions to the full pane and persisted provider session", () => {
+    const spec = workflow([agent("review")])
+    const started = start(spec, context("review"))
+    const observed = observe(started.state, spec, "review", "session-1")
+    const attempt = observed.state.nodes.review?.attempts.at(-1)
+    if (attempt?.pane === null || attempt?.pane === undefined) {
+      throw new Error("missing observed review pane")
+    }
+    const pane = attempt.pane
+    const steering = {
+      type: "steer-requested" as const,
+      nodeId: "review",
+      attempt: 1,
+      provider: "codex" as const,
+      pane,
+      providerSessionId: "session-1",
+      contentDigest: "a".repeat(64),
+      byteLength: 1
+    }
+    expect(() =>
+      crank(observed.state, spec, {
+        ...steering,
+        pane: { ...pane, group: "forged-group" }
+      })
+    ).toThrow("is not its exact active attempt")
+    expect(() =>
+      crank(observed.state, spec, { ...steering, providerSessionId: "session-2" })
+    ).toThrow("is not its exact active attempt")
+    expect(crank(observed.state, spec, steering).events.at(-1)?.type).toBe("steering.requested")
+  })
+
   test("refuses to plan a pane without caller-prepared durable paths and a random token", () => {
     const spec = workflow([command("work")])
     expect(() => start(spec)).toThrow('Prepared execution content is required for node "work"')
@@ -1195,7 +1226,7 @@ describe("pure crank transition", () => {
     expect(continued.state.nodes["check--r3"]?.status).toBe("running")
     expect(continued.state.repeatRoundExtensions.loop).toBe(2)
     expect(
-      resolveInputSourceId(continued.state, spec, "check--r3", {
+      resolveInputSourceId(spec, continued.state, "check--r3", {
         from: "check",
         as: "Previous check",
         include: "content",
@@ -1238,7 +1269,7 @@ describe("pure crank transition", () => {
     expect(accepted.state.nodes["check--r1"]?.resultPath).toBe("nodes/check--r1/output.log")
     expect(accepted.state.nodes["check--r1"]?.result).toBe("check output\n")
     expect(
-      resolveInputSourceId(accepted.state, spec, "after", {
+      resolveInputSourceId(spec, accepted.state, "after", {
         from: "check",
         as: "Final check",
         include: "path",

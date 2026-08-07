@@ -37,6 +37,7 @@ async function compileCapability() {
       attempt: 1,
       token: TOKEN,
       provider: "codex",
+      accessIntent: "read-only",
       sourceRoots: [temporaryRoot],
       declaredWriteRoots: [],
       providerControlRoot,

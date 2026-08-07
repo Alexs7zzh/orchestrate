@@ -7,6 +7,7 @@ the mechanisms described here.
 ## In this reference
 
 - [State and crank](#state-and-crank)
+- [Steering](#steering-a-running-agent)
 - [Scheduling](#scheduling)
 - [Repeats and limits](#repeats-and-limits)
 - [Conditional nodes and skipped outcomes](#conditional-nodes-and-skipped-outcomes)
@@ -54,6 +55,15 @@ status or close label-matched tabs. One node's ambiguous or pending spawn is sur
 independent planned intents of the same reconciliation have started; it never starves ready work
 outside that node's declared workroom. A seatful observation failure blocks later seat launches in
 the same workroom for that reconciliation because the workroom's physical occupancy is unresolved.
+
+The rendered content begins with a stable collaborator briefing: workflow objective, approved task,
+human title, exact runtime node ID and repeat round, followed by resolved handoffs. One neutral
+resolver supplies readiness, projected input artifacts, and prompt rendering, so all three bind a
+template input to the same immutable runtime source. Each handoff names the source title, runtime
+ID, provider or command kind, round, status, and declared format. Dynamic results and paths are
+prefixed line by line, including empty lines, so they cannot impersonate briefing headings or the
+final completion contract. `include: path` identifies the value as a projected path and separately
+preserves the source result format.
 
 New agent panes may briefly exist before their interactive shell is ready; the surface retries only
 Herdr's explicit `agent_pane_busy` readiness response within a fixed bound. Other unambiguous start
@@ -116,22 +126,24 @@ tree. The run is dormant until a later explicit reconcile consumes them. `status
 
 ### Provider sandbox boundary
 
-Agent launch compiles one immutable `AttemptCapabilityManifest` for the token. It records four
+Agent launch compiles one immutable `AttemptCapabilityManifest` for the token, including the
+provider-neutral `read-only` or `workspace-write` access intent. It records four
 pairwise-distinct canonical directory identities: launcher-owned provider-readable/non-writable
 `control/`, launcher-projected provider-readable/non-writable `inbox/`, provider-writable `outbox/`,
 and provider-writable mode-0700 `scratch/`. Policies grant only the exact read/write identities and
 never their common attempt parent. `control/` contains the completion contract, provider policy,
 and pinned provider relay; `outbox/` is reserved for `result.txt` and `completion.json`.
-Codex expresses that boundary as a launcher-owned permission profile. Claude expresses
-it as a launcher-owned settings file inside `control/` — provider
+One focused policy adapter per provider consumes that same manifest. Codex expresses the boundary
+as a launcher-owned permission profile. Claude expresses it as a launcher-owned settings file
+inside `control/` — provider
 configuration never rides the typed launch line, whose PTY input buffer is capped — and runs from
 the exact inbox for an untracked fresh session or from its exact launcher-owned lineage
-project for session-bearing work. The authored `dontAsk` contract is compiled into a launcher-owned
-`bypassPermissions` invocation with `--safe-mode`, only Bash exposed, and a required native sandbox
-whose unsandboxed fallback is disabled. This removes interactive permission stalls without exposing
-Agent/Task delegation or built-in filesystem tools. Only canonical declared source prefixes are
-added as sandbox writes; each write root is also reopened for reads beneath the denied submission
-parent. Both providers
+project for session-bearing work. Claude's unattended internal invocation uses
+`bypassPermissions` with `--safe-mode`, only Bash exposed, and a required native sandbox whose
+unsandboxed fallback is disabled; authors do not select that provider-native mode. This removes
+interactive permission stalls without exposing Agent/Task delegation or built-in filesystem tools.
+Only canonical declared source prefixes are added as sandbox writes for `workspace-write`; each
+write root is also reopened for reads beneath the denied submission parent. Both providers
 receive launcher-owned `TMPDIR`, `TMP`, and `TEMP` values naming an existing mode-0700 `scratch/`
 directory inside the exact token submission directory. This permits attempt-local intermediate
 files without granting ambient temporary-directory or undeclared workspace writes. Provider launch
@@ -171,7 +183,9 @@ both providers receive the canonical identity of the exact attempt scratch direc
 roots are canonicalized before use; a pathname whose identity changes after preparation, a declared
 write prefix with a symlink component, or any ancestor inspection failure is rejected with node, declared pattern,
 candidate, inspected ancestor, and errno context before any
-Herdr workspace, tab, or pane creation. Existing Git
+Herdr workspace, tab, or pane creation. Adapter compilation is size-bounded and verifies that
+unreadable authority roots, immutable provider configuration, the completion executable, and the
+declared access intent cannot be weakened by a provider-specific projection. Existing Git
 worktree targets are reused only when their canonical top level, common repository, and exact
 expanded branch all match the runtime declaration.
 
@@ -184,6 +198,23 @@ projection, inbox/control immutability, producer isolation, delegation ownership
 and the declared workspace boundary. They invoke authenticated provider CLIs and are therefore
 gated out of ordinary deterministic verification.
 
+### Live doctor diagnostic
+
+Plain `doctor` only inspects Herdr, plugin registration, provider launch identity, existing state
+access, and installed build identity. It does not create the state root or start a workflow.
+`doctor --live` is an explicit billed diagnostic: it suppresses UI and runs exactly one read-only
+Codex node, one read-only Claude node consuming the authenticated Codex result, and one downstream
+`/usr/bin/true` command. Concurrency one, one attempt per node, a three-start fuse, a temporary
+no-VCS workspace, and a 180-second terminal deadline bound the exercise.
+
+Before returning, the failure path attempts to commit `stop` for an active diagnostic and the
+shutdown path closes every pane recorded in any readable pre-stop or post-stop state. It rechecks
+each exact pane and retries closure three times. A successful diagnostic is reported `cleaned` only
+after every pane is confirmed absent and the run and workspace are removed. A diagnostic failure
+retains its durable run and workspace evidence after pane quiescence. A failed stop transition or
+an unconfirmed pane closure is surfaced as a separate failed check; neither is silently described
+as successful cleanup.
+
 ### Origin handoff
 
 When launch occurs inside a Herdr agent pane, the run records the origin pane plus the launching
@@ -195,11 +226,34 @@ The provider node receives neither Herdr control authority nor authoritative sta
 foreground reconcile may also prompt the exact current wake-owning master session
 when the workflow completes or reaches actionable non-human attention: exhausted failure, gate,
 downstream hold set at completion, revision, fuse, or round limit. Human pause and stop are
-intentionally silent because their initiator already knows. The handoff contains only bounded
-orchestrator-generated status and commands; node failure text remains in durable results. This
+intentionally silent because their initiator already knows. A valid-submission wake says that
+another workflow agent left authenticated work pending reconciliation; blocked and result-missing
+wakes say that nothing valid is pending and ask for inspection. The handoff contains only bounded,
+conversational orchestrator-generated status and commands; no untrusted result or failure text is
+embedded. This
 direct prompt and its notification fallback are best effort. There is no delivery outbox or
 exactly-once guarantee, so a
 crash may lose or duplicate presentation without changing authoritative run state.
+
+### Steering a running agent
+
+`steer` takes the run lock and reloads the authoritative workflow and run. It accepts only the
+latest running attempt of a running agent node. Herdr first verifies the exact recorded pane,
+workspace, tab, provider, and persisted provider-session identity; the same session is rechecked at
+the delivery boundary. The supplied UTF-8 message is nonempty and at most 64 KiB, and every line is
+visibly attributed beneath a human-steering heading. The frame restates that the message cannot
+change approved access, graph, dependencies, output schema, or completion ownership.
+
+The first atomic transition journals `steering.requested` with the exact attempt and a content
+digest but not the content or completion token. Herdr then prompts that exact provider session. A
+second atomic transition journals `steering.delivered`. A crash or failure between those operations
+can leave requested-only even if external delivery is uncertain; a failure after delivery but
+before the second commit is reported as explicitly ambiguous. There is no automatic replay.
+
+The owning-node environment check in the CLI is only defense in depth because a subprocess can
+unset it. Workflow agents lack the authoritative run-state and Herdr-control paths needed to pass
+the real exact-state/session boundary; steering remains a human/master operation rather than a new
+node capability.
 
 ## Scheduling
 
@@ -299,8 +353,8 @@ that condition, or the run is explicitly stopped. For a repeat member with prior
 approval may change only `when` on the paused template; the current and future unstarted instances
 use the revision while settled earlier instances remain immutable. This is the precise fail-closed
 behavior: it never silently chooses either branch. A skipped dependency releases dependents unless
-held; content inputs render `[skipped]`, while path inputs are invalid because skipped nodes have no
-result file.
+held; content inputs render `[skipped by scheduler]`, while path inputs are invalid because skipped
+nodes have no result file.
 Status, result JSON, events, and the board expose the skipped state and reason.
 A skipped seatful node has no attempt and performs no Herdr action: it does not open a workroom,
 replace a provider, close a parked pane, or otherwise consume its seat. It may still satisfy a
@@ -413,8 +467,9 @@ not pane execution.
 
 `setup` stages one matching CLI, skill, and Herdr plugin under
 `~/.local/share/orchestrate/current`, links the CLI into `~/.local/bin`, and optionally runs the UI
-preference wizard. Plugin registration is required. A link failure removes the new stage and leaves
-the prior installation selected; an unlink failure makes removal fail rather than reporting success.
+preference wizard. It also creates the state directories needed by the read-only post-install
+`doctor` check. Plugin registration is required. A link failure removes the new stage and leaves the
+prior installation selected; an unlink failure makes removal fail rather than reporting success.
 If Herdr cannot confirm link or rollback, the versioned stage remains as a recoverable plugin target
 while stable CLI and skill links remain unchanged. `doctor` reports missing or unqueryable
 registration as unhealthy.

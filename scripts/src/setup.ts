@@ -20,7 +20,13 @@ import os from "node:os"
 import path from "node:path"
 
 import { bundledAssets } from "./assets.js"
-import { runDirectory, runStatePath, runsRoot, runtimeBuild } from "./state.js"
+import {
+  ensureStateDirectories,
+  runDirectory,
+  runStatePath,
+  runsRoot,
+  runtimeBuild
+} from "./state.js"
 
 export interface SetupStep {
   readonly action: string
@@ -705,5 +711,8 @@ export async function runSetup(options: {
     status: "done",
     detail: `kept ${kept.toSorted().join(", ")}`
   })
+  // Plain doctor is deliberately read-only. Setup therefore owns creation of
+  // the state directories that its post-install health check expects.
+  await ensureStateDirectories()
   return { remove: false, dryRun: false, build: runtimeBuild(), steps }
 }

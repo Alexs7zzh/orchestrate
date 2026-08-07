@@ -67,7 +67,7 @@ function agent(
         ...common,
         provider,
         permissions: {
-          execution: { sandbox: "read-only" },
+          access: "read-only",
           escalation: "deny",
           extraArgs: [],
           inheritEnv: [],
@@ -78,7 +78,7 @@ function agent(
         ...common,
         provider,
         permissions: {
-          execution: { permissionMode: "manual" },
+          access: "read-only",
           escalation: "ask-user",
           extraArgs: [],
           inheritEnv: [],

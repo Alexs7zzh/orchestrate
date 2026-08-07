@@ -113,7 +113,7 @@ function workflowAgent(
     prompt: `Work on ${id}.`,
     session: { mode: "fresh", from: null, saveAs: null },
     permissions: {
-      execution: { sandbox: "read-only" },
+      access: "read-only",
       escalation: "deny",
       extraArgs: [],
       inheritEnv: [],

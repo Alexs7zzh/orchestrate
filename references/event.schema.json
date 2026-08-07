@@ -1196,6 +1196,156 @@
         "type": {
           "type": "string",
           "enum": [
+            "steering.requested"
+          ]
+        },
+        "nodeId": {
+          "type": "string",
+          "allOf": [
+            {
+              "minLength": 1
+            },
+            {
+              "pattern": "^[a-z0-9][a-z0-9-]*$"
+            }
+          ]
+        },
+        "data": {
+          "$ref": "#/$defs/Objects_1"
+        }
+      },
+      "required": [
+        "runtimeVersion",
+        "sequence",
+        "timestamp",
+        "runId",
+        "message",
+        "patch",
+        "type",
+        "nodeId",
+        "data"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "runtimeVersion": {
+          "type": "string",
+          "allOf": [
+            {
+              "minLength": 1
+            }
+          ]
+        },
+        "sequence": {
+          "type": "integer",
+          "allOf": [
+            {
+              "exclusiveMinimum": 0
+            }
+          ]
+        },
+        "timestamp": {
+          "type": "string",
+          "allOf": [
+            {
+              "minLength": 1
+            }
+          ]
+        },
+        "runId": {
+          "type": "string",
+          "allOf": [
+            {
+              "minLength": 1
+            }
+          ]
+        },
+        "message": {
+          "type": "string"
+        },
+        "patch": {
+          "$ref": "#/$defs/Arrays_"
+        },
+        "type": {
+          "type": "string",
+          "enum": [
+            "steering.delivered"
+          ]
+        },
+        "nodeId": {
+          "type": "string",
+          "allOf": [
+            {
+              "minLength": 1
+            },
+            {
+              "pattern": "^[a-z0-9][a-z0-9-]*$"
+            }
+          ]
+        },
+        "data": {
+          "$ref": "#/$defs/Objects_1"
+        }
+      },
+      "required": [
+        "runtimeVersion",
+        "sequence",
+        "timestamp",
+        "runId",
+        "message",
+        "patch",
+        "type",
+        "nodeId",
+        "data"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "runtimeVersion": {
+          "type": "string",
+          "allOf": [
+            {
+              "minLength": 1
+            }
+          ]
+        },
+        "sequence": {
+          "type": "integer",
+          "allOf": [
+            {
+              "exclusiveMinimum": 0
+            }
+          ]
+        },
+        "timestamp": {
+          "type": "string",
+          "allOf": [
+            {
+              "minLength": 1
+            }
+          ]
+        },
+        "runId": {
+          "type": "string",
+          "allOf": [
+            {
+              "minLength": 1
+            }
+          ]
+        },
+        "message": {
+          "type": "string"
+        },
+        "patch": {
+          "$ref": "#/$defs/Arrays_"
+        },
+        "type": {
+          "type": "string",
+          "enum": [
             "node.cancelled"
           ]
         },
@@ -1285,7 +1435,7 @@
           ]
         },
         "data": {
-          "$ref": "#/$defs/Objects_1"
+          "$ref": "#/$defs/Objects_2"
         }
       },
       "required": [
@@ -1360,7 +1510,7 @@
           ]
         },
         "data": {
-          "$ref": "#/$defs/Objects_1"
+          "$ref": "#/$defs/Objects_2"
         }
       },
       "required": [
@@ -1625,7 +1775,7 @@
               "$ref": "#/$defs/Arrays_1"
             },
             "provenance": {
-              "$ref": "#/$defs/Objects_2"
+              "$ref": "#/$defs/Objects_3"
             }
           },
           "required": [
@@ -2089,7 +2239,7 @@
                             "$ref": "#/$defs/Arrays_4"
                           },
                           "retry": {
-                            "$ref": "#/$defs/Objects_3"
+                            "$ref": "#/$defs/Objects_4"
                           },
                           "gate": {
                             "type": "string",
@@ -2099,7 +2249,7 @@
                             ]
                           },
                           "when": {
-                            "$ref": "#/$defs/Objects_4"
+                            "$ref": "#/$defs/Objects_5"
                           },
                           "type": {
                             "type": "string",
@@ -2129,10 +2279,10 @@
                             "type": "string"
                           },
                           "session": {
-                            "$ref": "#/$defs/Objects_5"
+                            "$ref": "#/$defs/Objects_6"
                           },
                           "output": {
-                            "$ref": "#/$defs/Objects_6"
+                            "$ref": "#/$defs/Objects_7"
                           },
                           "provider": {
                             "type": "string",
@@ -2141,50 +2291,7 @@
                             ]
                           },
                           "permissions": {
-                            "type": "object",
-                            "properties": {
-                              "execution": {
-                                "type": "object",
-                                "properties": {
-                                  "sandbox": {
-                                    "type": "string",
-                                    "enum": [
-                                      "read-only",
-                                      "workspace-write"
-                                    ]
-                                  }
-                                },
-                                "required": [
-                                  "sandbox"
-                                ],
-                                "additionalProperties": false
-                              },
-                              "escalation": {
-                                "type": "string",
-                                "enum": [
-                                  "deny",
-                                  "ask-user",
-                                  "auto-review"
-                                ]
-                              },
-                              "extraArgs": {
-                                "$ref": "#/$defs/Arrays_1"
-                              },
-                              "inheritEnv": {
-                                "$ref": "#/$defs/Arrays_5"
-                              },
-                              "env": {
-                                "$ref": "#/$defs/Objects_7"
-                              }
-                            },
-                            "required": [
-                              "execution",
-                              "escalation",
-                              "extraArgs",
-                              "inheritEnv",
-                              "env"
-                            ],
-                            "additionalProperties": false
+                            "$ref": "#/$defs/Objects_8"
                           }
                         },
                         "required": [
@@ -2279,7 +2386,7 @@
                             "$ref": "#/$defs/Arrays_4"
                           },
                           "retry": {
-                            "$ref": "#/$defs/Objects_3"
+                            "$ref": "#/$defs/Objects_4"
                           },
                           "gate": {
                             "type": "string",
@@ -2289,7 +2396,7 @@
                             ]
                           },
                           "when": {
-                            "$ref": "#/$defs/Objects_4"
+                            "$ref": "#/$defs/Objects_5"
                           },
                           "type": {
                             "type": "string",
@@ -2319,10 +2426,10 @@
                             "type": "string"
                           },
                           "session": {
-                            "$ref": "#/$defs/Objects_5"
+                            "$ref": "#/$defs/Objects_6"
                           },
                           "output": {
-                            "$ref": "#/$defs/Objects_6"
+                            "$ref": "#/$defs/Objects_7"
                           },
                           "provider": {
                             "type": "string",
@@ -2331,54 +2438,7 @@
                             ]
                           },
                           "permissions": {
-                            "type": "object",
-                            "properties": {
-                              "execution": {
-                                "type": "object",
-                                "properties": {
-                                  "permissionMode": {
-                                    "type": "string",
-                                    "enum": [
-                                      "acceptEdits",
-                                      "auto",
-                                      "bypassPermissions",
-                                      "dontAsk",
-                                      "manual",
-                                      "plan"
-                                    ]
-                                  }
-                                },
-                                "required": [
-                                  "permissionMode"
-                                ],
-                                "additionalProperties": false
-                              },
-                              "escalation": {
-                                "type": "string",
-                                "enum": [
-                                  "deny",
-                                  "ask-user",
-                                  "auto-review"
-                                ]
-                              },
-                              "extraArgs": {
-                                "$ref": "#/$defs/Arrays_1"
-                              },
-                              "inheritEnv": {
-                                "$ref": "#/$defs/Arrays_5"
-                              },
-                              "env": {
-                                "$ref": "#/$defs/Objects_7"
-                              }
-                            },
-                            "required": [
-                              "execution",
-                              "escalation",
-                              "extraArgs",
-                              "inheritEnv",
-                              "env"
-                            ],
-                            "additionalProperties": false
+                            "$ref": "#/$defs/Objects_8"
                           }
                         },
                         "required": [
@@ -2473,7 +2533,7 @@
                             "$ref": "#/$defs/Arrays_4"
                           },
                           "retry": {
-                            "$ref": "#/$defs/Objects_3"
+                            "$ref": "#/$defs/Objects_4"
                           },
                           "gate": {
                             "type": "string",
@@ -2483,7 +2543,7 @@
                             ]
                           },
                           "when": {
-                            "$ref": "#/$defs/Objects_4"
+                            "$ref": "#/$defs/Objects_5"
                           },
                           "type": {
                             "type": "string",
@@ -2512,7 +2572,7 @@
                             }
                           },
                           "env": {
-                            "$ref": "#/$defs/Objects_7"
+                            "$ref": "#/$defs/Objects_9"
                           },
                           "allowedExitCodes": {
                             "type": "array",
@@ -2690,7 +2750,7 @@
               "additionalProperties": false
             },
             "provenance": {
-              "$ref": "#/$defs/Objects_2"
+              "$ref": "#/$defs/Objects_3"
             }
           },
           "required": [
@@ -2764,7 +2824,7 @@
           "not": {}
         },
         "data": {
-          "$ref": "#/$defs/Objects_1"
+          "$ref": "#/$defs/Objects_2"
         }
       },
       "required": [
@@ -3323,6 +3383,111 @@
     "Objects_1": {
       "type": "object",
       "properties": {
+        "attempt": {
+          "type": "integer",
+          "allOf": [
+            {
+              "exclusiveMinimum": 0
+            }
+          ]
+        },
+        "provider": {
+          "type": "string",
+          "enum": [
+            "codex",
+            "claude"
+          ]
+        },
+        "pane": {
+          "type": "object",
+          "properties": {
+            "workspaceId": {
+              "type": "string",
+              "allOf": [
+                {
+                  "minLength": 1
+                }
+              ]
+            },
+            "tabId": {
+              "type": "string",
+              "allOf": [
+                {
+                  "minLength": 1
+                }
+              ]
+            },
+            "paneId": {
+              "type": "string",
+              "allOf": [
+                {
+                  "minLength": 1
+                }
+              ]
+            },
+            "group": {
+              "type": "string",
+              "allOf": [
+                {
+                  "minLength": 1
+                }
+              ]
+            },
+            "surface": {
+              "type": "string",
+              "enum": [
+                "tab",
+                "split"
+              ]
+            }
+          },
+          "required": [
+            "workspaceId",
+            "tabId",
+            "paneId",
+            "group",
+            "surface"
+          ],
+          "additionalProperties": false
+        },
+        "providerSessionId": {
+          "type": "string",
+          "allOf": [
+            {
+              "minLength": 1
+            }
+          ]
+        },
+        "contentDigest": {
+          "type": "string",
+          "allOf": [
+            {
+              "pattern": "^[0-9a-f]{64}$"
+            }
+          ]
+        },
+        "byteLength": {
+          "type": "integer",
+          "allOf": [
+            {
+              "minimum": 0
+            }
+          ]
+        }
+      },
+      "required": [
+        "attempt",
+        "provider",
+        "pane",
+        "providerSessionId",
+        "contentDigest",
+        "byteLength"
+      ],
+      "additionalProperties": false
+    },
+    "Objects_2": {
+      "type": "object",
+      "properties": {
         "digest": {
           "type": "string",
           "allOf": [
@@ -3439,7 +3604,7 @@
         }
       ]
     },
-    "Objects_2": {
+    "Objects_3": {
       "type": "object",
       "properties": {
         "source": {
@@ -3540,7 +3705,7 @@
                       "retry-map",
                       "session-scalar",
                       "session-map",
-                      "execution-profile"
+                      "access-profile"
                     ]
                   },
                   "sourcePath": {
@@ -3900,7 +4065,7 @@
         "additionalProperties": false
       }
     },
-    "Objects_3": {
+    "Objects_4": {
       "type": "object",
       "properties": {
         "maxAttempts": {
@@ -3917,7 +4082,7 @@
       ],
       "additionalProperties": false
     },
-    "Objects_4": {
+    "Objects_5": {
       "type": "object",
       "properties": {
         "type": {
@@ -3955,7 +4120,7 @@
       ],
       "additionalProperties": false
     },
-    "Objects_5": {
+    "Objects_6": {
       "type": "object",
       "properties": {
         "mode": {
@@ -4004,7 +4169,7 @@
       ],
       "additionalProperties": false
     },
-    "Objects_6": {
+    "Objects_7": {
       "type": "object",
       "properties": {
         "format": {
@@ -4031,21 +4196,7 @@
       ],
       "additionalProperties": false
     },
-    "Arrays_5": {
-      "type": "array",
-      "items": {
-        "type": "string",
-        "allOf": [
-          {
-            "minLength": 1
-          },
-          {
-            "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
-          }
-        ]
-      }
-    },
-    "Objects_7": {
+    "Objects_9": {
       "type": "object",
       "additionalProperties": {
         "type": "string"
@@ -4057,6 +4208,54 @@
           }
         }
       ]
+    },
+    "Objects_8": {
+      "type": "object",
+      "properties": {
+        "access": {
+          "type": "string",
+          "enum": [
+            "read-only",
+            "workspace-write"
+          ]
+        },
+        "escalation": {
+          "type": "string",
+          "enum": [
+            "deny",
+            "ask-user",
+            "auto-review"
+          ]
+        },
+        "extraArgs": {
+          "$ref": "#/$defs/Arrays_1"
+        },
+        "inheritEnv": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "allOf": [
+              {
+                "minLength": 1
+              },
+              {
+                "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+              }
+            ]
+          }
+        },
+        "env": {
+          "$ref": "#/$defs/Objects_9"
+        }
+      },
+      "required": [
+        "access",
+        "escalation",
+        "extraArgs",
+        "inheritEnv",
+        "env"
+      ],
+      "additionalProperties": false
     }
   }
 }

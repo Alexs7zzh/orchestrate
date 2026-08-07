@@ -3,7 +3,7 @@ import { constants } from "node:fs"
 import { chmod, lstat, mkdir, open, realpath } from "node:fs/promises"
 import path from "node:path"
 
-import type { OutputSpec } from "./types.js"
+import type { AgentAccess, OutputSpec } from "./types.js"
 
 import { canonicalJson, digestValue } from "./digest.js"
 import {
@@ -157,6 +157,7 @@ export interface AttemptCapabilityManifest {
     readonly token: string
     readonly provider: "codex" | "claude"
   }
+  readonly accessIntent: AgentAccess
   readonly trust: AttemptTrustIdentities
   readonly sourceRoots: readonly string[]
   readonly declaredWriteRoots: readonly string[]
@@ -214,6 +215,7 @@ const CapabilityManifestSchema = Schema.Struct({
     token: Schema.String,
     provider: Schema.Literals(["codex", "claude"])
   }),
+  accessIntent: Schema.Literals(["read-only", "workspace-write"]),
   trust: Schema.Struct({
     control: DirectoryIdentitySchema,
     inbox: DirectoryIdentitySchema,
@@ -415,6 +417,7 @@ export interface CompileAttemptCapabilityInput {
   readonly attempt: number
   readonly token: string
   readonly provider: "codex" | "claude"
+  readonly accessIntent: AgentAccess
   readonly sourceRoots: readonly string[]
   readonly declaredWriteRoots: readonly string[]
   readonly providerControlRoot: string
@@ -563,6 +566,7 @@ export async function compileAttemptCapabilityManifest(
       token: input.token,
       provider: input.provider
     },
+    accessIntent: input.accessIntent,
     trust,
     sourceRoots,
     declaredWriteRoots,
@@ -763,6 +767,7 @@ export async function loadAttemptCapabilityManifest(
   const core = {
     version: manifest.version,
     attempt: manifest.attempt,
+    accessIntent: manifest.accessIntent,
     trust: manifest.trust,
     sourceRoots: manifest.sourceRoots,
     declaredWriteRoots: manifest.declaredWriteRoots,
@@ -789,6 +794,7 @@ export async function loadAttemptCapabilityManifest(
   await assertProjectedInputs(
     {
       ...manifest.attempt,
+      accessIntent: manifest.accessIntent,
       sourceRoots: manifest.sourceRoots,
       declaredWriteRoots: manifest.declaredWriteRoots,
       providerControlRoot: manifest.providerControlRoot,

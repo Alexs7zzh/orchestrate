@@ -45,7 +45,7 @@ function sourceNode(node: WorkflowNode) {
     prompt: node.prompt,
     model: node.model,
     ...(node.effort === null ? {} : { effort: node.effort }),
-    execution: node.provider === "codex" ? node.permissions.execution.sandbox : "dont-ask",
+    access: node.permissions.access,
     escalation: node.permissions.escalation,
     extraArgs: node.permissions.extraArgs,
     inheritEnv: node.permissions.inheritEnv,

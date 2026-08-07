@@ -18,6 +18,7 @@ import {
   structuralDiff,
   watchBeforeScan
 } from "../src/cli.js"
+import { injectDoctorReportHookForTests, injectLiveDoctorHookForTests } from "../src/doctor.js"
 import { createInitialRunState } from "../src/transition.js"
 import { injectPathInspectionForTests } from "../src/validation.js"
 import { workflowProvenance } from "./workflow-provenance-fixture.js"
@@ -39,6 +40,7 @@ const COMMANDS = [
   "stop",
   "hold",
   "release",
+  "steer",
   "revise",
   "node-done",
   "node-exit",
@@ -209,7 +211,7 @@ describe("CLI contract", () => {
           prompt: "Build.",
           session: { mode: "fresh", from: null, saveAs: null },
           permissions: {
-            execution: { sandbox: "read-only" },
+            access: "read-only",
             escalation: "deny",
             extraArgs: [],
             inheritEnv: [],
@@ -465,7 +467,7 @@ describe("CLI contract", () => {
           prompt: "Build.\nforged node line",
           session: { mode: "fresh", from: null, saveAs: null },
           permissions: {
-            execution: { sandbox: "read-only" },
+            access: "read-only",
             escalation: "deny",
             extraArgs: [],
             inheritEnv: [],
@@ -691,6 +693,101 @@ nodes:
     expect(result.output).toContain("2  the observed run needs human attention")
     for (const command of COMMANDS) {
       expect(result.output).toContain(command)
+    }
+  })
+
+  test("keeps ordinary doctor non-live and runs the billed probe only with --live", async () => {
+    let calls = 0
+    injectDoctorReportHookForTests(async () => ({
+      ok: true,
+      build: "test-build",
+      checks: [{ name: "herdr", ok: true, detail: "herdr 0.7.5" }]
+    }))
+    injectLiveDoctorHookForTests(async () => {
+      calls += 1
+      return {
+        ok: true,
+        warning: "provider billing warning",
+        runId: "20260807000000-aaaaaaaa",
+        checks: [{ name: "live-probe", ok: true, detail: "bounded" }],
+        artifacts: null,
+        cleaned: true
+      }
+    })
+    try {
+      await capture(() => runCli(["doctor", "--json"]))
+      expect(calls).toBe(0)
+      const live = await capture(() => runCli(["doctor", "--live", "--json"]))
+      expect(calls).toBe(1)
+      expect(JSON.parse(live.output).live).toMatchObject({
+        warning: "provider billing warning",
+        cleaned: true
+      })
+      const human = await capture(() => runCli(["doctor", "--live"]))
+      expect(calls).toBe(2)
+      expect(
+        human.output.startsWith("WARNING: This opt-in diagnostic launches Codex and Claude")
+      ).toBe(true)
+    } finally {
+      injectLiveDoctorHookForTests(null)
+      injectDoctorReportHookForTests(null)
+    }
+  })
+
+  test("skips the billed probe when read-only doctor checks already fail", async () => {
+    let calls = 0
+    injectDoctorReportHookForTests(async () => ({
+      ok: false,
+      build: "test-build",
+      checks: [{ name: "installed-build", ok: false, detail: "rerun orchestrate setup" }]
+    }))
+    injectLiveDoctorHookForTests(async () => {
+      calls += 1
+      throw new Error("the billed probe must not launch in a known-unhealthy install")
+    })
+    try {
+      const skipped = await capture(() => runCli(["doctor", "--live", "--json"]))
+      expect(calls).toBe(0)
+      expect(skipped.code).toBe(1)
+      const payload = JSON.parse(skipped.output)
+      expect(payload.ok).toBe(false)
+      expect(payload.liveSkipped).toBe(true)
+      expect(payload.live).toBeUndefined()
+      const human = await capture(() => runCli(["doctor", "--live"]))
+      expect(calls).toBe(0)
+      expect(human.code).toBe(1)
+      expect(human.output).not.toContain("WARNING:")
+      expect(human.output).toContain(
+        "SKIP live-diagnostic: read-only checks failed; no billed provider work was launched."
+      )
+    } finally {
+      injectLiveDoctorHookForTests(null)
+      injectDoctorReportHookForTests(null)
+    }
+  })
+
+  test("rejects steering from an owning workflow-node environment before run lookup", async () => {
+    const previousContract = process.env.ORCHESTRATE_COMPLETION_CONTRACT
+    const previousToken = process.env.ORCHESTRATE_NODE_TOKEN
+    try {
+      process.env.ORCHESTRATE_COMPLETION_CONTRACT = "/attempt/control/completion.json"
+      process.env.ORCHESTRATE_NODE_TOKEN = "secret-token"
+      await expect(
+        runCli(["steer", "missing-run", "review", "--message", "change scope", "--json"])
+      ).rejects.toThrow(
+        "Workflow nodes cannot invoke steer; steering is reserved for a human caller."
+      )
+    } finally {
+      if (previousContract === undefined) {
+        delete process.env.ORCHESTRATE_COMPLETION_CONTRACT
+      } else {
+        process.env.ORCHESTRATE_COMPLETION_CONTRACT = previousContract
+      }
+      if (previousToken === undefined) {
+        delete process.env.ORCHESTRATE_NODE_TOKEN
+      } else {
+        process.env.ORCHESTRATE_NODE_TOKEN = previousToken
+      }
     }
   })
 

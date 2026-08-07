@@ -725,50 +725,7 @@
                             ]
                           },
                           "permissions": {
-                            "type": "object",
-                            "properties": {
-                              "execution": {
-                                "type": "object",
-                                "properties": {
-                                  "sandbox": {
-                                    "type": "string",
-                                    "enum": [
-                                      "read-only",
-                                      "workspace-write"
-                                    ]
-                                  }
-                                },
-                                "required": [
-                                  "sandbox"
-                                ],
-                                "additionalProperties": false
-                              },
-                              "escalation": {
-                                "type": "string",
-                                "enum": [
-                                  "deny",
-                                  "ask-user",
-                                  "auto-review"
-                                ]
-                              },
-                              "extraArgs": {
-                                "$ref": "#/$defs/Arrays_2"
-                              },
-                              "inheritEnv": {
-                                "$ref": "#/$defs/Arrays_4"
-                              },
-                              "env": {
-                                "$ref": "#/$defs/Objects_4"
-                              }
-                            },
-                            "required": [
-                              "execution",
-                              "escalation",
-                              "extraArgs",
-                              "inheritEnv",
-                              "env"
-                            ],
-                            "additionalProperties": false
+                            "$ref": "#/$defs/Objects_4"
                           }
                         },
                         "required": [
@@ -915,54 +872,7 @@
                             ]
                           },
                           "permissions": {
-                            "type": "object",
-                            "properties": {
-                              "execution": {
-                                "type": "object",
-                                "properties": {
-                                  "permissionMode": {
-                                    "type": "string",
-                                    "enum": [
-                                      "acceptEdits",
-                                      "auto",
-                                      "bypassPermissions",
-                                      "dontAsk",
-                                      "manual",
-                                      "plan"
-                                    ]
-                                  }
-                                },
-                                "required": [
-                                  "permissionMode"
-                                ],
-                                "additionalProperties": false
-                              },
-                              "escalation": {
-                                "type": "string",
-                                "enum": [
-                                  "deny",
-                                  "ask-user",
-                                  "auto-review"
-                                ]
-                              },
-                              "extraArgs": {
-                                "$ref": "#/$defs/Arrays_2"
-                              },
-                              "inheritEnv": {
-                                "$ref": "#/$defs/Arrays_4"
-                              },
-                              "env": {
-                                "$ref": "#/$defs/Objects_4"
-                              }
-                            },
-                            "required": [
-                              "execution",
-                              "escalation",
-                              "extraArgs",
-                              "inheritEnv",
-                              "env"
-                            ],
-                            "additionalProperties": false
+                            "$ref": "#/$defs/Objects_4"
                           }
                         },
                         "required": [
@@ -1096,7 +1006,7 @@
                             }
                           },
                           "env": {
-                            "$ref": "#/$defs/Objects_4"
+                            "$ref": "#/$defs/Objects_5"
                           },
                           "allowedExitCodes": {
                             "type": "array",
@@ -1385,7 +1295,7 @@
                               "retry-map",
                               "session-scalar",
                               "session-map",
-                              "execution-profile"
+                              "access-profile"
                             ]
                           },
                           "sourcePath": {
@@ -1588,7 +1498,7 @@
                 ]
               },
               "needs": {
-                "$ref": "#/$defs/Arrays_5"
+                "$ref": "#/$defs/Arrays_4"
               },
               "origin": {
                 "type": "string",
@@ -1623,7 +1533,7 @@
                 ]
               },
               "attempts": {
-                "$ref": "#/$defs/Arrays_6"
+                "$ref": "#/$defs/Arrays_5"
               },
               "resultPath": {
                 "anyOf": [
@@ -1771,7 +1681,7 @@
                 ]
               },
               "needs": {
-                "$ref": "#/$defs/Arrays_5"
+                "$ref": "#/$defs/Arrays_4"
               },
               "origin": {
                 "type": "string",
@@ -1806,7 +1716,7 @@
                 ]
               },
               "attempts": {
-                "$ref": "#/$defs/Arrays_6"
+                "$ref": "#/$defs/Arrays_5"
               },
               "resultPath": {
                 "anyOf": [
@@ -2158,7 +2068,7 @@
                 "pane": {
                   "anyOf": [
                     {
-                      "$ref": "#/$defs/Objects_5"
+                      "$ref": "#/$defs/Objects_6"
                     },
                     {
                       "type": "null"
@@ -2651,21 +2561,7 @@
       ],
       "additionalProperties": false
     },
-    "Arrays_4": {
-      "type": "array",
-      "items": {
-        "type": "string",
-        "allOf": [
-          {
-            "minLength": 1
-          },
-          {
-            "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
-          }
-        ]
-      }
-    },
-    "Objects_4": {
+    "Objects_5": {
       "type": "object",
       "additionalProperties": {
         "type": "string"
@@ -2677,6 +2573,54 @@
           }
         }
       ]
+    },
+    "Objects_4": {
+      "type": "object",
+      "properties": {
+        "access": {
+          "type": "string",
+          "enum": [
+            "read-only",
+            "workspace-write"
+          ]
+        },
+        "escalation": {
+          "type": "string",
+          "enum": [
+            "deny",
+            "ask-user",
+            "auto-review"
+          ]
+        },
+        "extraArgs": {
+          "$ref": "#/$defs/Arrays_2"
+        },
+        "inheritEnv": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "allOf": [
+              {
+                "minLength": 1
+              },
+              {
+                "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+              }
+            ]
+          }
+        },
+        "env": {
+          "$ref": "#/$defs/Objects_5"
+        }
+      },
+      "required": [
+        "access",
+        "escalation",
+        "extraArgs",
+        "inheritEnv",
+        "env"
+      ],
+      "additionalProperties": false
     },
     "Union_1": {
       "anyOf": [
@@ -2774,7 +2718,7 @@
         }
       ]
     },
-    "Arrays_5": {
+    "Arrays_4": {
       "type": "array",
       "items": {
         "type": "string",
@@ -2785,7 +2729,7 @@
         ]
       }
     },
-    "Objects_5": {
+    "Objects_6": {
       "type": "object",
       "properties": {
         "workspaceId": {
@@ -2837,7 +2781,7 @@
       ],
       "additionalProperties": false
     },
-    "Arrays_6": {
+    "Arrays_5": {
       "type": "array",
       "items": {
         "type": "object",
@@ -2871,7 +2815,7 @@
           "pane": {
             "anyOf": [
               {
-                "$ref": "#/$defs/Objects_5"
+                "$ref": "#/$defs/Objects_6"
               },
               {
                 "type": "null"

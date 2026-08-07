@@ -79,33 +79,15 @@ export interface RetrySpec {
   readonly maxAttempts: number
 }
 
-export type CodexSandbox = "read-only" | "workspace-write"
+export type AgentAccess = "read-only" | "workspace-write"
 export type AgentEscalation = "deny" | "ask-user" | "auto-review"
-export type ClaudePermissionMode =
-  | "acceptEdits"
-  | "auto"
-  | "bypassPermissions"
-  | "dontAsk"
-  | "manual"
-  | "plan"
 
-interface PermissionsCommon {
+export interface AgentPermissions {
+  readonly access: AgentAccess
   readonly escalation: AgentEscalation
   readonly extraArgs: readonly string[]
   readonly inheritEnv: readonly string[]
   readonly env: Readonly<Record<string, string>>
-}
-
-export interface CodexPermissions extends PermissionsCommon {
-  readonly execution: {
-    readonly sandbox: CodexSandbox
-  }
-}
-
-export interface ClaudePermissions extends PermissionsCommon {
-  readonly execution: {
-    readonly permissionMode: ClaudePermissionMode
-  }
 }
 
 export interface OutputSpec {
@@ -139,12 +121,12 @@ interface AgentFields extends CommonNode {
 
 export interface CodexAgentNode extends AgentFields {
   readonly provider: "codex"
-  readonly permissions: CodexPermissions
+  readonly permissions: AgentPermissions
 }
 
 export interface ClaudeAgentNode extends AgentFields {
   readonly provider: "claude"
-  readonly permissions: ClaudePermissions
+  readonly permissions: AgentPermissions
 }
 
 export type AgentNode = CodexAgentNode | ClaudeAgentNode
@@ -503,6 +485,16 @@ export type CrankEvent =
   | { readonly type: "hold"; readonly nodeId: string }
   | { readonly type: "release"; readonly nodeId: string }
   | { readonly type: "restore"; readonly deadPaneIds: readonly string[] }
+  | {
+      readonly type: "steer-requested" | "steer-delivered"
+      readonly nodeId: string
+      readonly attempt: number
+      readonly provider: Provider
+      readonly pane: PaneReference
+      readonly providerSessionId: string
+      readonly contentDigest: string
+      readonly byteLength: number
+    }
 
 export type CrankAction =
   | { readonly type: "close-pane"; readonly paneId: string }

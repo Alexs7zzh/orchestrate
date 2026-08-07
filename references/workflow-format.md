@@ -25,12 +25,12 @@ the operating system, but the final source entry is opened no-follow. That singl
 handle owns the type check and limit-plus-one bounded read. The value subset is null, strings,
 booleans, finite numbers, safe integers, dense arrays, and plain string-keyed objects.
 
-| Origin     | Meaning                                                                        |
-| ---------- | ------------------------------------------------------------------------------ |
-| `explicit` | Authored source value.                                                         |
-| `default`  | Normalizer-owned default with a stable rule identifier.                        |
-| `expanded` | Agent/command discriminator, execution, retry, or session shorthand expansion. |
-| `inferred` | Current-round input or `when` dependency appended by normalization.            |
+| Origin     | Meaning                                                                     |
+| ---------- | --------------------------------------------------------------------------- |
+| `explicit` | Authored source value.                                                      |
+| `default`  | Normalizer-owned default with a stable rule identifier.                     |
+| `expanded` | Agent/command discriminator, access, retry, or session shorthand expansion. |
+| `inferred` | Current-round input or `when` dependency appended by normalization.         |
 
 Every expanded IR leaf and array item has an RFC 6901-keyed origin. Diagnostics map parser, source
 schema, normalization, and expanded semantic failures back to the actionable YAML pointer and
@@ -58,7 +58,7 @@ recomputed digests at their trust boundaries.
   and a nonempty ordered `nodes` array.
 - `concurrency` defaults to `1`; it is the maximum simultaneous active node attempts.
 - `callback` defaults to `{type: none}` and may be `none`, `notification`, `command`, or `webhook`.
-  Command `{{event}}`
+  Command and webhook callbacks additionally require a positive `timeoutSeconds`. Command `{{event}}`
   expansion and webhook bodies receive the event without its internal state patch, which can embed
   node result content. Webhook URLs are absolute `http` or `https` URLs with no whitespace and a
   nonempty host; minimal hosts, valid ports, IPv6 literals, credentials, and case-insensitive schemes
@@ -130,8 +130,8 @@ unchanged resume, and never silently interprets malformed data as a skip. A paus
 revise only that template's `when` for its current and future unstarted instances; settled earlier
 rounds remain immutable. The source must be a direct dependency and a JSON agent with
 a non-null output schema. Conditional session producers and conditional repeat verdicts are
-invalid. Content inputs from a skipped node render as `[skipped]`; path inputs are rejected because
-there is no synthetic result artifact.
+invalid. Content inputs from a skipped node render as `[skipped by scheduler]`; path inputs are
+rejected because there is no synthetic result artifact.
 
 ## Workspaces
 
@@ -171,20 +171,20 @@ approval mechanics are in [runtime-operations.md](runtime-operations.md).
 
 ## Agent nodes
 
-Agent source nodes require `agent`, `prompt`, and provider-specific `execution`. `model` defaults to
+Agent source nodes require `agent`, `prompt`, and provider-neutral `access`. `model` defaults to
 `provider-default`; `effort` to null; `escalation` to `deny`; `extraArgs`, `inheritEnv`, and `env`
 to empty values; `output` to text; and `session` to fresh. Authors never write expanded `type`,
 `provider`, or `permissions` keys.
 
-| Authored shorthand                      | Expanded IR                                            |
-| --------------------------------------- | ------------------------------------------------------ |
-| `agent: codex` or `agent: claude`       | `type: agent` plus matching `provider`                 |
-| `execution: read-only\|workspace-write` | Codex `permissions.execution.sandbox`                  |
-| `execution: dont-ask`                   | Claude `permissions.execution.permissionMode: dontAsk` |
-| retry integer or `{maxAttempts: N}`     | `{maxAttempts: N}`                                     |
-| `session: fresh`                        | fresh session with null source and alias               |
-| session map                             | explicit fresh/resume/fork lineage fields              |
-| `command: [argv, ...]`                  | `type: command` plus `argv`                            |
+| Authored shorthand                        | Expanded IR                               |
+| ----------------------------------------- | ----------------------------------------- |
+| `agent: codex` or `agent: claude`         | `type: agent` plus matching `provider`    |
+| `access: read-only\|workspace-write`      | matching `permissions.access`             |
+| `escalation: deny\|ask-user\|auto-review` | matching `permissions.escalation`         |
+| retry integer or `{maxAttempts: N}`       | `{maxAttempts: N}`                        |
+| `session: fresh`                          | fresh session with null source and alias  |
+| session map                               | explicit fresh/resume/fork lineage fields |
+| `command: [argv, ...]`                    | `type: command` plus `argv`               |
 
 Session source is scalar `fresh`, `{fresh: alias}`, `{resume: alias}`, `{resume: alias, saveAs:
 newAlias}`, `{fork: alias}`, or `{fork: alias, saveAs: newAlias}`. A continuation must use the same
@@ -200,19 +200,21 @@ provider-session promotion mechanics are documented under
 
 Permissions deliberately separate two source axes:
 
-- `execution` is `read-only` or `workspace-write` for Codex and only `dont-ask` for Claude.
+- `access` is `read-only` or `workspace-write` for both providers. It states workflow intent, not a
+  provider-native permission mode.
 - `escalation` is `deny`, `ask-user`, or `auto-review`. `deny` is the unattended default: an action
-  outside the permitted execution envelope fails instead of opening a user prompt.
+  outside the permitted access envelope fails instead of opening a user prompt.
 
 For Codex, escalation maps independently to `never`, `on-request`, or `on-request` with the
-automatic reviewer. Claude authoring supports only `dontAsk` with `deny`. At launch, Orchestrate
-removes the interactive permission layer, exposes only Bash, and makes the fail-closed native
-sandbox the execution boundary. It grants source reads plus only canonical declared source writes
-and denies authoritative state and installed control assets. Authored `bypassPermissions`,
-interactive modes, nonempty Claude `extraArgs`, and provider-native delegation remain rejected or
-disabled.
+automatic reviewer. Claude authoring supports only `deny` escalation. At launch, one focused adapter
+compiles the same access intent into each provider's native controls: Codex receives a
+launcher-owned sandbox profile, while Claude runs unattended with only Bash exposed and its
+fail-closed native sandbox as the filesystem boundary. Both grant source reads, grant canonical
+declared source writes only for `workspace-write`, and deny authoritative state and installed
+control assets. Authors cannot select `bypassPermissions`, interactive Claude modes, native sandbox
+arguments, or provider delegation; nonempty Claude `extraArgs` remains invalid.
 
-Codex may declare non-reserved `extraArgs`; Claude must declare an empty array. Both providers
+Codex may declare non-reserved `extraArgs`; Claude `extraArgs` may only be omitted or empty. Both providers
 declare `inheritEnv` and literal `env`. Output is `text` or `json`; JSON requires a non-null JSON
 Schema object. Text forbids `schema` and expands it to null. The agent writes
 `ORCHESTRATE_RESULT_PATH` and invokes the exact
@@ -241,7 +243,9 @@ submission allowance is the only exception.
 ## Command nodes
 
 Command source nodes require `command: [argv, ...]` and explicit boolean `mutates`; shell strings
-and expanded `type`/`argv` keys are rejected. `inheritEnv` and `env` default empty and
+and expanded `type`/`argv` keys are rejected. `argv[0]` must be an absolute executable path unless
+the node explicitly provides `PATH` through `inheritEnv` or `env`, so `[git, status]` is invalid
+while `[/usr/bin/git, status]` is not. `inheritEnv` and `env` default empty and
 `allowedExitCodes` defaults to `[0]`. They run directly in a transient Herdr pane and do not occupy a workroom seat. A command may still name
 its supporting `workroom` with `seat` omitted. Output is tee'd to the attempt output path
 before `node-exit` reports the numeric status.
@@ -331,7 +335,23 @@ session-alias rebinding.
 
 ## Stable prompts and planning
 
-The prompt frame is fixed by the approved workflow: objective, title, declared inputs, result
-contract, paths, and completion command. Only dependency outputs and runtime paths are resolved at
-start. For work that cannot be enumerated in advance, use a structured planner result as input to a
-gated executor. The graph itself remains static and reviewable.
+The prompt frame is fixed by the approved workflow. It opens with a stable briefing that names the
+workflow objective, approved task, human title, exact runtime node ID and repeat round, then presents
+each collaborator handoff with its source title, exact runtime ID, provider or command kind, round,
+status, and declared format. Dynamic result content and projected paths are visually quoted line by
+line so they cannot impersonate prompt headings or the final completion contract. A path handoff
+identifies itself as a projected path and separately names the source result format.
+
+Author prompts should sound like a clear message between collaborators. Avoid protocol fragments
+such as `REVIEW r2` when the actual request is “Here is another code review; verify it against the
+implementation.” In an iterative review, require stable finding IDs, severity, evidence, and an
+explicit `new`, `recurring`, or `resolved` lifecycle. By the second unclean round, require an
+assessment of a possible shared structural cause. Do not keep a loop alive for stylistic churn, and
+when the approved bound is reached, leave the run paused for human trend review rather than assuming
+another extension.
+
+The result contract, token-local paths, and exact completion command remain the final operational
+frame for agent nodes. Command nodes receive task and handoff context but no agent completion
+ownership language. Only dependency outputs and runtime paths are resolved at start. For work that
+cannot be enumerated in advance, use a structured planner result as input to a gated executor. The
+graph itself remains static and reviewable.
