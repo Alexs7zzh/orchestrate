@@ -13,7 +13,9 @@ It declares (see [herdr-plugin.toml](herdr-plugin.toml), requires herdr 0.7.5 or
   Max-round and fuse decisions remain explicit CLI operations.
 - **Event `pane.agent_status_changed`** — routes blocked and done workflow-agent events through the
   trusted plugin bridge. The bridge prompts the captured master to reconcile a valid submission or
-  debug a missing one without granting provider nodes Herdr control authority.
+  debug a missing one without granting provider nodes Herdr control authority. Pane state and free
+  text never count as completion: the owning agent must write its result and make its authenticated
+  submission, while provider-native delegation remains disabled.
 - **Events `pane.closed` and `pane.exited`** — when a pane hosting a durably running node
   disappears without a valid submission, the bridge prompts the captured master with the
   `orchestrate ui restore` command instead of leaving the run stalled until a human notices.
@@ -38,3 +40,6 @@ herdr plugin action invoke orchestrate.pause-latest
 ```
 
 Uninstall with `orchestrate setup --remove` or `herdr plugin unlink orchestrate`.
+
+Provider launch also supplies a mode-0700 token-local scratch directory through `TMPDIR`, `TMP`, and
+`TEMP`; it does not grant access to ambient temporary directories or undeclared source writes.

@@ -22,6 +22,7 @@ import {
   uiPath,
   workflowPath
 } from "../src/state.js"
+import { workflowProvenance } from "./workflow-provenance-fixture.js"
 
 let temporaryRoot = ""
 
@@ -184,7 +185,11 @@ describe("state store", () => {
     await appendEvents(runDir, [
       {
         ...event(revisedState, initial, "revision.approved"),
-        data: { digest: revisedState.digest, workflow: revised }
+        data: {
+          digest: revisedState.digest,
+          workflow: revised,
+          provenance: await workflowProvenance(revised)
+        }
       }
     ])
 

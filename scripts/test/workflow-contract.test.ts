@@ -1,12 +1,53 @@
-import { describe, expect, test } from "bun:test"
-import { mkdir, mkdtemp, rm, symlink } from "node:fs/promises"
+import { Ajv2020 } from "ajv/dist/2020.js"
+import { afterEach, beforeEach, describe, expect, test } from "bun:test"
+import { Result, Schema } from "effect"
+import { mkdir, mkdtemp, realpath, rm, symlink } from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 
 import type { AgentNode, CommandNode, WorkflowSpec } from "../src/types.js"
 
+import { jsonSchemaDocumentFor, WorkflowProvenanceSchema } from "../src/schema.js"
 import { stateRoot, submissionsRoot } from "../src/state.js"
-import { validateWorkflow } from "../src/validation.js"
+import {
+  injectPathCaseSensitivityForTests,
+  injectPathInspectionForTests,
+  validateWorkflow
+} from "../src/validation.js"
+import { loadWorkflowSource } from "../src/workflow-source.js"
+
+let originalHome: string | undefined
+let originalStateDirectory: string | undefined
+let originalOrchestrateBin: string | undefined
+
+beforeEach(() => {
+  originalHome = process.env.HOME
+  originalStateDirectory = process.env.ORCHESTRATE_STATE_DIR
+  originalOrchestrateBin = process.env.ORCHESTRATE_BIN
+  process.env.HOME = "/var/tmp/orchestrate-workflow-contract-home"
+  process.env.ORCHESTRATE_STATE_DIR = "/var/tmp/orchestrate-workflow-contract-state"
+  process.env.ORCHESTRATE_BIN = "/var/tmp/orchestrate"
+})
+
+afterEach(() => {
+  injectPathCaseSensitivityForTests(null)
+  injectPathInspectionForTests(null)
+  if (originalHome === undefined) {
+    delete process.env.HOME
+  } else {
+    process.env.HOME = originalHome
+  }
+  if (originalStateDirectory === undefined) {
+    delete process.env.ORCHESTRATE_STATE_DIR
+  } else {
+    process.env.ORCHESTRATE_STATE_DIR = originalStateDirectory
+  }
+  if (originalOrchestrateBin === undefined) {
+    delete process.env.ORCHESTRATE_BIN
+  } else {
+    process.env.ORCHESTRATE_BIN = originalOrchestrateBin
+  }
+})
 
 function workspace() {
   return {
@@ -81,6 +122,22 @@ function workflow(nodes: readonly WorkflowSpec["nodes"][number][]): WorkflowSpec
   }
 }
 
+function authoredWebhook(headers: Readonly<Record<string, string>>) {
+  return {
+    name: "headers",
+    objective: "Validate callback headers.",
+    cwd: "/tmp",
+    limits: { maxStarts: null },
+    callback: {
+      type: "webhook",
+      url: "https://example.test/hook",
+      headers,
+      timeoutSeconds: 10
+    },
+    nodes: [{ id: "check", command: ["/usr/bin/true"], mutates: false }]
+  }
+}
+
 describe("workflow contract", () => {
   test("warns on hand-unrolled repeat rounds without rejecting the workflow", () => {
     const unrolled = validateWorkflow(
@@ -121,15 +178,22 @@ describe("workflow contract", () => {
     ).toBe(false)
   })
 
-  test("keeps the documented JSON workflow example valid", async () => {
+  test("keeps the documented YAML workflow example valid", async () => {
     const document = await Bun.file(new URL("../../references/examples.md", import.meta.url)).text()
-    const block = document.match(/```json\n([\s\S]*?)\n```/)?.[1]
+    const block = document.match(/```yaml\n([\s\S]*?)\n```/)?.[1]
     expect(block).toBeDefined()
-    expect(
-      validateWorkflow(JSON.parse(block as string) as unknown).issues.filter(
-        (issue) => issue.severity === "error"
-      )
-    ).toEqual([])
+    const directory = await mkdtemp(path.join(os.tmpdir(), "orchestrate-example-"))
+    try {
+      const file = path.join(directory, "example.yaml")
+      await Bun.write(file, block as string)
+      expect(
+        (await loadWorkflowSource(file)).diagnostics.filter(
+          (diagnostic) => diagnostic.severity === "error"
+        )
+      ).toEqual([])
+    } finally {
+      await rm(directory, { recursive: true, force: true })
+    }
   })
 
   test("accepts the contract and rejects unknown fields", () => {
@@ -417,6 +481,259 @@ describe("workflow contract", () => {
     }
   })
 
+  test("keeps HTTP(S) callback URL acceptance aligned with the generated authoring schema", async () => {
+    const generated = JSON.parse(
+      await Bun.file(new URL("../../references/workflow.schema.json", import.meta.url)).text()
+    )
+    const validateGenerated = new Ajv2020({ strict: false }).compile(generated)
+    const temporary = await mkdtemp(path.join(os.tmpdir(), "orchestrate-url-"))
+    try {
+      for (const [url, accepted] of [
+        ["https://example.test/hook", true],
+        ["http://a", true],
+        ["HTTP://example.test/hook", true],
+        ["HtTpS://example.test/hook", true],
+        ["https://user:pass@example.test:8443/hook", true],
+        ["http://[::1]:8080/hook", true],
+        ["http://[::1/hook", false],
+        [" https://example.test/hook", false],
+        ["https://example.test/hook ", false],
+        ["https://example.test/a b", false],
+        ["ftp://example.test/hook", false]
+      ] as const) {
+        const runtime =
+          validateWorkflow({
+            ...workflow([command("check")]),
+            callback: { type: "webhook", url, headers: {}, timeoutSeconds: 10 }
+          }).workflow !== null
+        const authored = validateGenerated({
+          name: "callback-parity",
+          objective: "Keep URL validation aligned.",
+          cwd: "/tmp",
+          limits: { maxStarts: null },
+          callback: { type: "webhook", url, timeoutSeconds: 10 },
+          nodes: [{ id: "check", command: ["/usr/bin/true"], mutates: false }]
+        })
+        const file = path.join(temporary, "workflow.yaml")
+        await Bun.write(
+          file,
+          `name: callback-parity
+objective: Keep URL validation aligned.
+cwd: /tmp
+limits: {maxStarts: null}
+callback: {type: webhook, url: ${JSON.stringify(url)}, timeoutSeconds: 10}
+nodes:
+  - id: check
+    command: [/usr/bin/true]
+    mutates: false
+`
+        )
+        const sourceAccepted = (await loadWorkflowSource(file)).workflow !== null
+        expect(runtime).toBe(accepted)
+        expect(sourceAccepted).toBe(accepted)
+        expect(authored).toBe(accepted)
+      }
+
+      const malformedIpv6 = "http://[:::]/hook"
+      expect(
+        validateWorkflow({
+          ...workflow([command("check")]),
+          callback: { type: "webhook", url: malformedIpv6, headers: {}, timeoutSeconds: 10 }
+        }).workflow
+      ).toBeNull()
+      const malformedFile = path.join(temporary, "workflow.yaml")
+      await Bun.write(
+        malformedFile,
+        `name: callback-prefilter
+objective: Exercise runtime URL parsing.
+cwd: /tmp
+limits: {maxStarts: null}
+callback: {type: webhook, url: ${JSON.stringify(malformedIpv6)}, timeoutSeconds: 10}
+nodes:
+  - id: check
+    command: [/usr/bin/true]
+    mutates: false
+`
+      )
+      expect((await loadWorkflowSource(malformedFile)).workflow).toBeNull()
+      expect(
+        validateGenerated({
+          name: "callback-prefilter",
+          objective: "Exercise the generated lexical prefilter.",
+          cwd: "/tmp",
+          limits: { maxStarts: null },
+          callback: { type: "webhook", url: malformedIpv6, timeoutSeconds: 10 },
+          nodes: [{ id: "check", command: ["/usr/bin/true"], mutates: false }]
+        })
+      ).toBe(true)
+    } finally {
+      await rm(temporary, { recursive: true, force: true })
+    }
+  })
+
+  test("rejects invalid webhook header names and values at their exact pointer", async () => {
+    const validName = "X!#$%&'*+-.^_`|~"
+    expect(
+      validateWorkflow({
+        ...workflow([command("check")]),
+        callback: {
+          type: "webhook",
+          url: "https://example.test/hook",
+          headers: { [validName]: "\tvisible\x80" },
+          timeoutSeconds: 10
+        }
+      }).workflow
+    ).not.toBeNull()
+
+    for (const [headers, pointer] of [
+      [{ "Bad/Header": "value" }, "/callback/headers/Bad~1Header"],
+      [{ Valid: "line\r\nbreak" }, "/callback/headers/Valid"],
+      [{ Valid: "nul\0byte" }, "/callback/headers/Valid"]
+    ] as const) {
+      const result = validateWorkflow({
+        ...workflow([command("check")]),
+        callback: {
+          type: "webhook",
+          url: "https://example.test/hook",
+          headers,
+          timeoutSeconds: 10
+        }
+      })
+      expect(result.workflow).toBeNull()
+      expect(result.issues).toContainEqual(
+        expect.objectContaining({ code: "callback-header", path: pointer })
+      )
+    }
+
+    const generated = JSON.parse(
+      await Bun.file(new URL("../../references/workflow.schema.json", import.meta.url)).text()
+    )
+    const validateGenerated = new Ajv2020({ strict: false }).compile(generated)
+    expect(validateGenerated(authoredWebhook({ [validName]: "\tvisible\x80" }))).toBe(true)
+    expect(validateGenerated(authoredWebhook({ "Bad/Header": "value" }))).toBe(false)
+    expect(validateGenerated(authoredWebhook({ Valid: "line\r\nbreak" }))).toBe(false)
+
+    const temporary = await mkdtemp(path.join(os.tmpdir(), "orchestrate-header-"))
+    try {
+      const file = path.join(temporary, "workflow.yaml")
+      await Bun.write(
+        file,
+        `name: headers
+objective: Validate callback headers.
+cwd: /tmp
+limits: {maxStarts: null}
+callback:
+  type: webhook
+  url: https://example.test/hook
+  headers:
+    "Bad/Header": value
+  timeoutSeconds: 10
+nodes:
+  - id: check
+    command: [/usr/bin/true]
+    mutates: false
+`
+      )
+      expect((await loadWorkflowSource(file)).diagnostics).toContainEqual(
+        expect.objectContaining({
+          code: "workflow-source-schema",
+          path: "/callback/headers/Bad~1Header",
+          location: expect.objectContaining({ line: 9, column: 19 })
+        })
+      )
+    } finally {
+      await rm(temporary, { recursive: true, force: true })
+    }
+  })
+
+  test("keeps constrained environment records strict in source, final IR, and generated schema", async () => {
+    const final = validateWorkflow(workflow([command("check", { env: { "BAD-NAME": "value" } })]))
+    expect(final.workflow).toBeNull()
+    expect(final.issues).toContainEqual(
+      expect.objectContaining({
+        code: "environment-name",
+        path: "/nodes/0/env/BAD-NAME"
+      })
+    )
+
+    const generated = JSON.parse(
+      await Bun.file(new URL("../../references/workflow.schema.json", import.meta.url)).text()
+    )
+    const validateGenerated = new Ajv2020({ strict: false }).compile(generated)
+    expect(
+      validateGenerated({
+        name: "invalid-env",
+        objective: "Reject invalid record keys.",
+        cwd: "/tmp",
+        limits: { maxStarts: null },
+        nodes: [
+          {
+            id: "check",
+            command: ["/usr/bin/true"],
+            mutates: false,
+            env: { "BAD-NAME": "value" }
+          }
+        ]
+      })
+    ).toBe(false)
+  })
+
+  test("closes constrained provenance record keys in Effect and generated schemas", () => {
+    const origin = {
+      kind: "explicit" as const,
+      sourcePath: "/name",
+      location: {
+        file: "/tmp/workflow.yaml",
+        line: 1,
+        column: 1,
+        endLine: 1,
+        endColumn: 5
+      }
+    }
+    const valid = {
+      source: "/tmp/workflow.yaml",
+      origins: { "/name": origin },
+      inferredNeeds: { inspect: [] }
+    }
+    const decode = Schema.decodeUnknownResult(WorkflowProvenanceSchema, {
+      errors: "all",
+      onExcessProperty: "error"
+    })
+    expect(Result.isSuccess(decode(valid))).toBe(true)
+    expect(Result.isFailure(decode({ ...valid, origins: { "not-a-pointer": origin } }))).toBe(true)
+    expect(Result.isFailure(decode({ ...valid, inferredNeeds: { BAD: [] } }))).toBe(true)
+
+    const validateGenerated = new Ajv2020({ strict: false }).compile(
+      jsonSchemaDocumentFor(WorkflowProvenanceSchema)
+    )
+    expect(validateGenerated(valid)).toBe(true)
+    expect(validateGenerated({ ...valid, origins: { "not-a-pointer": origin } })).toBe(false)
+    expect(validateGenerated({ ...valid, inferredNeeds: { BAD: [] } })).toBe(false)
+  })
+
+  test("rejects negative zero before a JSON persistence round trip can collapse it", () => {
+    const source = agent("source", {
+      output: { format: "json", schema: { type: "object" } }
+    })
+    const consumer = command("consumer", {
+      needs: ["source"],
+      when: {
+        type: "agent-output",
+        node: "source",
+        pointer: "/value",
+        equals: -0
+      }
+    })
+    const spec = workflow([source, consumer])
+    expect(Object.is(spec.nodes[1]?.when?.equals, -0)).toBe(true)
+    expect(Object.is(JSON.parse(JSON.stringify(spec)).nodes[1].when.equals, -0)).toBe(false)
+    expect(validateWorkflow(spec)).toMatchObject({
+      workflow: null,
+      digest: null,
+      issues: [expect.objectContaining({ code: "json-value" })]
+    })
+  })
+
   test("reports every independent Effect schema problem in one validation pass", () => {
     const result = validateWorkflow({})
     expect(result.workflow).toBeNull()
@@ -451,6 +768,135 @@ describe("workflow contract", () => {
       ]
     })
     expect(pointer.issues.map((issue) => issue.code)).toContain("repeat-until")
+  })
+
+  test("rejects only the exact launcher-owned environment names at their fields", () => {
+    const launcherOwned = [
+      "ORCHESTRATE_BIN",
+      "ORCHESTRATE_STATE_DIR",
+      "ORCHESTRATE_RUN_ID",
+      "ORCHESTRATE_NODE_ID",
+      "ORCHESTRATE_NODE_TOKEN",
+      "ORCHESTRATE_COMPLETION_CONTRACT",
+      "ORCHESTRATE_OUTPUT_PATH",
+      "ORCHESTRATE_RESULT_PATH",
+      "ORCHESTRATE_SOURCE_ROOT"
+    ]
+    for (const [index, name] of launcherOwned.entries()) {
+      const commandResult = validateWorkflow(
+        workflow([
+          command("check", {
+            inheritEnv: index % 2 === 0 ? [name] : [],
+            env: index % 2 === 0 ? {} : { [name]: "authored" }
+          })
+        ])
+      )
+      expect(commandResult.workflow).toBeNull()
+      expect(commandResult.issues).toContainEqual(
+        expect.objectContaining({
+          code: "reserved-environment",
+          path: index % 2 === 0 ? "/nodes/0/inheritEnv/0" : `/nodes/0/env/${name}`
+        })
+      )
+    }
+
+    for (const [index, name] of ["TMPDIR", "TMP", "TEMP"].entries()) {
+      const node = agent("review")
+      if (node.provider !== "codex") {
+        throw new Error("test fixture must be Codex")
+      }
+      const result = validateWorkflow(
+        workflow([
+          {
+            ...node,
+            permissions: {
+              ...node.permissions,
+              inheritEnv: index % 2 === 0 ? [name] : [],
+              env: index % 2 === 0 ? {} : { [name]: "authored" }
+            }
+          }
+        ])
+      )
+      expect(result.workflow).toBeNull()
+      expect(result.issues).toContainEqual(
+        expect.objectContaining({
+          code: "reserved-environment",
+          path:
+            index % 2 === 0
+              ? "/nodes/0/permissions/inheritEnv/0"
+              : `/nodes/0/permissions/env/${name}`
+        })
+      )
+    }
+
+    const allowedAgent = agent("review")
+    if (allowedAgent.provider !== "codex") {
+      throw new Error("test fixture must be Codex")
+    }
+    expect(
+      validateWorkflow(
+        workflow([
+          command("check", {
+            inheritEnv: ["TMPDIR"],
+            env: { ORCHESTRATE_CUSTOM: "kept", TEMP: "/command/temp" }
+          }),
+          {
+            ...allowedAgent,
+            permissions: {
+              ...allowedAgent.permissions,
+              inheritEnv: ["ORCHESTRATE_CUSTOM"],
+              env: { ORCHESTRATE_BUILD_ID: "kept" }
+            }
+          }
+        ])
+      ).issues.some((issue) => issue.code === "reserved-environment")
+    ).toBe(false)
+  })
+
+  test("reserves provider lookup and control environment for both agent providers", () => {
+    const controlNames = ["PATH", "HOME", "CODEX_HOME", "CLAUDE_CONFIG_DIR"]
+    for (const provider of ["codex", "claude"] as const) {
+      for (const name of controlNames) {
+        for (const field of ["inheritEnv", "env"] as const) {
+          const inherited = field === "inheritEnv" ? [name] : []
+          const env = field === "env" ? { [name]: "authored" } : {}
+          const id = `${provider}-${name.toLowerCase().replaceAll("_", "-")}-${field === "inheritEnv" ? "inherit" : "env"}`
+          const node =
+            provider === "codex"
+              ? agent(id, {
+                  provider,
+                  permissions: {
+                    execution: { sandbox: "read-only" },
+                    escalation: "deny",
+                    extraArgs: [],
+                    inheritEnv: inherited,
+                    env
+                  }
+                })
+              : agent(id, {
+                  provider,
+                  permissions: {
+                    execution: { permissionMode: "dontAsk" },
+                    escalation: "deny",
+                    extraArgs: [],
+                    inheritEnv: inherited,
+                    env
+                  }
+                })
+          const result = validateWorkflow(workflow([node]))
+          expect(result.workflow).toBeNull()
+          expect(result.issues).toContainEqual(
+            expect.objectContaining({
+              code: "reserved-environment",
+              path:
+                field === "inheritEnv"
+                  ? "/nodes/0/permissions/inheritEnv/0"
+                  : `/nodes/0/permissions/env/${name}`
+            })
+          )
+        }
+      }
+    }
   })
 
   test("supports captured Codex resume and fork lineage", () => {
@@ -536,13 +982,17 @@ describe("workflow contract", () => {
       home: process.env.HOME,
       state: process.env.ORCHESTRATE_STATE_DIR,
       xdg: process.env.XDG_STATE_HOME,
-      bin: process.env.ORCHESTRATE_BIN
+      bin: process.env.ORCHESTRATE_BIN,
+      codexHome: process.env.CODEX_HOME,
+      claudeConfig: process.env.CLAUDE_CONFIG_DIR
     }
     process.env.HOME = "/tmp/orchestrate-authority-home"
-    delete process.env.XDG_STATE_HOME
+    process.env.XDG_STATE_HOME = "/tmp/orchestrate-authority-home/.local/state"
     delete process.env.ORCHESTRATE_STATE_DIR
     process.env.ORCHESTRATE_BIN =
       "/tmp/orchestrate-authority-home/.local/share/orchestrate/current/bin/orchestrate"
+    process.env.CODEX_HOME = "/tmp/orchestrate-provider-control/codex"
+    process.env.CLAUDE_CONFIG_DIR = "/tmp/orchestrate-provider-control/claude"
     try {
       const codex = agent("codex-write", {
         workspace: { ...workspace(), writes: ["src/**"] },
@@ -577,6 +1027,10 @@ describe("workflow contract", () => {
         stateRoot(),
         path.dirname(stateRoot()),
         path.join(stateRoot(), "runs", "20260803000000-aaaaaaaa"),
+        "/tmp/orchestrate-provider-control/codex",
+        "/tmp/orchestrate-provider-control/codex/profiles",
+        "/tmp/orchestrate-provider-control/claude",
+        "/tmp/orchestrate-provider-control/claude/projects",
         "/tmp/orchestrate-authority-home/.local/share/orchestrate/current",
         "/tmp/orchestrate-authority-home/.codex/skills/orchestrate"
       ]
@@ -600,6 +1054,23 @@ describe("workflow contract", () => {
             cwd: "/tmp/safe"
           }).issues.map((issue) => issue.code)
         ).toContain("protected-path")
+        for (const providerNode of [codex, claudeDontAsk]) {
+          expect(
+            validateWorkflow({
+              ...workflow([
+                {
+                  ...providerNode,
+                  workspace: {
+                    ...providerNode.workspace,
+                    path: "/tmp/safe-workspace",
+                    writes: [path.join(root, "**")]
+                  }
+                }
+              ]),
+              cwd: "/tmp/safe"
+            }).issues.map((issue) => issue.code)
+          ).toContain("protected-path")
+        }
       }
       expect(
         validateWorkflow({
@@ -651,6 +1122,16 @@ describe("workflow contract", () => {
       } else {
         process.env.ORCHESTRATE_BIN = saved.bin
       }
+      if (saved.codexHome === undefined) {
+        delete process.env.CODEX_HOME
+      } else {
+        process.env.CODEX_HOME = saved.codexHome
+      }
+      if (saved.claudeConfig === undefined) {
+        delete process.env.CLAUDE_CONFIG_DIR
+      } else {
+        process.env.CLAUDE_CONFIG_DIR = saved.claudeConfig
+      }
     }
   })
 
@@ -682,6 +1163,129 @@ describe("workflow contract", () => {
       )
     } finally {
       await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  test("compares command write sets by canonical physical path identity", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "orchestrate-command-write-"))
+    try {
+      const canonical = path.join(root, "canonical")
+      const linked = path.join(root, "linked")
+      await mkdir(canonical)
+      await symlink(canonical, linked)
+      const writer = (id: string, workspacePath: string) =>
+        command(id, {
+          mutates: true,
+          workspace: {
+            mode: "existing",
+            path: workspacePath,
+            vcs: "none",
+            writes: ["shared/**"],
+            exclusiveResources: []
+          }
+        })
+      expect(
+        validateWorkflow(workflow([writer("left", canonical), writer("right", linked)])).issues.map(
+          (issue) => issue.code
+        )
+      ).toContain("write-conflict")
+      expect(
+        validateWorkflow(
+          workflow([writer("left", canonical), writer("right", path.join(root, "distinct"))])
+        ).issues.map((issue) => issue.code)
+      ).not.toContain("write-conflict")
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  test("uses the inspected volume case semantics for write conflicts", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "orchestrate-write-case-"))
+    const writer = (id: string, write: string) =>
+      command(id, {
+        mutates: true,
+        workspace: {
+          ...workspace(),
+          path: root,
+          writes: [write]
+        }
+      })
+    try {
+      const nodes = [writer("upper", "CaseTarget/**"), writer("lower", "casetarget/**")]
+      injectPathCaseSensitivityForTests(() => false)
+      expect(validateWorkflow(workflow(nodes)).issues.map((issue) => issue.code)).toContain(
+        "write-conflict"
+      )
+      injectPathCaseSensitivityForTests(() => true)
+      expect(validateWorkflow(workflow(nodes)).issues.map((issue) => issue.code)).not.toContain(
+        "write-conflict"
+      )
+    } finally {
+      injectPathCaseSensitivityForTests(null)
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  test("matches the containing volume's observed case behavior", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "orchestrate-volume-case-"))
+    try {
+      const canonical = path.join(root, "CaseWorkspace")
+      const alternate = path.join(root, "caseWorkspace")
+      await mkdir(canonical)
+      const canonicalReal = await realpath(canonical)
+      const caseAliases = await realpath(alternate).then(
+        (resolved) => resolved === canonicalReal,
+        () => false
+      )
+      const writer = (id: string, workspacePath: string) =>
+        command(id, {
+          mutates: true,
+          workspace: {
+            mode: "existing",
+            path: workspacePath,
+            vcs: "none",
+            writes: ["shared/**"],
+            exclusiveResources: []
+          }
+        })
+      const hasConflict = validateWorkflow(
+        workflow([writer("canonical", canonical), writer("alternate", alternate)])
+      ).issues.some((issue) => issue.code === "write-conflict")
+      expect(hasConflict).toBe(caseAliases)
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  test("reports uncertain static write-prefix inspection instead of comparing lexical paths", () => {
+    const candidate = "/tmp/uncertain-prefix"
+    injectPathInspectionForTests((ancestor) => {
+      if (ancestor === candidate) {
+        throw Object.assign(new Error("simulated I/O failure"), { code: "EIO" })
+      }
+    })
+    try {
+      const result = validateWorkflow(
+        workflow([
+          command("left", {
+            mutates: true,
+            workspace: { ...workspace(), writes: [candidate] }
+          }),
+          command("right", {
+            mutates: true,
+            workspace: { ...workspace(), writes: ["other/**"] }
+          })
+        ])
+      )
+      const issue = result.issues.find(
+        (candidateIssue) => candidateIssue.code === "write-prefix-inspection"
+      )
+      expect(issue?.message).toContain('Node "left"')
+      expect(issue?.message).toContain(JSON.stringify(candidate))
+      expect(issue?.message).toContain(`candidate "${candidate}"`)
+      expect(issue?.message).toContain(`ancestor "${candidate}" (EIO)`)
+    } finally {
+      injectPathInspectionForTests(null)
     }
   })
 

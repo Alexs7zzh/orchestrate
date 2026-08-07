@@ -1,10 +1,10 @@
 import { Ajv2020 } from "ajv/dist/2020.js"
 import { Result, Schema, SchemaIssue } from "effect"
-import { createHash } from "node:crypto"
 import { realpathSync } from "node:fs"
 import os from "node:os"
 import path from "node:path"
 
+import type { ProviderLaunchIdentity } from "./provider-launch.js"
 import type {
   AgentNode,
   ValidationIssue,
@@ -13,8 +13,9 @@ import type {
   WorkflowSpec
 } from "./types.js"
 
-import { WorkflowSchema } from "./schema.js"
-import { stateRoot, submissionsRoot } from "./state.js"
+import { canonicalJson, digestWorkflow } from "./digest.js"
+import { isAbsoluteHttpUrl, WorkflowSchema } from "./schema.js"
+import { providerSessionsRoot, stateRoot, submissionsRoot } from "./state.js"
 
 const decodeWorkflow = Schema.decodeUnknownResult(WorkflowSchema, {
   errors: "all",
@@ -27,6 +28,9 @@ function schemaIssueCode(issuePath: readonly unknown[] | undefined): string {
   const joined = parts.join(".")
   if (joined === "callback.url") {
     return "callback-url"
+  }
+  if (joined.startsWith("callback.headers.")) {
+    return "callback-header"
   }
   if (/^nodes\.\d+\.id$/.test(joined)) {
     return "node-id"
@@ -58,36 +62,69 @@ const NODE_ID = /^[a-z0-9][a-z0-9-]*$/
 const ROUND_INSTANCE_SUFFIX = /--r[1-9][0-9]*$/
 const ENVIRONMENT_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/
 const JSON_POINTER = /^(?:\/(?:[^~/]|~[01])*)*$/
+const LAUNCHER_ENVIRONMENT = new Set([
+  "ORCHESTRATE_BIN",
+  "ORCHESTRATE_STATE_DIR",
+  "ORCHESTRATE_RUN_ID",
+  "ORCHESTRATE_NODE_ID",
+  "ORCHESTRATE_NODE_TOKEN",
+  "ORCHESTRATE_COMPLETION_CONTRACT",
+  "ORCHESTRATE_OUTPUT_PATH",
+  "ORCHESTRATE_RESULT_PATH",
+  "ORCHESTRATE_SOURCE_ROOT"
+])
+const AGENT_SCRATCH_ENVIRONMENT = new Set(["TMPDIR", "TMP", "TEMP"])
+const PROVIDER_CONTROL_ENVIRONMENT = new Set(["PATH", "HOME", "CODEX_HOME", "CLAUDE_CONFIG_DIR"])
 
-export function canonicalize(value: unknown): string {
-  if (Array.isArray(value)) {
-    return `[${value.map(canonicalize).join(",")}]`
-  }
-  if (value !== null && typeof value === "object") {
-    const entries = Object.entries(value as Record<string, unknown>).toSorted(([a], [b]) =>
-      a < b ? -1 : a > b ? 1 : 0
-    )
-    return `{${entries
-      .map(([key, nested]) => `${JSON.stringify(key)}:${canonicalize(nested)}`)
-      .join(",")}}`
-  }
-  return JSON.stringify(value)
+export function isLauncherOwnedAgentEnvironment(name: string): boolean {
+  return (
+    LAUNCHER_ENVIRONMENT.has(name) ||
+    AGENT_SCRATCH_ENVIRONMENT.has(name) ||
+    PROVIDER_CONTROL_ENVIRONMENT.has(name)
+  )
 }
 
-export function workflowDigest(workflow: WorkflowSpec): string {
-  return createHash("sha256").update(canonicalize(workflow)).digest("hex")
-}
+export const canonicalize = canonicalJson
+export const workflowDigest = digestWorkflow
 
 function addIssue(
   issues: ValidationIssue[],
   severity: ValidationIssue["severity"],
   code: string,
   message: string,
-  nodes?: readonly string[]
+  details: {
+    readonly path: string
+    readonly primaryNode?: string
+    readonly relatedNodes?: readonly string[]
+  }
 ): void {
-  issues.push(
-    nodes === undefined ? { severity, code, message } : { severity, code, message, nodes }
-  )
+  const nodes = [
+    ...(details.primaryNode === undefined ? [] : [details.primaryNode]),
+    ...(details.relatedNodes ?? [])
+  ]
+  issues.push({
+    severity,
+    code,
+    message,
+    path: details.path,
+    ...(details.primaryNode === undefined ? {} : { primaryNode: details.primaryNode }),
+    ...(details.relatedNodes === undefined ? {} : { relatedNodes: details.relatedNodes }),
+    ...(nodes.length === 0 ? {} : { nodes })
+  })
+}
+
+function pointerSegment(value: string): string {
+  return value.replaceAll("~", "~0").replaceAll("/", "~1")
+}
+
+function schemaPathPart(value: unknown): string {
+  if (typeof value === "string") {
+    return value
+  }
+  if (typeof value === "number" || typeof value === "boolean" || typeof value === "bigint") {
+    return String(value)
+  }
+  return JSON.stringify(value) ?? "<unknown>"
 }
 
 function graphMaps(nodes: readonly WorkflowNode[]): {
@@ -150,14 +187,15 @@ function absoluteWritePrefix(
   workflow: WorkflowSpec,
   node: WorkflowNode,
   pattern: string
-): string | null {
+): CanonicalPathIdentity | null {
   if (node.workspace.mode === "git-worktree" && node.workspace.path === null) {
     return null
   }
-  return path.resolve(
+  const candidate = path.resolve(
     node.workspace.path ?? node.cwd ?? workflow.cwd,
     normalizedStaticPrefix(pattern)
   )
+  return inspectDeclaredPath(node.id, pattern, candidate, true)
 }
 
 function prefixesOverlap(left: string, right: string): boolean {
@@ -168,19 +206,86 @@ function prefixesOverlap(left: string, right: string): boolean {
   )
 }
 
-export function resolveThroughExistingAncestor(candidate: string): string {
+export class PathInspectionError extends Error {
+  readonly candidate: string
+  readonly ancestor: string
+  readonly errno: string
+
+  constructor(candidate: string, ancestor: string, cause: unknown, errno?: string) {
+    const code = errno ?? (cause as NodeJS.ErrnoException).code ?? "UNKNOWN"
+    super(`Could not inspect path candidate "${candidate}" at ancestor "${ancestor}" (${code}).`, {
+      cause
+    })
+    this.name = "PathInspectionError"
+    this.candidate = candidate
+    this.ancestor = ancestor
+    this.errno = code
+  }
+}
+
+export class DeclaredPathInspectionError extends Error {
+  readonly nodeId: string
+  readonly pattern: string
+  readonly candidate: string
+  readonly ancestor: string
+  readonly errno: string
+
+  constructor(nodeId: string, pattern: string, candidate: string, cause: PathInspectionError) {
+    super(
+      `Node "${nodeId}" could not inspect declared path ${JSON.stringify(pattern)} candidate "${candidate}" at ancestor "${cause.ancestor}" (${cause.errno}).`,
+      { cause }
+    )
+    this.name = "DeclaredPathInspectionError"
+    this.nodeId = nodeId
+    this.pattern = pattern
+    this.candidate = candidate
+    this.ancestor = cause.ancestor
+    this.errno = cause.errno
+  }
+}
+
+let inspectPathForTests: ((ancestor: string) => void) | null = null
+let caseSensitivityForTests: ((ancestor: string) => boolean | null) | null = null
+
+export function injectPathInspectionForTests(hook: ((ancestor: string) => void) | null): void {
+  inspectPathForTests = hook
+}
+
+export function injectPathCaseSensitivityForTests(
+  hook: ((ancestor: string) => boolean | null) | null
+): void {
+  caseSensitivityForTests = hook
+}
+
+interface ResolvedPathInspection {
+  readonly resolved: string
+  readonly existingAncestor: string
+}
+
+interface CanonicalPathIdentity {
+  readonly resolved: string
+  readonly comparison: string
+}
+
+function resolvePathInspection(candidate: string): ResolvedPathInspection {
+  const absoluteCandidate = path.resolve(candidate)
   let current = path.resolve(candidate)
   const suffix: string[] = []
   for (;;) {
     try {
-      return path.join(realpathSync.native(current), ...suffix.toReversed())
+      inspectPathForTests?.(current)
+      const existingAncestor = realpathSync.native(current)
+      return {
+        resolved: path.join(existingAncestor, ...suffix.toReversed()),
+        existingAncestor
+      }
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
-        return path.resolve(candidate)
+        throw new PathInspectionError(absoluteCandidate, current, error)
       }
       const parent = path.dirname(current)
       if (parent === current) {
-        return path.resolve(candidate)
+        throw new PathInspectionError(absoluteCandidate, current, error)
       }
       suffix.push(path.basename(current))
       current = parent
@@ -188,20 +293,126 @@ export function resolveThroughExistingAncestor(candidate: string): string {
   }
 }
 
-export function orchestrateAuthorityPaths(): readonly string[] {
-  const configuredHome = process.env.HOME?.trim()
-  const home = path.resolve(
-    configuredHome === undefined || configuredHome.length === 0 ? os.homedir() : configuredHome
+export function resolveThroughExistingAncestor(candidate: string): string {
+  return resolvePathInspection(candidate).resolved
+}
+
+export function launcherHomePath(): string {
+  const configured = process.env.HOME?.trim()
+  return resolveThroughExistingAncestor(
+    path.resolve(configured === undefined || configured.length === 0 ? os.homedir() : configured)
   )
+}
+
+export function providerControlRoot(provider: AgentNode["provider"]): string {
+  const configured =
+    provider === "codex" ? process.env.CODEX_HOME?.trim() : process.env.CLAUDE_CONFIG_DIR?.trim()
+  const candidate =
+    configured === undefined || configured.length === 0
+      ? path.join(launcherHomePath(), provider === "codex" ? ".codex" : ".claude")
+      : configured
+  return resolveThroughExistingAncestor(path.resolve(candidate))
+}
+
+function toggledAsciiCase(value: string): string | null {
+  const index = value.search(/[A-Za-z]/)
+  if (index < 0) {
+    return null
+  }
+  const character = value[index] as string
+  const toggled =
+    character === character.toLowerCase() ? character.toUpperCase() : character.toLowerCase()
+  return `${value.slice(0, index)}${toggled}${value.slice(index + 1)}`
+}
+
+function caseSensitiveAt(candidate: string, existingAncestor: string): boolean {
+  const injected = caseSensitivityForTests?.(existingAncestor)
+  if (injected !== undefined && injected !== null) {
+    return injected
+  }
+  for (let current = existingAncestor; ; current = path.dirname(current)) {
+    const alternateName = toggledAsciiCase(path.basename(current))
+    if (alternateName !== null) {
+      const alternate = path.join(path.dirname(current), alternateName)
+      try {
+        inspectPathForTests?.(alternate)
+        return realpathSync.native(alternate) !== realpathSync.native(current)
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+          return true
+        }
+        throw new PathInspectionError(candidate, alternate, error)
+      }
+    }
+    const parent = path.dirname(current)
+    if (parent === current) {
+      throw new PathInspectionError(
+        candidate,
+        existingAncestor,
+        new Error("No case-testable existing ancestor."),
+        "ECASEUNKNOWN"
+      )
+    }
+  }
+}
+
+function canonicalPathIdentity(candidate: string): CanonicalPathIdentity {
+  const inspection = resolvePathInspection(candidate)
+  const caseSensitive = caseSensitiveAt(path.resolve(candidate), inspection.existingAncestor)
+  return {
+    resolved: inspection.resolved,
+    comparison: caseSensitive ? inspection.resolved : inspection.resolved.toLocaleLowerCase("en-US")
+  }
+}
+
+function inspectDeclaredPath(
+  nodeId: string,
+  pattern: string,
+  candidate: string,
+  withCaseSemantics = false
+): CanonicalPathIdentity {
+  try {
+    if (withCaseSemantics) {
+      return canonicalPathIdentity(candidate)
+    }
+    const resolved = resolveThroughExistingAncestor(candidate)
+    return { resolved, comparison: resolved }
+  } catch (error) {
+    if (error instanceof PathInspectionError) {
+      throw new DeclaredPathInspectionError(nodeId, pattern, path.resolve(candidate), error)
+    }
+    throw error
+  }
+}
+
+export interface OrchestrateAuthorityPolicy {
+  /** Durable runtime state and cross-attempt transport that workflow agents must never read. */
+  readonly denyReadRoots: readonly string[]
+  /** Launcher-owned state, credentials, installation, and skill assets that agents cannot mutate. */
+  readonly denyWriteRoots: readonly string[]
+}
+
+export function orchestrateAuthorityPolicy(): OrchestrateAuthorityPolicy {
+  const home = launcherHomePath()
   const configuredBinary = process.env.ORCHESTRATE_BIN?.trim()
   const embeddedExecutable = path.basename(process.execPath).startsWith("orchestrate")
     ? process.execPath
     : null
-  return [
+  // Provider configuration remains readable because each CLI legitimately
+  // consumes credentials and account state there. It is still immutable to
+  // workflow nodes. Durable Orchestrate state and cross-attempt transport are
+  // both unreadable and immutable.
+  const providerControlRoots = [providerControlRoot("codex"), providerControlRoot("claude")]
+  const denyReadRoots = [
+    ...new Set(
+      [stateRoot(), submissionsRoot(), providerSessionsRoot()].map(resolveThroughExistingAncestor)
+    )
+  ]
+  const denyWriteRoots = [
     ...new Set(
       [
-        stateRoot(),
-        submissionsRoot(),
+        ...denyReadRoots,
+        ...providerControlRoots,
         path.join(home, ".local", "share", "orchestrate"),
         path.join(home, ".local", "bin", "orchestrate"),
         path.join(home, ".agents", "skills", "orchestrate"),
@@ -214,6 +425,11 @@ export function orchestrateAuthorityPaths(): readonly string[] {
       ].map(resolveThroughExistingAncestor)
     )
   ]
+  return { denyReadRoots, denyWriteRoots }
+}
+
+export function orchestrateAuthorityPaths(): readonly string[] {
+  return orchestrateAuthorityPolicy().denyWriteRoots
 }
 
 export function isMutatingProviderNode(node: WorkflowNode): node is AgentNode {
@@ -229,24 +445,38 @@ export function providerAuthorityOverlaps(
   node: WorkflowNode,
   effectiveRoot = node.workspace.mode === "git-worktree" && node.workspace.path === null
     ? path.join(os.tmpdir(), "orchestrate-worktrees", "validation", node.id)
-    : (node.workspace.path ?? node.cwd ?? workflow.cwd)
+    : (node.workspace.path ?? node.cwd ?? workflow.cwd),
+  additionalAuthorityPaths: readonly string[] = []
 ): readonly string[] {
   if (!isMutatingProviderNode(node)) {
     return []
   }
   const roots = [
-    ["provider sandbox root", effectiveRoot] as const,
     ...node.workspace.writes.map(
       (pattern) =>
         [
           `declared write ${JSON.stringify(pattern)}`,
-          path.resolve(effectiveRoot, normalizedStaticPrefix(pattern))
+          path.resolve(effectiveRoot, normalizedStaticPrefix(pattern)),
+          pattern
         ] as const
-    )
+    ),
+    ["provider sandbox root", effectiveRoot, "provider sandbox root"] as const
   ]
-  const protectedPaths = orchestrateAuthorityPaths()
-  return roots.flatMap(([label, candidate]) => {
-    const resolved = resolveThroughExistingAncestor(candidate)
+  let protectedPaths: readonly string[]
+  try {
+    protectedPaths = [
+      ...orchestrateAuthorityPaths(),
+      ...additionalAuthorityPaths.map(resolveThroughExistingAncestor)
+    ]
+  } catch (error) {
+    if (error instanceof PathInspectionError) {
+      const [, candidate, pattern] = roots[0] as readonly [string, string, string]
+      throw new DeclaredPathInspectionError(node.id, pattern, candidate, error)
+    }
+    throw error
+  }
+  return roots.flatMap(([label, candidate, pattern]) => {
+    const resolved = inspectDeclaredPath(node.id, pattern, candidate).resolved
     const authority = protectedPaths.find((protectedPath) =>
       prefixesOverlap(resolved, protectedPath)
     )
@@ -264,12 +494,11 @@ export function providerNonCanonicalWritePrefixes(
   if (node.workspace.mode === "git-worktree" && node.workspace.path === null) {
     return []
   }
-  const effectiveRoot = resolveThroughExistingAncestor(
-    node.workspace.path ?? node.cwd ?? workflow.cwd
-  )
+  const rootCandidate = node.workspace.path ?? node.cwd ?? workflow.cwd
+  const effectiveRoot = inspectDeclaredPath(node.id, "provider root", rootCandidate).resolved
   return node.workspace.writes.flatMap((pattern) => {
     const unresolved = path.resolve(effectiveRoot, normalizedStaticPrefix(pattern))
-    const resolved = resolveThroughExistingAncestor(unresolved)
+    const resolved = inspectDeclaredPath(node.id, pattern, unresolved).resolved
     return resolved === unresolved
       ? []
       : [`declared write ${JSON.stringify(pattern)} resolves through a symlink to ${resolved}`]
@@ -279,13 +508,58 @@ export function providerNonCanonicalWritePrefixes(
 export function assertProviderAuthorityIsolation(
   workflow: WorkflowSpec,
   node: WorkflowNode,
-  effectiveRoot?: string
+  effectiveRoot?: string,
+  additionalAuthorityPaths: readonly string[] = []
 ): void {
-  const overlaps = providerAuthorityOverlaps(workflow, node, effectiveRoot)
+  const overlaps = providerAuthorityOverlaps(
+    workflow,
+    node,
+    effectiveRoot,
+    additionalAuthorityPaths
+  )
   if (overlaps.length > 0) {
     throw new Error(
       `Mutating provider node "${node.id}" overlaps Orchestrate-owned authority: ${overlaps.join("; ")}.`
     )
+  }
+}
+
+export function assertWorkflowProviderLaunchIsolation(
+  workflow: WorkflowSpec,
+  identities: readonly ProviderLaunchIdentity[]
+): void {
+  for (const node of workflow.nodes) {
+    if (node.type === "command" ? !node.mutates : !isMutatingProviderNode(node)) {
+      continue
+    }
+    const effectiveRoot =
+      node.workspace.mode === "git-worktree" && node.workspace.path === null
+        ? path.join(os.tmpdir(), "orchestrate-worktrees", "validation", node.id)
+        : (node.workspace.path ?? node.cwd ?? workflow.cwd)
+    const writeAuthorities = node.workspace.writes.map((pattern) => {
+      const candidate = path.resolve(effectiveRoot, normalizedStaticPrefix(pattern))
+      return {
+        label: `declared write ${JSON.stringify(pattern)}`,
+        resolved: inspectDeclaredPath(node.id, pattern, candidate).resolved
+      }
+    })
+    const rootLabel = node.type === "command" ? "mutating command root" : "provider sandbox root"
+    writeAuthorities.push({
+      label: rootLabel,
+      resolved: inspectDeclaredPath(node.id, rootLabel, effectiveRoot).resolved
+    })
+    for (const identity of identities) {
+      for (const launchAuthority of identity.authorityEntries) {
+        const overlaps = writeAuthorities.filter(({ resolved }) =>
+          prefixesOverlap(resolved, launchAuthority.path)
+        )
+        if (overlaps.length > 0) {
+          throw new Error(
+            `Mutating node "${node.id}" overlaps ${identity.provider} ${launchAuthority.label} "${launchAuthority.path}": ${overlaps.map(({ label, resolved }) => `${label} ${resolved}`).join("; ")}.`
+          )
+        }
+      }
+    }
   }
 }
 
@@ -312,7 +586,7 @@ export function overlappingMutableNodes(workflow: WorkflowSpec): readonly [strin
         right.workspace.writes.some((rightPattern) => {
           const a = absoluteWritePrefix(workflow, left, leftPattern)
           const b = absoluteWritePrefix(workflow, right, rightPattern)
-          return a !== null && b !== null && prefixesOverlap(a, b)
+          return a !== null && b !== null && prefixesOverlap(a.comparison, b.comparison)
         })
       )
       if (overlap) {
@@ -327,17 +601,27 @@ function validateEnvironment(
   issues: ValidationIssue[],
   nodeId: string,
   inherited: readonly string[],
-  explicit: Readonly<Record<string, string>>
+  explicit: Readonly<Record<string, string>>,
+  fieldBase: string,
+  agentEnvironment: boolean
 ): void {
   const invalid = [...inherited, ...Object.keys(explicit)].find(
     (name) => !ENVIRONMENT_NAME.test(name)
   )
   if (invalid !== undefined) {
+    const inheritedIndex = inherited.indexOf(invalid)
     addIssue(
       issues,
       "error",
       "environment-name",
-      `Node "${nodeId}" has invalid environment variable name "${invalid}".`
+      `Node "${nodeId}" has invalid environment variable name "${invalid}".`,
+      {
+        path:
+          inheritedIndex >= 0
+            ? `${fieldBase}/inheritEnv/${inheritedIndex}`
+            : `${fieldBase}/env/${pointerSegment(invalid)}`,
+        primaryNode: nodeId
+      }
     )
   }
   if (new Set(inherited).size !== inherited.length) {
@@ -345,12 +629,45 @@ function validateEnvironment(
       issues,
       "error",
       "environment-name",
-      `Node "${nodeId}" repeats an inherited environment variable.`
+      `Node "${nodeId}" repeats an inherited environment variable.`,
+      { path: `${fieldBase}/inheritEnv`, primaryNode: nodeId }
     )
+  }
+  const isReserved = (name: string): boolean =>
+    agentEnvironment ? isLauncherOwnedAgentEnvironment(name) : LAUNCHER_ENVIRONMENT.has(name)
+  for (const [index, name] of inherited.entries()) {
+    if (!isReserved(name)) {
+      continue
+    }
+    issues.push({
+      severity: "error",
+      code: "reserved-environment",
+      message: `Node "${nodeId}" inheritEnv contains launcher-owned environment variable "${name}".`,
+      path: `${fieldBase}/inheritEnv/${index}`,
+      nodes: [nodeId],
+      primaryNode: nodeId
+    })
+  }
+  for (const name of Object.keys(explicit)) {
+    if (!isReserved(name)) {
+      continue
+    }
+    issues.push({
+      severity: "error",
+      code: "reserved-environment",
+      message: `Node "${nodeId}" env contains launcher-owned environment variable "${name}".`,
+      path: `${fieldBase}/env/${pointerSegment(name)}`,
+      nodes: [nodeId],
+      primaryNode: nodeId
+    })
   }
 }
 
-function validateProviderArguments(node: AgentNode, issues: ValidationIssue[]): void {
+function validateProviderArguments(
+  node: AgentNode,
+  issues: ValidationIssue[],
+  nodePointer: string
+): void {
   const reserved =
     node.provider === "codex"
       ? [
@@ -431,7 +748,8 @@ function validateProviderArguments(node: AgentNode, issues: ValidationIssue[]): 
       issues,
       "error",
       "reserved-provider-argument",
-      `Node "${node.id}" cannot use Claude extraArgs; the launcher reserves the complete permission and sandbox surface.`
+      `Node "${node.id}" cannot use Claude extraArgs; the launcher reserves the complete permission and sandbox surface.`,
+      { path: `${nodePointer}/permissions/extraArgs`, primaryNode: node.id }
     )
     return
   }
@@ -449,29 +767,36 @@ function validateProviderArguments(node: AgentNode, issues: ValidationIssue[]): 
       issues,
       "error",
       "reserved-provider-argument",
-      `Node "${node.id}" extraArgs contains reserved argument "${conflict}"; use the explicit contract field.`
+      `Node "${node.id}" extraArgs contains reserved argument "${conflict}"; use the explicit contract field.`,
+      { path: `${nodePointer}/permissions/extraArgs`, primaryNode: node.id }
     )
   }
 }
 
 function validateNode(workflow: WorkflowSpec, node: WorkflowNode, issues: ValidationIssue[]): void {
+  const nodePointer = `/nodes/${workflow.nodes.indexOf(node)}`
   if (!NODE_ID.test(node.id) || ROUND_INSTANCE_SUFFIX.test(node.id)) {
     addIssue(
       issues,
       "error",
       "node-id",
-      `Node "${node.id}" must use lowercase letters, digits, and hyphens and must not end in reserved --r<N>.`
+      `Node "${node.id}" must use lowercase letters, digits, and hyphens and must not end in reserved --r<N>.`,
+      { path: `${nodePointer}/id`, primaryNode: node.id }
     )
   }
   if (node.cwd !== null && !path.isAbsolute(node.cwd)) {
-    addIssue(issues, "error", "node-cwd", `Node "${node.id}" cwd must be absolute or null.`)
+    addIssue(issues, "error", "node-cwd", `Node "${node.id}" cwd must be absolute or null.`, {
+      path: `${nodePointer}/cwd`,
+      primaryNode: node.id
+    })
   }
   if (node.workspace.path !== null && !path.isAbsolute(node.workspace.path)) {
     addIssue(
       issues,
       "error",
       "workspace-path",
-      `Node "${node.id}" workspace path must be absolute or null.`
+      `Node "${node.id}" workspace path must be absolute or null.`,
+      { path: `${nodePointer}/workspace/path`, primaryNode: node.id }
     )
   }
   const canMutate =
@@ -485,28 +810,38 @@ function validateNode(workflow: WorkflowSpec, node: WorkflowNode, issues: Valida
       "warning",
       "unknown-writes",
       `Potentially mutating node "${node.id}" declares no write set.`,
-      [node.id]
+      { path: `${nodePointer}/workspace/writes`, primaryNode: node.id }
     )
   }
-  const authorityOverlaps = providerAuthorityOverlaps(workflow, node)
-  if (authorityOverlaps.length > 0) {
-    addIssue(
-      issues,
-      "error",
-      "protected-path",
-      `Mutating provider node "${node.id}" overlaps Orchestrate-owned authority: ${authorityOverlaps.join("; ")}.`,
-      [node.id]
-    )
-  }
-  const nonCanonicalWrites = providerNonCanonicalWritePrefixes(workflow, node)
-  if (nonCanonicalWrites.length > 0) {
-    addIssue(
-      issues,
-      "error",
-      "workspace-write-symlink",
-      `Mutating provider node "${node.id}" has a non-canonical write prefix: ${nonCanonicalWrites.join("; ")}. Use the canonical target.`,
-      [node.id]
-    )
+  try {
+    const authorityOverlaps = providerAuthorityOverlaps(workflow, node)
+    if (authorityOverlaps.length > 0) {
+      addIssue(
+        issues,
+        "error",
+        "protected-path",
+        `Mutating provider node "${node.id}" overlaps Orchestrate-owned authority: ${authorityOverlaps.join("; ")}.`,
+        { path: `${nodePointer}/workspace`, primaryNode: node.id }
+      )
+    }
+    const nonCanonicalWrites = providerNonCanonicalWritePrefixes(workflow, node)
+    if (nonCanonicalWrites.length > 0) {
+      addIssue(
+        issues,
+        "error",
+        "workspace-write-symlink",
+        `Mutating provider node "${node.id}" has a non-canonical write prefix: ${nonCanonicalWrites.join("; ")}. Use the canonical target.`,
+        { path: `${nodePointer}/workspace/writes`, primaryNode: node.id }
+      )
+    }
+  } catch (error) {
+    if (!(error instanceof DeclaredPathInspectionError)) {
+      throw error
+    }
+    addIssue(issues, "error", "workspace-path-inspection", error.message, {
+      path: `${nodePointer}/workspace/writes`,
+      primaryNode: node.id
+    })
   }
   if (
     canMutate &&
@@ -519,17 +854,18 @@ function validateNode(workflow: WorkflowSpec, node: WorkflowNode, issues: Valida
       "warning",
       "plastic-resource",
       `Mutating Plastic node "${node.id}" should reserve "plastic-scm".`,
-      [node.id]
+      { path: `${nodePointer}/workspace/exclusiveResources`, primaryNode: node.id }
     )
   }
   const inputLabels = new Set<string>()
-  for (const input of node.inputs) {
+  for (const [inputIndex, input] of node.inputs.entries()) {
     if (inputLabels.has(input.as)) {
       addIssue(
         issues,
         "error",
         "input-label",
-        `Node "${node.id}" repeats input label "${input.as}".`
+        `Node "${node.id}" repeats input label "${input.as}".`,
+        { path: `${nodePointer}/inputs/${inputIndex}/as`, primaryNode: node.id }
       )
     }
     inputLabels.add(input.as)
@@ -545,7 +881,8 @@ function validateNode(workflow: WorkflowSpec, node: WorkflowNode, issues: Valida
         issues,
         "error",
         "command-path",
-        `Command node "${node.id}" argv[0] must be absolute unless PATH is explicitly provided.`
+        `Command node "${node.id}" argv[0] must be absolute unless PATH is explicitly provided.`,
+        { path: `${nodePointer}/argv/0`, primaryNode: node.id }
       )
     }
     if (!node.mutates && node.workspace.writes.length > 0) {
@@ -553,14 +890,15 @@ function validateNode(workflow: WorkflowSpec, node: WorkflowNode, issues: Valida
         issues,
         "error",
         "command-writes",
-        `Command node "${node.id}" declares writes while mutates=false.`
+        `Command node "${node.id}" declares writes while mutates=false.`,
+        { path: `${nodePointer}/workspace/writes`, primaryNode: node.id }
       )
     }
-    validateEnvironment(issues, node.id, node.inheritEnv, node.env)
+    validateEnvironment(issues, node.id, node.inheritEnv, node.env, nodePointer, false)
     return
   }
 
-  validateProviderArguments(node, issues)
+  validateProviderArguments(node, issues, nodePointer)
   if (node.provider === "claude") {
     const mode = node.permissions.execution.permissionMode
     if (mode !== "dontAsk") {
@@ -568,7 +906,8 @@ function validateNode(workflow: WorkflowSpec, node: WorkflowNode, issues: Valida
         issues,
         "error",
         "unsupported-permission-mode",
-        `Claude permission mode "${mode}" is not confined enough for workflow execution; use dontAsk with the launcher-owned fail-closed sandbox.`
+        `Claude permission mode "${mode}" is not confined enough for workflow execution; use dontAsk with the launcher-owned fail-closed sandbox.`,
+        { path: `${nodePointer}/permissions/execution/permissionMode`, primaryNode: node.id }
       )
     }
     const requiredEscalation =
@@ -582,17 +921,26 @@ function validateNode(workflow: WorkflowSpec, node: WorkflowNode, issues: Valida
         issues,
         "error",
         "permission-escalation",
-        `Claude permission mode "${mode}" requires escalation="${requiredEscalation}" for node "${node.id}".`
+        `Claude permission mode "${mode}" requires escalation="${requiredEscalation}" for node "${node.id}".`,
+        { path: `${nodePointer}/permissions/escalation`, primaryNode: node.id }
       )
     }
   }
-  validateEnvironment(issues, node.id, node.permissions.inheritEnv, node.permissions.env)
+  validateEnvironment(
+    issues,
+    node.id,
+    node.permissions.inheritEnv,
+    node.permissions.env,
+    `${nodePointer}/permissions`,
+    true
+  )
   if (node.model.toLowerCase().startsWith("provider-") && node.model !== "provider-default") {
     addIssue(
       issues,
       "error",
       "model",
-      `Node "${node.id}" must use exactly "provider-default" or a real model name.`
+      `Node "${node.id}" must use exactly "provider-default" or a real model name.`,
+      { path: `${nodePointer}/model`, primaryNode: node.id }
     )
   }
   if (node.session.mode === "fresh" && node.session.from !== null) {
@@ -600,7 +948,8 @@ function validateNode(workflow: WorkflowSpec, node: WorkflowNode, issues: Valida
       issues,
       "error",
       "session-source",
-      `Fresh node "${node.id}" must set session.from to null.`
+      `Fresh node "${node.id}" must set session.from to null.`,
+      { path: `${nodePointer}/session/from`, primaryNode: node.id }
     )
   }
   if (node.session.mode !== "fresh" && node.session.from === null) {
@@ -608,7 +957,8 @@ function validateNode(workflow: WorkflowSpec, node: WorkflowNode, issues: Valida
       issues,
       "error",
       "session-source",
-      `Node "${node.id}" must name the session it resumes or forks.`
+      `Node "${node.id}" must name the session it resumes or forks.`,
+      { path: `${nodePointer}/session/from`, primaryNode: node.id }
     )
   }
   if (node.output.format === "text" && node.output.schema !== null) {
@@ -616,7 +966,8 @@ function validateNode(workflow: WorkflowSpec, node: WorkflowNode, issues: Valida
       issues,
       "error",
       "output-schema",
-      `Text node "${node.id}" must set output.schema to null.`
+      `Text node "${node.id}" must set output.schema to null.`,
+      { path: `${nodePointer}/output/schema`, primaryNode: node.id }
     )
   }
   if (node.output.format === "json" && node.output.schema === null) {
@@ -624,7 +975,8 @@ function validateNode(workflow: WorkflowSpec, node: WorkflowNode, issues: Valida
       issues,
       "error",
       "output-schema",
-      `JSON node "${node.id}" must provide an output schema.`
+      `JSON node "${node.id}" must provide an output schema.`,
+      { path: `${nodePointer}/output/schema`, primaryNode: node.id }
     )
   }
   if (node.output.schema !== null) {
@@ -635,7 +987,8 @@ function validateNode(workflow: WorkflowSpec, node: WorkflowNode, issues: Valida
         issues,
         "error",
         "output-schema",
-        `Node "${node.id}" output schema is invalid: ${error instanceof Error ? error.message : String(error)}`
+        `Node "${node.id}" output schema is invalid: ${error instanceof Error ? error.message : String(error)}`,
+        { path: `${nodePointer}/output/schema`, primaryNode: node.id }
       )
     }
   }
@@ -649,30 +1002,38 @@ function validateRepeats(
 ): ReadonlyMap<string, string> {
   const memberToRepeat = new Map<string, string>()
   const repeatIds = new Set<string>()
-  for (const repeat of workflow.repeats) {
+  for (const [repeatIndex, repeat] of workflow.repeats.entries()) {
+    const repeatPointer = `/repeats/${repeatIndex}`
     if (!NODE_ID.test(repeat.id) || ROUND_INSTANCE_SUFFIX.test(repeat.id)) {
       addIssue(
         issues,
         "error",
         "repeat-id",
-        `Repeat "${repeat.id}" must use an unreserved lowercase id.`
+        `Repeat "${repeat.id}" must use an unreserved lowercase id.`,
+        { path: `${repeatPointer}/id` }
       )
     }
     if (repeatIds.has(repeat.id) || byId.has(repeat.id)) {
-      addIssue(issues, "error", "repeat-id", `Repeat id "${repeat.id}" is not unique.`)
+      addIssue(issues, "error", "repeat-id", `Repeat id "${repeat.id}" is not unique.`, {
+        path: `${repeatPointer}/id`,
+        ...(byId.has(repeat.id) ? { relatedNodes: [repeat.id] } : {})
+      })
     }
     repeatIds.add(repeat.id)
     if (new Set(repeat.members).size !== repeat.members.length) {
-      addIssue(issues, "error", "repeat-members", `Repeat "${repeat.id}" repeats a member id.`)
+      addIssue(issues, "error", "repeat-members", `Repeat "${repeat.id}" repeats a member id.`, {
+        path: `${repeatPointer}/members`
+      })
     }
-    for (const member of repeat.members) {
+    for (const [memberIndex, member] of repeat.members.entries()) {
       const node = byId.get(member)
       if (node === undefined) {
         addIssue(
           issues,
           "error",
           "repeat-members",
-          `Repeat "${repeat.id}" names unknown member "${member}".`
+          `Repeat "${repeat.id}" names unknown member "${member}".`,
+          { path: `${repeatPointer}/members/${memberIndex}` }
         )
         continue
       }
@@ -682,10 +1043,15 @@ function validateRepeats(
           issues,
           "error",
           "repeat-members",
-          `Node "${member}" belongs to both repeat "${owner}" and "${repeat.id}".`
+          `Node "${member}" belongs to both repeat "${owner}" and "${repeat.id}".`,
+          {
+            path: `${repeatPointer}/members/${memberIndex}`,
+            relatedNodes: [member]
+          }
         )
       }
       memberToRepeat.set(member, repeat.id)
+      const memberPointer = `/nodes/${workflow.nodes.indexOf(node)}`
       if (
         node.workspace.mode === "git-worktree" &&
         !node.workspace.git.branch.includes("{{nodeId}}")
@@ -694,7 +1060,8 @@ function validateRepeats(
           issues,
           "error",
           "repeat-worktree-branch",
-          `Repeat member "${member}" Git worktree branch must include {{nodeId}} so every runtime round has a unique branch.`
+          `Repeat member "${member}" Git worktree branch must include {{nodeId}} so every runtime round has a unique branch.`,
+          { path: `${memberPointer}/workspace/git/branch`, primaryNode: member }
         )
       }
       if (
@@ -706,7 +1073,8 @@ function validateRepeats(
           issues,
           "error",
           "repeat-worktree-path",
-          `Repeat member "${member}" explicit Git worktree path must include {{nodeId}} so every runtime round has a unique directory.`
+          `Repeat member "${member}" explicit Git worktree path must include {{nodeId}} so every runtime round has a unique directory.`,
+          { path: `${memberPointer}/workspace/path`, primaryNode: member }
         )
       }
     }
@@ -715,7 +1083,11 @@ function validateRepeats(
         issues,
         "error",
         "repeat-until",
-        `Repeat "${repeat.id}" until node "${repeat.until.node}" must be a member.`
+        `Repeat "${repeat.id}" until node "${repeat.until.node}" must be a member.`,
+        {
+          path: `${repeatPointer}/until/node`,
+          ...(byId.has(repeat.until.node) ? { relatedNodes: [repeat.until.node] } : {})
+        }
       )
       continue
     }
@@ -725,7 +1097,8 @@ function validateRepeats(
         issues,
         "error",
         "repeat-until",
-        `Repeat "${repeat.id}" command-success condition must name a command node.`
+        `Repeat "${repeat.id}" command-success condition must name a command node.`,
+        { path: `${repeatPointer}/until/node`, relatedNodes: [repeat.until.node] }
       )
     }
     if (repeat.until.type === "agent-output") {
@@ -738,7 +1111,8 @@ function validateRepeats(
           issues,
           "error",
           "repeat-until",
-          `Repeat "${repeat.id}" agent-output condition must name a schema-validated JSON agent node.`
+          `Repeat "${repeat.id}" agent-output condition must name a schema-validated JSON agent node.`,
+          { path: `${repeatPointer}/until/node`, relatedNodes: [repeat.until.node] }
         )
       }
       if (!JSON_POINTER.test(repeat.until.pointer)) {
@@ -746,15 +1120,17 @@ function validateRepeats(
           issues,
           "error",
           "repeat-until",
-          `Repeat "${repeat.id}" pointer must be an RFC 6901 JSON pointer.`
+          `Repeat "${repeat.id}" pointer must be an RFC 6901 JSON pointer.`,
+          { path: `${repeatPointer}/until/pointer`, relatedNodes: [repeat.until.node] }
         )
       }
     }
   }
 
-  for (const node of workflow.nodes) {
+  for (const [nodeIndex, node] of workflow.nodes.entries()) {
+    const nodePointer = `/nodes/${nodeIndex}`
     const nodeRepeat = memberToRepeat.get(node.id)
-    for (const dependency of node.needs) {
+    for (const [dependencyIndex, dependency] of node.needs.entries()) {
       const dependencyRepeat = memberToRepeat.get(dependency)
       if (
         nodeRepeat !== undefined &&
@@ -765,11 +1141,16 @@ function validateRepeats(
           issues,
           "error",
           "repeat-dependency",
-          `Repeat member "${node.id}" cannot depend on member "${dependency}" from another repeat.`
+          `Repeat member "${node.id}" cannot depend on member "${dependency}" from another repeat.`,
+          {
+            path: `${nodePointer}/needs/${dependencyIndex}`,
+            primaryNode: node.id,
+            relatedNodes: [dependency]
+          }
         )
       }
     }
-    for (const input of node.inputs) {
+    for (const [inputIndex, input] of node.inputs.entries()) {
       if (input.round === "previous") {
         const sourceRepeat = memberToRepeat.get(input.from)
         if (nodeRepeat === undefined || sourceRepeat !== nodeRepeat) {
@@ -777,7 +1158,12 @@ function validateRepeats(
             issues,
             "error",
             "input-round",
-            `Node "${node.id}" previous-round input "${input.from}" must come from the same repeat.`
+            `Node "${node.id}" previous-round input "${input.from}" must come from the same repeat.`,
+            {
+              path: `${nodePointer}/inputs/${inputIndex}/from`,
+              primaryNode: node.id,
+              relatedNodes: [input.from]
+            }
           )
         }
       } else if (input.from === node.id || ancestors.get(node.id)?.has(input.from) !== true) {
@@ -785,7 +1171,12 @@ function validateRepeats(
           issues,
           "error",
           "input-order",
-          `Node "${node.id}" current-round input "${input.from}" must be an ancestor dependency.`
+          `Node "${node.id}" current-round input "${input.from}" must be an ancestor dependency.`,
+          {
+            path: `${nodePointer}/inputs/${inputIndex}/from`,
+            primaryNode: node.id,
+            relatedNodes: [input.from]
+          }
         )
       }
     }
@@ -800,7 +1191,8 @@ function validateConditions(
   memberToRepeat: ReadonlyMap<string, string>
 ): void {
   const verdictNodes = new Set(workflow.repeats.map((repeat) => repeat.until.node))
-  for (const node of workflow.nodes) {
+  for (const [nodeIndex, node] of workflow.nodes.entries()) {
+    const nodePointer = `/nodes/${nodeIndex}`
     if (
       node.type === "agent" &&
       node.prompt.includes("{{round}}") &&
@@ -810,7 +1202,8 @@ function validateConditions(
         issues,
         "error",
         "prompt-round",
-        `Node "${node.id}" uses {{round}} but is not a repeat member.`
+        `Node "${node.id}" uses {{round}} but is not a repeat member.`,
+        { path: `${nodePointer}/prompt`, primaryNode: node.id }
       )
     }
     const condition = node.when
@@ -821,7 +1214,8 @@ function validateConditions(
           issues,
           "error",
           "condition-order",
-          `Node "${node.id}" when condition must name a direct dependency.`
+          `Node "${node.id}" when condition must name a direct dependency.`,
+          { path: `${nodePointer}/when/node`, primaryNode: node.id, relatedNodes: [condition.node] }
         )
       }
       if (
@@ -833,7 +1227,8 @@ function validateConditions(
           issues,
           "error",
           "condition-source",
-          `Node "${node.id}" when condition must name a schema-validated JSON agent node.`
+          `Node "${node.id}" when condition must name a schema-validated JSON agent node.`,
+          { path: `${nodePointer}/when/node`, primaryNode: node.id, relatedNodes: [condition.node] }
         )
       }
       if (verdictNodes.has(node.id)) {
@@ -841,7 +1236,8 @@ function validateConditions(
           issues,
           "error",
           "condition-verdict",
-          `Repeat verdict node "${node.id}" cannot be conditional.`
+          `Repeat verdict node "${node.id}" cannot be conditional.`,
+          { path: `${nodePointer}/when`, primaryNode: node.id }
         )
       }
       if (node.type === "agent" && node.session.saveAs !== null) {
@@ -849,7 +1245,8 @@ function validateConditions(
           issues,
           "error",
           "condition-session",
-          `Conditional node "${node.id}" cannot produce session alias "${node.session.saveAs}".`
+          `Conditional node "${node.id}" cannot produce session alias "${node.session.saveAs}".`,
+          { path: `${nodePointer}/session/saveAs`, primaryNode: node.id }
         )
       }
       const nodeRepeat = memberToRepeat.get(node.id)
@@ -859,17 +1256,23 @@ function validateConditions(
           issues,
           "error",
           "condition-repeat",
-          `Repeat member "${node.id}" cannot be conditioned by member "${condition.node}" from another repeat.`
+          `Repeat member "${node.id}" cannot be conditioned by member "${condition.node}" from another repeat.`,
+          { path: `${nodePointer}/when/node`, primaryNode: node.id, relatedNodes: [condition.node] }
         )
       }
     }
-    for (const input of node.inputs) {
+    for (const [inputIndex, input] of node.inputs.entries()) {
       if (input.include === "path" && byId.get(input.from)?.when !== undefined) {
         addIssue(
           issues,
           "error",
           "conditional-input-path",
-          `Node "${node.id}" cannot request a path input from conditional node "${input.from}".`
+          `Node "${node.id}" cannot request a path input from conditional node "${input.from}".`,
+          {
+            path: `${nodePointer}/inputs/${inputIndex}/from`,
+            primaryNode: node.id,
+            relatedNodes: [input.from]
+          }
         )
       }
     }
@@ -883,7 +1286,7 @@ function validateSessions(
   memberToRepeat: ReadonlyMap<string, string>
 ): void {
   const aliases = new Map<string, AgentNode>()
-  for (const node of workflow.nodes) {
+  for (const [nodeIndex, node] of workflow.nodes.entries()) {
     if (node.type !== "agent" || node.session.saveAs === null) {
       continue
     }
@@ -893,13 +1296,18 @@ function validateSessions(
         issues,
         "error",
         "session-alias",
-        `Session alias "${node.session.saveAs}" is produced by both "${existing.id}" and "${node.id}".`
+        `Session alias "${node.session.saveAs}" is produced by both "${existing.id}" and "${node.id}".`,
+        {
+          path: `/nodes/${nodeIndex}/session/saveAs`,
+          primaryNode: node.id,
+          relatedNodes: [existing.id]
+        }
       )
     } else {
       aliases.set(node.session.saveAs, node)
     }
   }
-  for (const node of workflow.nodes) {
+  for (const [nodeIndex, node] of workflow.nodes.entries()) {
     if (
       node.type !== "agent" ||
       memberToRepeat.get(node.id) === undefined ||
@@ -913,7 +1321,8 @@ function validateSessions(
         issues,
         "error",
         "repeat-session",
-        `Persistent repeat member "${node.id}" must resume an existing session; fork is not supported.`
+        `Persistent repeat member "${node.id}" must resume an existing session; fork is not supported.`,
+        { path: `/nodes/${nodeIndex}/session/mode`, primaryNode: node.id }
       )
     }
     if (node.session.saveAs !== null) {
@@ -921,7 +1330,8 @@ function validateSessions(
         issues,
         "error",
         "repeat-session",
-        `Persistent repeat member "${node.id}" cannot create session alias "${node.session.saveAs}".`
+        `Persistent repeat member "${node.id}" cannot create session alias "${node.session.saveAs}".`,
+        { path: `/nodes/${nodeIndex}/session/saveAs`, primaryNode: node.id }
       )
     }
     if (source !== undefined && memberToRepeat.get(source.id) !== undefined) {
@@ -929,7 +1339,12 @@ function validateSessions(
         issues,
         "error",
         "repeat-session-source",
-        `Persistent repeat member "${node.id}" must resume a session seeded outside its repeat.`
+        `Persistent repeat member "${node.id}" must resume a session seeded outside its repeat.`,
+        {
+          path: `/nodes/${nodeIndex}/session/from`,
+          primaryNode: node.id,
+          relatedNodes: [source.id]
+        }
       )
     }
     if (source?.when !== undefined) {
@@ -937,11 +1352,16 @@ function validateSessions(
         issues,
         "error",
         "repeat-session-source",
-        `Persistent repeat member "${node.id}" cannot resume conditionally produced session alias "${node.session.from ?? ""}".`
+        `Persistent repeat member "${node.id}" cannot resume conditionally produced session alias "${node.session.from ?? ""}".`,
+        {
+          path: `/nodes/${nodeIndex}/session/from`,
+          primaryNode: node.id,
+          relatedNodes: [source.id]
+        }
       )
     }
   }
-  for (const node of workflow.nodes) {
+  for (const [nodeIndex, node] of workflow.nodes.entries()) {
     if (node.type !== "agent" || node.session.mode === "fresh" || node.session.from === null) {
       continue
     }
@@ -951,28 +1371,44 @@ function validateSessions(
         issues,
         "error",
         "session-source",
-        `Node "${node.id}" names unknown session alias "${node.session.from}".`
+        `Node "${node.id}" names unknown session alias "${node.session.from}".`,
+        { path: `/nodes/${nodeIndex}/session/from`, primaryNode: node.id }
       )
     } else if (source.provider !== node.provider) {
       addIssue(
         issues,
         "error",
         "session-provider",
-        `Node "${node.id}" cannot continue a ${source.provider} session with ${node.provider}.`
+        `Node "${node.id}" cannot continue a ${source.provider} session with ${node.provider}.`,
+        {
+          path: `/nodes/${nodeIndex}/session/from`,
+          primaryNode: node.id,
+          relatedNodes: [source.id]
+        }
       )
     } else if (ancestors.get(node.id)?.has(source.id) !== true) {
       addIssue(
         issues,
         "error",
         "session-order",
-        `Node "${node.id}" session source "${source.id}" must be an ancestor dependency.`
+        `Node "${node.id}" session source "${source.id}" must be an ancestor dependency.`,
+        {
+          path: `/nodes/${nodeIndex}/session/from`,
+          primaryNode: node.id,
+          relatedNodes: [source.id]
+        }
       )
     } else if (source.workroom !== node.workroom || source.seat !== node.seat) {
       addIssue(
         issues,
         "error",
         "session-presentation",
-        `Node "${node.id}" cannot continue session source "${source.id}" across workrooms or seats in V1.`
+        `Node "${node.id}" cannot continue session source "${source.id}" across workrooms or seats.`,
+        {
+          path: `/nodes/${nodeIndex}/session/from`,
+          primaryNode: node.id,
+          relatedNodes: [source.id]
+        }
       )
     }
   }
@@ -1021,7 +1457,12 @@ function validateSessions(
             issues,
             "error",
             "session-fanout",
-            `Nodes "${left.id}" and "${right.id}" resume the same mutable session without an ordering dependency; use a linear chain or fork.`
+            `Nodes "${left.id}" and "${right.id}" resume the same mutable session without an ordering dependency; use a linear chain or fork.`,
+            {
+              path: `/nodes/${workflow.nodes.indexOf(left)}/session/from`,
+              primaryNode: left.id,
+              relatedNodes: [right.id]
+            }
           )
         }
       }
@@ -1100,9 +1541,12 @@ function validatePresentation(
   const workroomById = new Map<string, (typeof workrooms)[number]>()
   const seatToWorkroom = new Map<string, string>()
 
-  for (const workroom of workrooms) {
+  for (const [workroomIndex, workroom] of workrooms.entries()) {
+    const workroomPointer = `/presentation/workrooms/${workroomIndex}`
     if (workroomById.has(workroom.id)) {
-      addIssue(issues, "error", "workroom-id", `Workroom id "${workroom.id}" is duplicated.`)
+      addIssue(issues, "error", "workroom-id", `Workroom id "${workroom.id}" is duplicated.`, {
+        path: `${workroomPointer}/id`
+      })
     } else {
       workroomById.set(workroom.id, workroom)
     }
@@ -1111,34 +1555,38 @@ function validatePresentation(
         issues,
         "error",
         "workroom-settlement",
-        `Workroom "${workroom.id}" repeats a settlesOn node.`
+        `Workroom "${workroom.id}" repeats a settlesOn node.`,
+        { path: `${workroomPointer}/settlesOn` }
       )
     }
-    for (const anchor of workroom.settlesOn) {
+    for (const [anchorIndex, anchor] of workroom.settlesOn.entries()) {
       if (!byId.has(anchor)) {
         addIssue(
           issues,
           "error",
           "workroom-settlement",
-          `Workroom "${workroom.id}" settles on unknown node "${anchor}".`
+          `Workroom "${workroom.id}" settles on unknown node "${anchor}".`,
+          { path: `${workroomPointer}/settlesOn/${anchorIndex}` }
         )
       } else if (memberToRepeat.has(anchor)) {
         addIssue(
           issues,
           "error",
           "workroom-settlement",
-          `Workroom "${workroom.id}" settlesOn node "${anchor}" must not be a repeat member.`
+          `Workroom "${workroom.id}" settlesOn node "${anchor}" must not be a repeat member.`,
+          { path: `${workroomPointer}/settlesOn/${anchorIndex}`, relatedNodes: [anchor] }
         )
       }
     }
-    for (const seat of workroom.seats) {
+    for (const [seatIndex, seat] of workroom.seats.entries()) {
       const owner = seatToWorkroom.get(seat.id)
       if (owner !== undefined) {
         addIssue(
           issues,
           "error",
           "seat-id",
-          `Seat id "${seat.id}" is declared by both workroom "${owner}" and "${workroom.id}".`
+          `Seat id "${seat.id}" is declared by both workroom "${owner}" and "${workroom.id}".`,
+          { path: `${workroomPointer}/seats/${seatIndex}/id` }
         )
       } else {
         seatToWorkroom.set(seat.id, workroom.id)
@@ -1147,13 +1595,15 @@ function validatePresentation(
   }
 
   const nodesBySeat = new Map<string, WorkflowNode[]>()
-  for (const node of workflow.nodes) {
+  for (const [nodeIndex, node] of workflow.nodes.entries()) {
+    const nodePointer = `/nodes/${nodeIndex}`
     if (node.type === "command" && node.seat !== undefined) {
       addIssue(
         issues,
         "error",
         "node-seat",
-        `Command node "${node.id}" cannot occupy participant seat "${node.seat}" in V1.`
+        `Command node "${node.id}" cannot occupy participant seat "${node.seat}".`,
+        { path: `${nodePointer}/seat`, primaryNode: node.id }
       )
       continue
     }
@@ -1162,7 +1612,8 @@ function validatePresentation(
         issues,
         "error",
         "node-seat",
-        `Node "${node.id}" assigns seat "${node.seat}" without naming its workroom.`
+        `Node "${node.id}" assigns seat "${node.seat}" without naming its workroom.`,
+        { path: `${nodePointer}/seat`, primaryNode: node.id }
       )
       continue
     }
@@ -1174,7 +1625,8 @@ function validatePresentation(
         issues,
         "error",
         "node-workroom",
-        `Node "${node.id}" names unknown workroom "${node.workroom}".`
+        `Node "${node.id}" names unknown workroom "${node.workroom}".`,
+        { path: `${nodePointer}/workroom`, primaryNode: node.id }
       )
       continue
     }
@@ -1183,7 +1635,16 @@ function validatePresentation(
     }
     const seatWorkroom = seatToWorkroom.get(node.seat)
     if (seatWorkroom === undefined) {
-      addIssue(issues, "error", "node-seat", `Node "${node.id}" names unknown seat "${node.seat}".`)
+      addIssue(
+        issues,
+        "error",
+        "node-seat",
+        `Node "${node.id}" names unknown seat "${node.seat}".`,
+        {
+          path: `${nodePointer}/seat`,
+          primaryNode: node.id
+        }
+      )
       continue
     }
     if (seatWorkroom !== node.workroom) {
@@ -1191,7 +1652,8 @@ function validatePresentation(
         issues,
         "error",
         "node-seat",
-        `Node "${node.id}" assigns seat "${node.seat}" from workroom "${seatWorkroom}", not "${node.workroom}".`
+        `Node "${node.id}" assigns seat "${node.seat}" from workroom "${seatWorkroom}", not "${node.workroom}".`,
+        { path: `${nodePointer}/seat`, primaryNode: node.id }
       )
       continue
     }
@@ -1206,22 +1668,26 @@ function validatePresentation(
       "error",
       "repeat-boundary-cycle",
       `Repeat-aware dependency expansion creates a cycle: ${cycle.join(" -> ")}.`,
-      [...new Set(cycle)]
+      { path: "/nodes", relatedNodes: [...new Set(cycle)] }
     )
   }
-  for (const workroom of workrooms) {
-    const anchors = workroom.settlesOn.filter(
-      (anchor) => byId.has(anchor) && !memberToRepeat.has(anchor)
-    )
+  for (const [workroomIndex, workroom] of workrooms.entries()) {
+    const anchors = workroom.settlesOn
+      .map((anchor, anchorIndex) => [anchorIndex, anchor] as const)
+      .filter(([, anchor]) => byId.has(anchor) && !memberToRepeat.has(anchor))
     const assigned = workflow.nodes.filter((node) => node.workroom === workroom.id)
-    for (const anchor of anchors) {
+    for (const [anchorIndex, anchor] of anchors) {
       for (const node of assigned) {
         if (node.id !== anchor && ancestors.get(anchor)?.has(node.id) !== true) {
           addIssue(
             issues,
             "error",
             "workroom-settlement",
-            `Workroom "${workroom.id}" settlesOn node "${anchor}" must be downstream of workroom node "${node.id}".`
+            `Workroom "${workroom.id}" settlesOn node "${anchor}" must be downstream of workroom node "${node.id}".`,
+            {
+              path: `/presentation/workrooms/${workroomIndex}/settlesOn/${anchorIndex}`,
+              relatedNodes: [anchor, node.id]
+            }
           )
         }
       }
@@ -1241,7 +1707,12 @@ function validatePresentation(
             issues,
             "error",
             "seat-order",
-            `Nodes "${left.id}" and "${right.id}" share seat "${seat}" without a total dependency order.`
+            `Nodes "${left.id}" and "${right.id}" share seat "${seat}" without a total dependency order.`,
+            {
+              path: `/nodes/${workflow.nodes.indexOf(left)}/seat`,
+              primaryNode: left.id,
+              relatedNodes: [right.id]
+            }
           )
         }
       }
@@ -1278,7 +1749,11 @@ export function validateWorkflow(input: unknown): ValidationResult {
       return {
         severity: "error" as const,
         code: schemaIssueCode(issue.path),
-        message: issuePath.length === 0 ? issue.message : `${issuePath}: ${issue.message}`
+        message: issuePath.length === 0 ? issue.message : `${issuePath}: ${issue.message}`,
+        path:
+          issue.path === undefined || issue.path.length === 0
+            ? ""
+            : `/${issue.path.map((part) => pointerSegment(schemaPathPart(part))).join("/")}`
       }
     })
     return {
@@ -1290,43 +1765,48 @@ export function validateWorkflow(input: unknown): ValidationResult {
   const workflow: WorkflowSpec = decoded.success
   const issues: ValidationIssue[] = []
   if (!path.isAbsolute(workflow.cwd)) {
-    addIssue(issues, "error", "workflow-cwd", "Workflow cwd must be absolute.")
+    addIssue(issues, "error", "workflow-cwd", "Workflow cwd must be absolute.", {
+      path: "/cwd"
+    })
   }
   if (workflow.callback.type === "webhook") {
-    let valid = false
-    try {
-      const callbackUrl = new URL(workflow.callback.url)
-      valid =
-        (callbackUrl.protocol === "https:" || callbackUrl.protocol === "http:") &&
-        callbackUrl.hostname.length > 0
-    } catch {
-      valid = false
-    }
-    if (!valid) {
+    if (!isAbsoluteHttpUrl(workflow.callback.url)) {
       addIssue(
         issues,
         "error",
         "callback-url",
-        "Webhook callback URL must be a valid absolute http or https URL."
+        "Webhook callback URL must be a valid absolute http or https URL.",
+        { path: "/callback/url" }
       )
     }
   }
   const ids = new Set<string>()
-  for (const node of workflow.nodes) {
+  for (const [nodeIndex, node] of workflow.nodes.entries()) {
+    const nodePointer = `/nodes/${nodeIndex}`
     if (ids.has(node.id)) {
-      addIssue(issues, "error", "duplicate-node", `Node id "${node.id}" is duplicated.`)
+      addIssue(issues, "error", "duplicate-node", `Node id "${node.id}" is duplicated.`, {
+        path: `${nodePointer}/id`,
+        primaryNode: node.id
+      })
     }
     ids.add(node.id)
     if (new Set(node.needs).size !== node.needs.length) {
-      addIssue(issues, "error", "dependency", `Node "${node.id}" repeats a dependency.`)
+      addIssue(issues, "error", "dependency", `Node "${node.id}" repeats a dependency.`, {
+        path: `${nodePointer}/needs`,
+        primaryNode: node.id
+      })
     }
-    for (const dependency of node.needs) {
+    for (const [dependencyIndex, dependency] of node.needs.entries()) {
       if (!workflow.nodes.some((candidate) => candidate.id === dependency)) {
         addIssue(
           issues,
           "error",
           "dependency",
-          `Node "${node.id}" needs unknown node "${dependency}".`
+          `Node "${node.id}" needs unknown node "${dependency}".`,
+          {
+            path: `${nodePointer}/needs/${dependencyIndex}`,
+            primaryNode: node.id
+          }
         )
       }
     }
@@ -1334,7 +1814,10 @@ export function validateWorkflow(input: unknown): ValidationResult {
   }
   const { byId, ancestors, cycles } = graphMaps(workflow.nodes)
   for (const cycle of cycles) {
-    addIssue(issues, "error", "cycle", `Dependency cycle: ${cycle.join(" -> ")}.`)
+    addIssue(issues, "error", "cycle", `Dependency cycle: ${cycle.join(" -> ")}.`, {
+      path: "/nodes",
+      relatedNodes: [...new Set(cycle)]
+    })
   }
   const memberToRepeat = validateRepeats(workflow, issues, byId, ancestors)
   validateConditions(workflow, issues, byId, memberToRepeat)
@@ -1347,24 +1830,49 @@ export function validateWorkflow(input: unknown): ValidationResult {
       "warning",
       "unrolled-rounds",
       `Nodes look like hand-unrolled repeat rounds (e.g. ${sample.map((id) => `"${id}"`).join(", ")}). Declare a repeat with members, maxRounds, and an until condition instead: rounds then instantiate on demand and the board renders them as one loop.`,
-      unrolled.flat()
+      { path: "/nodes", relatedNodes: unrolled.flat() }
     )
   }
   validateSessions(workflow, issues, ancestors, memberToRepeat)
-  const overlaps = overlappingMutableNodes(workflow)
-  if (overlaps.length > 0) {
+  try {
+    const overlaps = overlappingMutableNodes(workflow)
+    if (overlaps.length > 0) {
+      addIssue(
+        issues,
+        workflow.writeConflicts === "reject" ? "error" : "warning",
+        "write-conflict",
+        `Unordered mutable nodes overlap: ${overlaps.map(([a, b]) => `${a}/${b}`).join(", ")}.`,
+        { path: "/writeConflicts", relatedNodes: [...new Set(overlaps.flat())] }
+      )
+    }
+  } catch (error) {
+    if (!(error instanceof DeclaredPathInspectionError)) {
+      throw error
+    }
+    addIssue(issues, "error", "write-prefix-inspection", error.message, {
+      path: "/writeConflicts",
+      primaryNode: error.nodeId
+    })
+  }
+  let digest: string | null = null
+  try {
+    digest = digestWorkflow(workflow)
+  } catch (error) {
     addIssue(
       issues,
-      workflow.writeConflicts === "reject" ? "error" : "warning",
-      "write-conflict",
-      `Unordered mutable nodes overlap: ${overlaps.map(([a, b]) => `${a}/${b}`).join(", ")}.`,
-      [...new Set(overlaps.flat())]
+      "error",
+      "json-value",
+      `Workflow contains a value outside the fail-closed JSON contract: ${error instanceof Error ? error.message : String(error)}`,
+      { path: "" }
     )
   }
-  const errors = issues.some((issue) => issue.severity === "error")
+  // Every returned issue is a fresh public diagnostic record.
+  // oxlint-disable-next-line oxc/no-map-spread
+  const locatedIssues = issues.map((issue) => ({ ...issue }))
+  const errors = locatedIssues.some((issue) => issue.severity === "error")
   return {
     workflow: errors ? null : workflow,
-    issues,
-    digest: errors ? null : workflowDigest(workflow)
+    issues: locatedIssues,
+    digest: errors ? null : digest
   }
 }

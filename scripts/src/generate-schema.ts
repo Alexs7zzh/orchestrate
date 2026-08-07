@@ -4,7 +4,7 @@ import {
   jsonSchemaDocumentFor,
   PreferencesSchema,
   RunStateSchema,
-  WorkflowSchema
+  WorkflowSourceSchema
 } from "./schema.js"
 
 type JsonObject = Record<string, unknown>
@@ -337,7 +337,7 @@ if (process.argv.includes("--refresh-herdr")) {
 }
 
 const outputs = [
-  ["../../references/workflow.schema.json", WorkflowSchema],
+  ["../../references/workflow.schema.json", WorkflowSourceSchema],
   ["../../references/preferences.schema.json", PreferencesSchema],
   ["../../references/state.schema.json", RunStateSchema],
   ["../../references/event.schema.json", EventRecordSchema]

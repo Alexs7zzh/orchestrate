@@ -1,8 +1,12 @@
 import type {
   EventRecordSchema,
+  FieldOriginSchema,
   RunStateSchema,
+  SourceLocationSchema,
   UiPreferencesSchema,
-  WorkflowSchema
+  WorkflowProvenanceSchema,
+  WorkflowSchema,
+  WorkflowSourceSchema
 } from "./schema.js"
 import type { Schema } from "effect"
 
@@ -211,12 +215,37 @@ export type CallbackSpec = CallbackNone | CallbackCommand | CallbackWebhook | Ca
 // Runtime-owned contracts are derived from their Effect schemas so validation
 // and TypeScript cannot silently drift apart.
 export type WorkflowSpec = Schema.Schema.Type<typeof WorkflowSchema>
+export type WorkflowSource = Schema.Schema.Type<typeof WorkflowSourceSchema>
+export type SourceLocation = Schema.Schema.Type<typeof SourceLocationSchema>
+export type FieldOrigin = Schema.Schema.Type<typeof FieldOriginSchema>
+export type WorkflowProvenance = Schema.Schema.Type<typeof WorkflowProvenanceSchema>
+
+export interface WorkflowRelatedDiagnostic {
+  readonly path: string
+  readonly location: SourceLocation
+  readonly message: string
+}
+
+export interface WorkflowDiagnostic {
+  readonly severity: "error" | "warning"
+  readonly code: string
+  readonly message: string
+  readonly path: string
+  readonly location: SourceLocation
+  readonly nodes?: readonly string[]
+  readonly primaryNode?: string
+  readonly relatedNodes?: readonly string[]
+  readonly related?: readonly WorkflowRelatedDiagnostic[]
+}
 
 export interface ValidationIssue {
   readonly severity: "error" | "warning"
   readonly code: string
   readonly message: string
+  readonly path: string
   readonly nodes?: readonly string[]
+  readonly primaryNode?: string
+  readonly relatedNodes?: readonly string[]
 }
 
 export interface ValidationResult {
@@ -277,6 +306,7 @@ export interface SessionState {
   readonly provider: Provider
   readonly sessionId: string
   readonly sourceNodeId: string
+  readonly lineageId?: string
 }
 
 export interface GateState {
@@ -315,6 +345,7 @@ export interface PendingRevision {
   readonly workflow: WorkflowSpec
   readonly digest: string
   readonly summary: readonly string[]
+  readonly provenance: WorkflowProvenance
   readonly createdAt: string
 }
 
@@ -456,6 +487,7 @@ export type CrankEvent =
       readonly workflow: WorkflowSpec
       readonly digest: string
       readonly summary: readonly string[]
+      readonly provenance: WorkflowProvenance
     }
   | { readonly type: "approve-revision"; readonly digest: string }
   | { readonly type: "discard-revision" }
@@ -465,6 +497,7 @@ export type CrankEvent =
       readonly overrideFuse: boolean
       readonly continueRounds: number | null
       readonly acceptRepeat: string | null
+      readonly origin?: RunOrigin
     }
   | { readonly type: "stop" }
   | { readonly type: "hold"; readonly nodeId: string }

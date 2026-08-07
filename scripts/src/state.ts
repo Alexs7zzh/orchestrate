@@ -1,5 +1,6 @@
 import { Schema } from "effect"
 import { randomUUID } from "node:crypto"
+import { realpathSync } from "node:fs"
 import { mkdir, open, readFile, readdir, rename, rm, stat } from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
@@ -54,13 +55,33 @@ export function setRuntimeBuildForTests(build: string | null): void {
   runtimeBuildForTests = build
 }
 
+function canonicalPathThroughExistingAncestor(candidate: string): string {
+  const suffix: string[] = []
+  let cursor = path.resolve(candidate)
+  for (;;) {
+    try {
+      return path.join(realpathSync.native(cursor), ...suffix.toReversed())
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+        throw error
+      }
+      const parent = path.dirname(cursor)
+      if (parent === cursor) {
+        throw error
+      }
+      suffix.push(path.basename(cursor))
+      cursor = parent
+    }
+  }
+}
+
 export function stateRoot(): string {
   const explicit = process.env.ORCHESTRATE_STATE_DIR
   if (explicit !== undefined && explicit.trim().length > 0) {
-    return path.resolve(explicit)
+    return canonicalPathThroughExistingAncestor(explicit)
   }
   const xdg = process.env.XDG_STATE_HOME
-  return path.resolve(
+  return canonicalPathThroughExistingAncestor(
     xdg !== undefined && xdg.trim().length > 0
       ? path.join(xdg, "orchestrate")
       : path.join(os.homedir(), ".local", "state", "orchestrate")
@@ -92,11 +113,20 @@ export function eventsPath(runDir: string): string {
 }
 
 export interface NodeDoneSubmission {
+  readonly version: 2
   readonly runId: string
   readonly nodeId: string
   readonly token: string
   readonly outcome: "completed" | "failed"
   readonly hold: boolean
+  readonly capability: {
+    readonly digest: string
+    readonly completionContractSha256: string
+  }
+  readonly result: {
+    readonly sha256: string
+    readonly byteLength: number
+  }
 }
 
 export function submissionsRoot(): string {
@@ -107,11 +137,26 @@ export function submissionsRoot(): string {
   )
 }
 
+export function providerSessionsRoot(): string {
+  const authoritativeRoot = stateRoot()
+  return path.join(
+    path.dirname(authoritativeRoot),
+    `${path.basename(authoritativeRoot)}-provider-sessions`
+  )
+}
+
+export function providerSessionRunDirectory(runId: string): string {
+  if (!RUN_ID.test(runId)) {
+    throw new Error(`Invalid full run id "${runId}" for provider sessions.`)
+  }
+  return path.join(providerSessionsRoot(), runId)
+}
+
 export function submissionRunDirectory(runId: string): string {
   return path.join(submissionsRoot(), runId)
 }
 
-export function submissionDirectory(runId: string, nodeId: string, token: string): string {
+export function assertNodeSubmissionIdentity(runId: string, nodeId: string, token: string): void {
   if (!RUN_ID.test(runId)) {
     throw new Error(`Invalid full run id "${runId}" for node submission.`)
   }
@@ -121,11 +166,70 @@ export function submissionDirectory(runId: string, nodeId: string, token: string
   if (!/^[0-9a-f]{64}$/.test(token)) {
     throw new Error("Invalid node submission token.")
   }
+}
+
+export function submissionDirectory(runId: string, nodeId: string, token: string): string {
+  assertNodeSubmissionIdentity(runId, nodeId, token)
   return path.join(submissionRunDirectory(runId), nodeId, token)
 }
 
 export function submissionResultPath(runId: string, nodeId: string, token: string): string {
-  return path.join(submissionDirectory(runId, nodeId, token), "result.txt")
+  return path.join(submissionOutboxDirectory(runId, nodeId, token), "result.txt")
+}
+
+export function submissionControlDirectory(runId: string, nodeId: string, token: string): string {
+  return path.join(submissionDirectory(runId, nodeId, token), "control")
+}
+
+export function submissionInboxDirectory(runId: string, nodeId: string, token: string): string {
+  return path.join(submissionDirectory(runId, nodeId, token), "inbox")
+}
+
+export function submissionOutboxDirectory(runId: string, nodeId: string, token: string): string {
+  return path.join(submissionDirectory(runId, nodeId, token), "outbox")
+}
+
+export function submissionScratchDirectory(runId: string, nodeId: string, token: string): string {
+  return path.join(submissionDirectory(runId, nodeId, token), "scratch")
+}
+
+export function submissionEnvelopePath(runId: string, nodeId: string, token: string): string {
+  return path.join(submissionOutboxDirectory(runId, nodeId, token), "completion.json")
+}
+
+export function submissionInboxArtifactPath(
+  runId: string,
+  nodeId: string,
+  token: string,
+  inputIndex: number,
+  sourceNodeId: string
+): string {
+  if (!Number.isSafeInteger(inputIndex) || inputIndex < 0) {
+    throw new Error("Invalid attempt inbox input index.")
+  }
+  if (!/^[a-z0-9][a-z0-9-]*(?:--r[1-9][0-9]*)?$/.test(sourceNodeId)) {
+    throw new Error(`Invalid source runtime node id "${sourceNodeId}" for attempt inbox.`)
+  }
+  return path.join(
+    submissionInboxDirectory(runId, nodeId, token),
+    `${inputIndex}-${Buffer.from(sourceNodeId, "ascii").toString("hex")}.result`
+  )
+}
+
+export function attemptCapabilityManifestPath(
+  runId: string,
+  nodeId: string,
+  token: string
+): string {
+  return path.join(submissionControlDirectory(runId, nodeId, token), "capability.json")
+}
+
+export function attemptCompletionContractPath(
+  runId: string,
+  nodeId: string,
+  token: string
+): string {
+  return path.join(submissionControlDirectory(runId, nodeId, token), "completion-contract.json")
 }
 
 export function completionSubmissionPath(resultPath: string): string {
@@ -147,7 +251,7 @@ export async function ensureStateDirectories(): Promise<void> {
 
 export async function atomicWriteFile(
   filePath: string,
-  content: string,
+  content: string | Uint8Array,
   mode = 0o600
 ): Promise<void> {
   await mkdir(path.dirname(filePath), { recursive: true, mode: 0o700 })
@@ -590,7 +694,8 @@ export async function resolveDefaultRunDirectory(): Promise<string> {
 }
 
 export async function removeRun(runDir: string): Promise<void> {
-  await rm(runDir, { recursive: true, force: true })
   const runId = path.basename(runDir)
   await rm(submissionRunDirectory(runId), { recursive: true, force: true })
+  await rm(providerSessionRunDirectory(runId), { recursive: true, force: true })
+  await rm(runDir, { recursive: true, force: true })
 }

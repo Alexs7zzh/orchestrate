@@ -14,6 +14,10 @@ import type {
 } from "../src/types.js"
 
 import {
+  compileAttemptCapabilityManifest,
+  ensureAttemptTrustIdentities
+} from "../src/attempt-capability.js"
+import {
   MAX_RESULT_BYTES,
   crankRun,
   handleHerdrAgentStatusEvent,
@@ -27,14 +31,18 @@ import {
 import { HerdrObservationError, type SpawnRequest } from "../src/herdr-surface.js"
 import { DEFAULT_UI_PREFERENCES } from "../src/preferences.js"
 import { prepareNode } from "../src/prompt.js"
+import { compileProviderLaunchIdentity, materializeProviderRelay } from "../src/provider-launch.js"
 import { replayEvents } from "../src/state-patch.js"
 import {
   completionSubmissionPath,
+  attemptCapabilityManifestPath,
+  attemptCompletionContractPath,
   eventsPath,
   injectAtomicWriteFaultForTests,
   persistNewRun,
   readEvents,
   readRunState,
+  readWorkflow,
   runDirectory,
   runNeedsAttention,
   runStatePath,
@@ -42,6 +50,7 @@ import {
 } from "../src/state.js"
 import { createInitialRunState, transition } from "../src/transition.js"
 import { validateWorkflow } from "../src/validation.js"
+import { workflowProvenance } from "./workflow-provenance-fixture.js"
 
 let temporaryRoot = ""
 
@@ -135,6 +144,79 @@ function workflow(nodes: readonly WorkflowNode[]): WorkflowSpec {
   }
 }
 
+function submitTestNodeDone(
+  runIdOrDirectory: string,
+  nodeId: string,
+  token: string,
+  outcome: "completed" | "failed",
+  hold = false
+): ReturnType<typeof submitNodeDone> {
+  const runId = path.basename(runIdOrDirectory)
+  return ensureTestAttemptCapability(runId, nodeId, token).then((contractPath) =>
+    submitNodeDone(runId, nodeId, token, outcome, hold, contractPath)
+  )
+}
+
+async function ensureTestAttemptCapability(
+  runId: string,
+  nodeId: string,
+  token: string
+): Promise<string> {
+  if (await Bun.file(attemptCapabilityManifestPath(runId, nodeId, token)).exists()) {
+    return attemptCompletionContractPath(runId, nodeId, token)
+  }
+  const runDir = runDirectory(runId)
+  const state = await readRunState(runDir)
+  const spec = await readWorkflow(runDir)
+  const runtime = state.nodes[nodeId]
+  const attempt = runtime?.attempts.find((candidate) => candidate.token === token)
+  const node = spec.nodes.find((candidate) => candidate.id === runtime?.templateId)
+  if (attempt === undefined || node?.type !== "agent") {
+    throw new Error("Missing agent attempt for test capability.")
+  }
+  const trust = await ensureAttemptTrustIdentities(runId, nodeId, token)
+  const providerLaunch = await compileProviderLaunchIdentity(
+    node.provider,
+    path.join(temporaryRoot, "provider-bin")
+  )
+  const providerRelay = await materializeProviderRelay(
+    providerLaunch,
+    path.join(trust.control.path, "provider-launcher")
+  )
+  const providerControlRoot = path.join(temporaryRoot, `${node.provider}-control`)
+  await mkdir(providerControlRoot, { recursive: true })
+  const manifest = await compileAttemptCapabilityManifest(
+    {
+      runId,
+      nodeId,
+      attempt: attempt.attempt,
+      token,
+      provider: node.provider,
+      sourceRoots: [temporaryRoot],
+      declaredWriteRoots: [],
+      providerControlRoot,
+      lineageRoot: null,
+      providerLaunch,
+      providerRelay,
+      unreadableRoots: [path.join(temporaryRoot, "state")],
+      immutableRoots: [path.join(temporaryRoot, "state"), providerControlRoot],
+      completionExecutablePath: providerLaunch.entry.canonicalPath,
+      projectedInputs: [],
+      output: node.output
+    },
+    async (draft) => [
+      node.provider === "codex"
+        ? { kind: "codex-profile", path: draft.assets.codexProfilePath, content: "test=true\n" }
+        : {
+            kind: "claude-settings",
+            path: draft.assets.claudeSettingsPath,
+            content: "{}\n"
+          }
+    ]
+  )
+  return manifest.completion.contractPath
+}
+
 class FakeSurface implements CrankSurface {
   readonly spawns: string[] = []
   readonly requests: SpawnRequest[] = []
@@ -153,7 +235,7 @@ class FakeSurface implements CrankSurface {
 
   async connect(): Promise<void> {}
 
-  async captureOrigin(): Promise<RunOrigin> {
+  async captureOrigin(): Promise<RunOrigin | null> {
     return this.origin
   }
 
@@ -237,6 +319,13 @@ async function persistPlanned(spec: WorkflowSpec) {
 beforeEach(async () => {
   temporaryRoot = await mkdtemp(path.join(os.tmpdir(), "orchestrate-crank-"))
   process.env.ORCHESTRATE_STATE_DIR = path.join(temporaryRoot, "state")
+  const providerBin = path.join(temporaryRoot, "provider-bin")
+  await mkdir(providerBin)
+  for (const provider of ["codex", "claude"]) {
+    const executable = path.join(providerBin, provider)
+    await Bun.write(executable, "#!/bin/sh\nexit 0\n", { createPath: false })
+    await chmod(executable, 0o700)
+  }
 })
 
 afterEach(async () => {
@@ -343,6 +432,7 @@ describe("crank shell", () => {
       runDir,
       {
         type: "propose-revision",
+        provenance: await workflowProvenance(revised),
         workflow: revised,
         digest,
         summary: ["insert completion and live fixes"]
@@ -395,7 +485,7 @@ describe("crank shell", () => {
     expect(replayEvents(await readEvents(runDir))).toEqual(await readRunState(runDir))
   })
 
-  test("returns terminal failures to the launching agent but keeps human stops silent", async () => {
+  test("returns terminal failures to the wake-owning master but keeps human stops silent", async () => {
     const failedSurface = new FakeSurface()
     const failed = await start(workflow([command("check")]), failedSurface)
     const failedToken = failed.state.nodes.check?.attempts.at(-1)?.token as string
@@ -454,9 +544,12 @@ describe("crank shell", () => {
     expect(fallbackAttempts).toBe(1)
   })
 
-  test("reports an invalid submission path after consuming independent valid work", async () => {
+  test("starts an independent downstream before reporting a malformed sibling envelope", async () => {
     const surface = new FakeSurface()
-    const started = await start(workflow([agent("review"), agent("independent")]), surface)
+    const started = await start(
+      workflow([agent("review"), agent("independent"), agent("downstream", ["independent"])]),
+      surface
+    )
     const reviewAttempt = started.state.nodes.review?.attempts.at(-1)
     const independentAttempt = started.state.nodes.independent?.attempts.at(-1)
     if (reviewAttempt === undefined || independentAttempt === undefined) {
@@ -465,24 +558,75 @@ describe("crank shell", () => {
     const runDir = runDirectory(started.state.id)
     await mkdir(path.dirname(reviewAttempt.resultPath), { recursive: true })
     await mkdir(path.dirname(independentAttempt.resultPath), { recursive: true })
-    await Bun.write(reviewAttempt.resultPath, '{"clean":"not-boolean"}\n', { createPath: false })
+    await Bun.write(reviewAttempt.resultPath, '{"clean":true}\n', { createPath: false })
     await Bun.write(independentAttempt.resultPath, '{"clean":true}\n', { createPath: false })
-    await submitNodeDone(runDir, "review", reviewAttempt.token, "completed")
-    await submitNodeDone(runDir, "independent", independentAttempt.token, "completed")
+    await ensureTestAttemptCapability(started.state.id, "review", reviewAttempt.token)
+    await Bun.write(completionSubmissionPath(reviewAttempt.resultPath), "{malformed", {
+      createPath: false
+    })
+    await submitTestNodeDone(runDir, "independent", independentAttempt.token, "completed")
     await expect(reconcileRun(runDir, { surface })).rejects.toThrow(
       "Replace or remove the named completion envelope"
     )
     const partiallyReconciled = await readRunState(runDir)
     expect(partiallyReconciled.nodes.review?.status).toBe("running")
     expect(partiallyReconciled.nodes.independent?.status).toBe("completed")
+    expect(partiallyReconciled.nodes.downstream?.status).toBe("running")
     expect(
       await reconcileRun(runDir, { surface }).catch((error: unknown) => String(error))
     ).toContain(completionSubmissionPath(reviewAttempt.resultPath))
 
-    await Bun.write(reviewAttempt.resultPath, '{"clean":true}\n', { createPath: false })
+    await submitTestNodeDone(runDir, "review", reviewAttempt.token, "completed")
+    const downstreamAttempt = partiallyReconciled.nodes.downstream?.attempts.at(-1)
+    if (downstreamAttempt === undefined) {
+      throw new Error("missing downstream attempt")
+    }
+    await mkdir(path.dirname(downstreamAttempt.resultPath), { recursive: true })
+    await Bun.write(downstreamAttempt.resultPath, '{"clean":true}\n', { createPath: false })
+    await submitTestNodeDone(runDir, "downstream", downstreamAttempt.token, "completed")
     const finished = await reconcileRun(runDir, { surface })
     expect(finished.state.status).toBe("completed")
     expect(finished.state.nodes.review?.result).toEqual({ clean: true })
+  })
+
+  test("clears an obsolete malformed-envelope diagnostic after replacement in a later pass", async () => {
+    let repair: (() => Promise<void>) | null = null
+    class RepairingSurface extends FakeSurface {
+      override async recoverOrSpawn(request: SpawnRequest) {
+        if (request.intent.nodeId === "downstream") {
+          await repair?.()
+        }
+        return super.recoverOrSpawn(request)
+      }
+    }
+    const surface = new RepairingSurface()
+    const started = await start(
+      workflow([agent("review"), agent("independent"), agent("downstream", ["independent"])]),
+      surface
+    )
+    const reviewAttempt = started.state.nodes.review?.attempts.at(-1)
+    const independentAttempt = started.state.nodes.independent?.attempts.at(-1)
+    if (reviewAttempt === undefined || independentAttempt === undefined) {
+      throw new Error("missing attempts")
+    }
+    const runDir = runDirectory(started.state.id)
+    await mkdir(path.dirname(reviewAttempt.resultPath), { recursive: true })
+    await mkdir(path.dirname(independentAttempt.resultPath), { recursive: true })
+    await Bun.write(reviewAttempt.resultPath, '{"clean":true}\n', { createPath: false })
+    await Bun.write(independentAttempt.resultPath, '{"clean":true}\n', { createPath: false })
+    await Bun.write(completionSubmissionPath(reviewAttempt.resultPath), "{malformed", {
+      createPath: false
+    })
+    await submitTestNodeDone(runDir, "independent", independentAttempt.token, "completed")
+    repair = async () => {
+      await submitTestNodeDone(runDir, "review", reviewAttempt.token, "completed")
+      repair = null
+    }
+
+    const repaired = await reconcileRun(runDir, { surface })
+    expect(repaired.state.nodes.review?.status).toBe("completed")
+    expect(repaired.state.nodes.review?.result).toEqual({ clean: true })
+    expect(repaired.state.nodes.downstream?.status).toBe("running")
   })
 
   test("rejects an oversized provider result before reading or journaling it", async () => {
@@ -495,11 +639,269 @@ describe("crank shell", () => {
     await mkdir(path.dirname(attempt.resultPath), { recursive: true })
     await Bun.write(attempt.resultPath, "x".repeat(MAX_RESULT_BYTES + 1), { createPath: false })
     const runDir = runDirectory(started.state.id)
-    await submitNodeDone(runDir, "review", attempt.token, "completed")
-    await expect(reconcileRun(runDir, { surface })).rejects.toThrow(
+    await expect(submitTestNodeDone(runDir, "review", attempt.token, "completed")).rejects.toThrow(
       `${MAX_RESULT_BYTES}-byte result limit`
     )
     expect((await readRunState(runDir)).nodes.review?.status).toBe("running")
+  })
+
+  test("does not create a completion envelope before the owner writes its result", async () => {
+    const surface = new FakeSurface()
+    const started = await start(workflow([agent("review")]), surface)
+    const attempt = started.state.nodes.review?.attempts.at(-1)
+    if (attempt === undefined) {
+      throw new Error("missing attempt")
+    }
+    const completion = completionSubmissionPath(attempt.resultPath)
+    const runDir = runDirectory(started.state.id)
+    const missingResultMessage = `Declared result for node "review" was not found at ${attempt.resultPath}. Write the declared nonempty result to that exact path before rerunning node-done.`
+
+    for (const outcome of ["completed", "failed"] as const) {
+      await expect(submitTestNodeDone(runDir, "review", attempt.token, outcome)).rejects.toThrow(
+        missingResultMessage
+      )
+    }
+    expect(await Bun.file(completion).exists()).toBe(false)
+    expect((await readRunState(runDir)).nodes.review?.status).toBe("running")
+
+    await mkdir(path.dirname(attempt.resultPath), { recursive: true })
+    await Bun.write(attempt.resultPath, " \n\t", { createPath: false })
+    for (const outcome of ["completed", "failed"] as const) {
+      await expect(submitTestNodeDone(runDir, "review", attempt.token, outcome)).rejects.toThrow(
+        "must not be empty"
+      )
+    }
+    expect(await Bun.file(completion).exists()).toBe(false)
+
+    await Bun.write(attempt.resultPath, '{"clean":true}', { createPath: false })
+    await submitTestNodeDone(runDir, "review", attempt.token, "completed")
+    const finished = await reconcileRun(runDir, { surface })
+    expect(finished.state.status).toBe("completed")
+    expect(finished.state.nodes.review?.result).toEqual({ clean: true })
+  })
+
+  test("rejects schema-invalid completed output before writing an envelope and accepts a correction", async () => {
+    const surface = new FakeSurface()
+    const started = await start(workflow([agent("review")]), surface)
+    const attempt = started.state.nodes.review?.attempts.at(-1)
+    if (attempt === undefined) {
+      throw new Error("missing attempt")
+    }
+    const runDir = runDirectory(started.state.id)
+    const completion = completionSubmissionPath(attempt.resultPath)
+    await mkdir(path.dirname(attempt.resultPath), { recursive: true })
+    await Bun.write(attempt.resultPath, "{}\n", { createPath: false })
+
+    await expect(submitTestNodeDone(runDir, "review", attempt.token, "completed")).rejects.toThrow(
+      'Result for node "review" does not satisfy its output schema'
+    )
+    expect(await Bun.file(completion).exists()).toBe(false)
+    expect((await readRunState(runDir)).nodes.review?.status).toBe("running")
+
+    await Bun.write(attempt.resultPath, '{"clean":true}\n', { createPath: false })
+    await submitTestNodeDone(runDir, "review", attempt.token, "completed")
+    const finished = await reconcileRun(runDir, { surface })
+    expect(finished.state.status).toBe("completed")
+    expect(finished.state.nodes.review?.result).toEqual({ clean: true })
+  })
+
+  test("records the raw UTF-8 byte identity from the single result preflight read", async () => {
+    const surface = new FakeSurface()
+    const started = await start(
+      workflow([
+        agent("review", [], {
+          output: { format: "text", schema: null }
+        })
+      ]),
+      surface
+    )
+    const attempt = started.state.nodes.review?.attempts.at(-1)
+    if (attempt === undefined) {
+      throw new Error("missing attempt")
+    }
+    const declaredResult = "完成✅\n"
+    await mkdir(path.dirname(attempt.resultPath), { recursive: true })
+    await Bun.write(attempt.resultPath, declaredResult, { createPath: false })
+    const submission = await submitTestNodeDone(
+      runDirectory(started.state.id),
+      "review",
+      attempt.token,
+      "completed"
+    )
+    const hasher = new Bun.CryptoHasher("sha256")
+    hasher.update(Buffer.from(declaredResult))
+    expect(submission.result).toEqual({
+      sha256: hasher.digest("hex"),
+      byteLength: Buffer.byteLength(declaredResult)
+    })
+    expect(submission.result.byteLength).toBeGreaterThan(declaredResult.length)
+
+    const finished = await reconcileRun(runDirectory(started.state.id), { surface })
+    expect(finished.state.nodes.review?.result).toBe(declaredResult)
+  })
+
+  for (const mutation of [
+    {
+      name: "valid-to-valid",
+      before: '{"clean":true}\n',
+      after: '{"clean":false}\n',
+      error: "does not match the exact result bytes preflighted by node-done"
+    },
+    {
+      name: "valid-to-invalid",
+      before: '{"clean":true}\n',
+      after: "not-json\n",
+      error: "does not match the exact result bytes preflighted by node-done"
+    },
+    {
+      name: "truncation",
+      before: '{"clean":true}\n',
+      after: '{"clean":true}',
+      error: "does not match the exact result bytes preflighted by node-done"
+    },
+    {
+      name: "oversize",
+      before: '{"clean":true}\n',
+      after: "x".repeat(MAX_RESULT_BYTES + 1),
+      error: `${MAX_RESULT_BYTES}-byte result limit`
+    }
+  ] as const) {
+    test(`rejects ${mutation.name} result mutation after submission`, async () => {
+      const surface = new FakeSurface()
+      const started = await start(workflow([agent("review")]), surface)
+      const attempt = started.state.nodes.review?.attempts.at(-1)
+      if (attempt === undefined) {
+        throw new Error("missing attempt")
+      }
+      await mkdir(path.dirname(attempt.resultPath), { recursive: true })
+      await Bun.write(attempt.resultPath, mutation.before, { createPath: false })
+      const submission = await submitTestNodeDone(
+        runDirectory(started.state.id),
+        "review",
+        attempt.token,
+        "completed"
+      )
+      const hasher = new Bun.CryptoHasher("sha256")
+      hasher.update(Buffer.from(mutation.before))
+      expect(submission).toMatchObject({
+        version: 2,
+        result: {
+          sha256: hasher.digest("hex"),
+          byteLength: Buffer.byteLength(mutation.before)
+        }
+      })
+
+      await Bun.write(attempt.resultPath, mutation.after, { createPath: false })
+      await expect(reconcileRun(runDirectory(started.state.id), { surface })).rejects.toThrow(
+        mutation.error
+      )
+      expect((await readRunState(runDirectory(started.state.id))).nodes.review?.status).toBe(
+        "running"
+      )
+    })
+  }
+
+  test("rejects an authenticated completion envelope with an extra field", async () => {
+    const surface = new FakeSurface()
+    const started = await start(workflow([agent("review")]), surface)
+    const attempt = started.state.nodes.review?.attempts.at(-1)
+    if (attempt === undefined) {
+      throw new Error("missing attempt")
+    }
+    await mkdir(path.dirname(attempt.resultPath), { recursive: true })
+    await Bun.write(attempt.resultPath, '{"clean":true}\n', { createPath: false })
+    const submission = await submitTestNodeDone(
+      runDirectory(started.state.id),
+      "review",
+      attempt.token,
+      "completed"
+    )
+    await Bun.write(
+      completionSubmissionPath(attempt.resultPath),
+      JSON.stringify({
+        ...submission,
+        unexpected: true
+      }),
+      { createPath: false }
+    )
+
+    await expect(reconcileRun(runDirectory(started.state.id), { surface })).rejects.toThrow(
+      "invalid or stale"
+    )
+    await Bun.write(
+      completionSubmissionPath(attempt.resultPath),
+      JSON.stringify({
+        ...submission,
+        result: { ...submission.result, unexpected: true }
+      }),
+      { createPath: false }
+    )
+    await expect(reconcileRun(runDirectory(started.state.id), { surface })).rejects.toThrow(
+      "invalid or stale"
+    )
+    await Bun.write(
+      completionSubmissionPath(attempt.resultPath),
+      JSON.stringify({
+        ...submission,
+        capability: { ...submission.capability, digest: "0".repeat(64) }
+      }),
+      { createPath: false }
+    )
+    await expect(reconcileRun(runDirectory(started.state.id), { surface })).rejects.toThrow(
+      "invalid or stale"
+    )
+    expect((await readRunState(runDirectory(started.state.id))).nodes.review?.status).toBe(
+      "running"
+    )
+  })
+
+  for (const outcome of ["completed", "failed"] as const) {
+    test(`rejects an authenticated ${outcome} envelope whose declared result is missing`, async () => {
+      const surface = new FakeSurface()
+      const started = await start(workflow([agent("review")]), surface)
+      const attempt = started.state.nodes.review?.attempts.at(-1)
+      if (attempt === undefined) {
+        throw new Error("missing attempt")
+      }
+      await mkdir(path.dirname(attempt.resultPath), { recursive: true })
+      await Bun.write(attempt.resultPath, '{"clean":true}\n', { createPath: false })
+      await submitTestNodeDone(runDirectory(started.state.id), "review", attempt.token, outcome)
+      await rm(attempt.resultPath)
+
+      await expect(reconcileRun(runDirectory(started.state.id), { surface })).rejects.toThrow(
+        "no valid nonempty declared result"
+      )
+      expect((await readRunState(runDirectory(started.state.id))).nodes.review?.status).toBe(
+        "running"
+      )
+    })
+  }
+
+  test("rejects whitespace-only text completion evidence during reconciliation", async () => {
+    const surface = new FakeSurface()
+    const started = await start(
+      workflow([
+        agent("review", [], {
+          output: { format: "text", schema: null }
+        })
+      ]),
+      surface
+    )
+    const attempt = started.state.nodes.review?.attempts.at(-1)
+    if (attempt === undefined) {
+      throw new Error("missing attempt")
+    }
+    await mkdir(path.dirname(attempt.resultPath), { recursive: true })
+    await Bun.write(attempt.resultPath, "valid before mutation", { createPath: false })
+    await submitTestNodeDone(runDirectory(started.state.id), "review", attempt.token, "completed")
+    await Bun.write(attempt.resultPath, " \n\t", { createPath: false })
+
+    await expect(reconcileRun(runDirectory(started.state.id), { surface })).rejects.toThrow(
+      "does not match the exact result bytes preflighted by node-done"
+    )
+    expect((await readRunState(runDirectory(started.state.id))).nodes.review?.status).toBe(
+      "running"
+    )
   })
 
   test("rejects a provider result symlink without reading its target", async () => {
@@ -578,7 +980,7 @@ describe("crank shell", () => {
     }
     await mkdir(path.dirname(attempt.resultPath), { recursive: true })
     await Bun.write(attempt.resultPath, '{"clean":true}\n', { createPath: false })
-    await submitNodeDone(runDirectory(started.state.id), "review", attempt.token, "completed")
+    await submitTestNodeDone(runDirectory(started.state.id), "review", attempt.token, "completed")
     const completed = await reconcileRun(runDirectory(started.state.id), { surface })
     expect(completed.state.nodes.review?.status).toBe("completed")
     expect(completed.state.status).toBe("running")
@@ -658,7 +1060,7 @@ describe("crank shell", () => {
     }
     await mkdir(path.dirname(attempt.resultPath), { recursive: true })
     await Bun.write(attempt.resultPath, '{"clean":true}\n', { createPath: false })
-    await submitNodeDone(runDir, "provider", attempt.token, "completed", true)
+    await submitTestNodeDone(runDir, "provider", attempt.token, "completed", true)
     const beforeFailedCommit = await readRunState(runDir)
     const beforeJournal = await Bun.file(eventsPath(runDir)).text()
     injectAtomicWriteFaultForTests({
@@ -718,7 +1120,7 @@ describe("crank shell", () => {
     await Bun.write(attempt.resultPath, "compiler failed at Source/Main.cpp:42\n", {
       createPath: false
     })
-    await submitNodeDone(runDir, "compile", attempt.token, "failed")
+    await submitTestNodeDone(runDir, "compile", attempt.token, "failed")
     const failed = await reconcileRun(runDir, { surface })
     expect(failed.state.status).toBe("failed")
     expect(failed.state.nodes.compile?.resultPath).toBe(attempt.resultPath)
@@ -955,17 +1357,7 @@ describe("crank shell", () => {
         if (request.intent.nodeId === "planned") {
           await mkdir(path.dirname(attempt.resultPath), { recursive: true })
           await Bun.write(attempt.resultPath, '{"clean":true}\n', { createPath: false })
-          await Bun.write(
-            completionSubmissionPath(attempt.resultPath),
-            `${JSON.stringify({
-              runId: persisted.state.id,
-              nodeId: "planned",
-              token: attempt.token,
-              outcome: "completed",
-              hold: false
-            })}\n`,
-            { createPath: false }
-          )
+          await submitTestNodeDone(persisted.runDir, "planned", attempt.token, "completed")
         }
         return super.recoverOrSpawn(request)
       }
@@ -1011,7 +1403,7 @@ describe("crank shell", () => {
     }
     await mkdir(path.dirname(attempt.resultPath), { recursive: true })
     await Bun.write(attempt.resultPath, "{}\n", { createPath: false })
-    await submitNodeDone(runDir, "decision", attempt.token, "completed")
+    await submitTestNodeDone(runDir, "decision", attempt.token, "completed")
 
     const paused = await reconcileRun(runDir, { surface })
     expect(paused.state.status).toBe("paused")
@@ -1057,6 +1449,7 @@ describe("crank shell", () => {
       persisted.runDir,
       {
         type: "propose-revision",
+        provenance: await workflowProvenance(revised),
         workflow: revised,
         digest,
         summary: ["ready/planned outage race"]
@@ -1087,7 +1480,16 @@ describe("crank shell", () => {
     expect(paused.state.status).toBe("paused")
     expect(paused.events.at(-1)?.type).toBe("run.paused")
 
-    const surface = new FakeSurface()
+    class ResumingMasterSurface extends FakeSurface {
+      override readonly origin: RunOrigin = {
+        workspaceId: "resuming-workspace",
+        tabId: "resuming-tab",
+        paneId: "resuming-pane",
+        provider: "codex",
+        sessionId: "resuming-session"
+      }
+    }
+    const surface = new ResumingMasterSurface()
     const resumed = await crankRun(
       persisted.runDir,
       {
@@ -1099,6 +1501,8 @@ describe("crank shell", () => {
       { surface }
     )
     expect(resumed.state.status).toBe("running")
+    expect(resumed.state.origin).toEqual(surface.origin)
+    expect((await readRunState(persisted.runDir)).origin).toEqual(surface.origin)
     expect(surface.handoffs).toEqual([])
 
     const attempt = resumed.state.nodes.planned?.attempts.at(-1)
@@ -1107,7 +1511,7 @@ describe("crank shell", () => {
     }
     await mkdir(path.dirname(attempt.resultPath), { recursive: true })
     await Bun.write(attempt.resultPath, '{"clean":false}\n', { createPath: false })
-    await submitNodeDone(persisted.runDir, "planned", attempt.token, "failed")
+    await submitTestNodeDone(persisted.runDir, "planned", attempt.token, "failed")
 
     const dormant = await readRunState(persisted.runDir)
     expect(dormant.status).toBe("running")
@@ -1116,6 +1520,66 @@ describe("crank shell", () => {
     expect(failed.status).toBe("failed")
     expect(surface.handoffs).toHaveLength(1)
     expect(surface.handoffs[0]).toContain(`Orchestrate run ${failed.id} failed.`)
+  })
+
+  test("falls back to the transferred wake owner while a non-agent resume preserves it", async () => {
+    const persisted = await persistPlanned(workflow([agent("planned")]))
+    await crankRun(persisted.runDir, { type: "pause" }, { surface: new FakeSurface() })
+
+    class ResumingAgentSurface extends FakeSurface {
+      override readonly origin: RunOrigin = {
+        workspaceId: "resuming-workspace",
+        tabId: "resuming-tab",
+        paneId: "resuming-pane",
+        provider: "claude",
+        sessionId: "resuming-session"
+      }
+    }
+    const agentSurface = new ResumingAgentSurface()
+    const transferred = await crankRun(
+      persisted.runDir,
+      { type: "resume", overrideFuse: false, continueRounds: null, acceptRepeat: null },
+      { surface: agentSurface }
+    )
+    expect(transferred.state.origin).toEqual(agentSurface.origin)
+
+    await crankRun(persisted.runDir, { type: "pause" }, { surface: agentSurface })
+    class NonAgentSurface extends FakeSurface {
+      readonly promptedOrigins: RunOrigin[] = []
+
+      override async captureOrigin(): Promise<RunOrigin | null> {
+        return null
+      }
+
+      override async promptOrigin(origin: RunOrigin): Promise<void> {
+        this.promptedOrigins.push(origin)
+        throw new Error("wake owner unavailable")
+      }
+    }
+    const nonAgentSurface = new NonAgentSurface()
+    const preserved = await crankRun(
+      persisted.runDir,
+      { type: "resume", overrideFuse: false, continueRounds: null, acceptRepeat: null },
+      { surface: nonAgentSurface }
+    )
+    expect(preserved.state.origin).toEqual(agentSurface.origin)
+
+    const attempt = preserved.state.nodes.planned?.attempts.at(-1)
+    if (attempt === undefined) {
+      throw new Error("missing resumed agent attempt")
+    }
+    await mkdir(path.dirname(attempt.resultPath), { recursive: true })
+    await Bun.write(attempt.resultPath, '{"clean":false}\n', { createPath: false })
+    await submitTestNodeDone(persisted.runDir, "planned", attempt.token, "failed")
+    const reconciled = await reconcileRun(persisted.runDir, { surface: nonAgentSurface })
+
+    expect(reconciled.state.status).toBe("failed")
+    expect(nonAgentSurface.promptedOrigins).toEqual([agentSurface.origin])
+    expect(nonAgentSurface.notifications).toContainEqual([
+      "crank-test · origin handoff fallback",
+      `Run ${persisted.state.id} could not prompt its current wake-owning master. Inspect orchestrate status ${persisted.state.id}.`,
+      "request"
+    ])
   })
 
   test("consumes finished submissions while paused without starting new work", async () => {
@@ -1131,7 +1595,7 @@ describe("crank shell", () => {
 
     await mkdir(path.dirname(attempt.resultPath), { recursive: true })
     await Bun.write(attempt.resultPath, '{"clean":true}\n', { createPath: false })
-    await submitNodeDone(runDir, "review", attempt.token, "completed")
+    await submitTestNodeDone(runDir, "review", attempt.token, "completed")
 
     const reconciled = await reconcileRun(runDir, { surface })
     expect(reconciled.state.status).toBe("paused")
@@ -1151,7 +1615,7 @@ describe("crank shell", () => {
     }
     await mkdir(path.dirname(attempt.resultPath), { recursive: true })
     await Bun.write(attempt.resultPath, '{"clean":true}\n', { createPath: false })
-    await submitNodeDone(runDir, "review", attempt.token, "completed")
+    await submitTestNodeDone(runDir, "review", attempt.token, "completed")
     const pane = attempt.pane
     if (pane === null) {
       throw new Error("missing review pane")
@@ -1176,13 +1640,93 @@ describe("crank shell", () => {
     )
   })
 
-  test("prompts for debugging when a Herdr agent settles without submitting", async () => {
+  test("routes blocked with valid completion evidence to reconcile before blocked attention", async () => {
+    const surface = new FakeSurface()
+    let rechecks = 0
+    surface.waitForAgentStatus = async () => {
+      rechecks += 1
+      return false
+    }
+    const started = await start(workflow([agent("review")]), surface)
+    const runDir = runDirectory(started.state.id)
+    const attempt = started.state.nodes.review?.attempts.at(-1)
+    if (attempt === undefined || attempt.pane === null) {
+      throw new Error("missing review attempt")
+    }
+    await mkdir(path.dirname(attempt.resultPath), { recursive: true })
+    await Bun.write(attempt.resultPath, '{"clean":true}\n', { createPath: false })
+    await submitTestNodeDone(runDir, "review", attempt.token, "completed")
+
+    expect(
+      await handleHerdrAgentStatusEvent(
+        "pane.agent_status_changed",
+        JSON.stringify({
+          event: "pane_agent_status_changed",
+          data: {
+            pane_id: attempt.pane.paneId,
+            workspace_id: attempt.pane.workspaceId,
+            agent_status: "blocked"
+          }
+        }),
+        surface
+      )
+    ).toEqual({ status: "handled", matched: 1, prompted: 1 })
+    expect(surface.handoffs.at(-1)).toContain(`orchestrate reconcile ${started.state.id}`)
+    expect(surface.handoffs.at(-1)).not.toContain("requires attention")
+    expect(rechecks).toBe(0)
+  })
+
+  test("treats post-submit result mutation as invalid during blocked wake recovery", async () => {
     const surface = new FakeSurface()
     const started = await start(workflow([agent("review")]), surface)
-    const pane = started.state.nodes.review?.attempts.at(-1)?.pane
-    if (pane === null || pane === undefined) {
+    const runDir = runDirectory(started.state.id)
+    const attempt = started.state.nodes.review?.attempts.at(-1)
+    if (attempt === undefined || attempt.pane === null) {
+      throw new Error("missing review attempt")
+    }
+    await mkdir(path.dirname(attempt.resultPath), { recursive: true })
+    await Bun.write(attempt.resultPath, '{"clean":true}\n', { createPath: false })
+    await submitTestNodeDone(runDir, "review", attempt.token, "completed")
+    await Bun.write(attempt.resultPath, '{"clean":false}\n', { createPath: false })
+
+    expect(
+      await handleHerdrAgentStatusEvent(
+        "pane.agent_status_changed",
+        JSON.stringify({
+          event: "pane_agent_status_changed",
+          data: {
+            pane_id: attempt.pane.paneId,
+            workspace_id: attempt.pane.workspaceId,
+            agent_status: "blocked"
+          }
+        }),
+        surface
+      )
+    ).toEqual({ status: "handled", matched: 1, prompted: 1 })
+    expect(surface.handoffs.at(-1)).toContain("requires attention")
+    expect(surface.handoffs.at(-1)).not.toContain(`orchestrate reconcile ${started.state.id}`)
+  })
+
+  test("prompts for debugging when done wake has an envelope but no declared result", async () => {
+    const surface = new FakeSurface()
+    const started = await start(workflow([agent("review")]), surface)
+    const attempt = started.state.nodes.review?.attempts.at(-1)
+    const pane = attempt?.pane
+    if (attempt === undefined || pane === null || pane === undefined) {
       throw new Error("missing review pane")
     }
+    await mkdir(path.dirname(attempt.resultPath), { recursive: true })
+    await Bun.write(
+      completionSubmissionPath(attempt.resultPath),
+      JSON.stringify({
+        runId: started.state.id,
+        nodeId: "review",
+        token: attempt.token,
+        outcome: "completed",
+        hold: false
+      }),
+      { createPath: false }
+    )
     await handleHerdrAgentStatusEvent(
       "pane.agent_status_changed",
       JSON.stringify({
@@ -1197,6 +1741,8 @@ describe("crank shell", () => {
     )
     expect(surface.handoffs.at(-1)).toContain("without a valid completion submission")
     expect(surface.handoffs.at(-1)).toContain(`herdr pane read ${pane.paneId}`)
+    expect(surface.handoffs.at(-1)).toContain("only that owner may write the result")
+    expect(surface.handoffs.at(-1)).not.toContain("recovery command")
   })
 
   test("suppresses a done wake when the agent is observed working again", async () => {
@@ -1255,7 +1801,7 @@ describe("crank shell", () => {
     }
     await mkdir(path.dirname(attempt.resultPath), { recursive: true })
     await Bun.write(attempt.resultPath, '{"clean":true}\n', { createPath: false })
-    await submitNodeDone(runDir, "review", attempt.token, "completed")
+    await submitTestNodeDone(runDir, "review", attempt.token, "completed")
     const event = JSON.stringify({
       event: "pane_exited",
       data: { pane_id: attempt.pane.paneId, workspace_id: attempt.pane.workspaceId }
@@ -1266,6 +1812,43 @@ describe("crank shell", () => {
       prompted: 0
     })
   })
+
+  for (const [eventName, eventType] of [
+    ["pane.closed", "pane_closed"],
+    ["pane.exited", "pane_exited"]
+  ] as const) {
+    test(`prompts for attention on ${eventName} when only an envelope exists`, async () => {
+      const surface = new FakeSurface()
+      const started = await start(workflow([agent("review")]), surface)
+      const attempt = started.state.nodes.review?.attempts.at(-1)
+      if (attempt === undefined || attempt.pane === null) {
+        throw new Error("missing review attempt")
+      }
+      await mkdir(path.dirname(attempt.resultPath), { recursive: true })
+      await Bun.write(
+        completionSubmissionPath(attempt.resultPath),
+        JSON.stringify({
+          runId: started.state.id,
+          nodeId: "review",
+          token: attempt.token,
+          outcome: "completed",
+          hold: false
+        }),
+        { createPath: false }
+      )
+      const event = JSON.stringify({
+        event: eventType,
+        data: { pane_id: attempt.pane.paneId, workspace_id: attempt.pane.workspaceId }
+      })
+
+      expect(await handleHerdrAgentStatusEvent(eventName, event, surface)).toEqual({
+        status: "handled",
+        matched: 1,
+        prompted: 1
+      })
+      expect(surface.handoffs.at(-1)).toContain("lost its Herdr pane")
+    })
+  }
 
   test("submits without Herdr authority and explicit reconcile spawns downstream exactly once", async () => {
     const launchSurface = new FakeSurface()
@@ -1291,8 +1874,8 @@ describe("crank shell", () => {
     process.env.PATH = deniedBin
     try {
       const submissions = await Promise.all([
-        submitNodeDone(runDir, "submitter", firstAttempt.token, "completed"),
-        submitNodeDone(runDir, "submitter", firstAttempt.token, "completed")
+        submitTestNodeDone(runDir, "submitter", firstAttempt.token, "completed"),
+        submitTestNodeDone(runDir, "submitter", firstAttempt.token, "completed")
       ])
       expect(submissions).toEqual([submissions[0], submissions[0]])
     } finally {
@@ -1321,7 +1904,7 @@ describe("crank shell", () => {
     }
     await mkdir(path.dirname(secondAttempt.resultPath), { recursive: true })
     await Bun.write(secondAttempt.resultPath, '{"clean":true}\n', { createPath: false })
-    await submitNodeDone(runDir, "dependent", secondAttempt.token, "completed")
+    await submitTestNodeDone(runDir, "dependent", secondAttempt.token, "completed")
     const finished = await reconcileRun(runDir, {
       surface: restartedSurface
     })
@@ -1371,7 +1954,7 @@ describe("crank shell", () => {
       }
       await mkdir(path.dirname(attempt.resultPath), { recursive: true })
       await Bun.write(attempt.resultPath, '{"clean":true}\n', { createPath: false })
-      await submitNodeDone(runDir, nodeId, attempt.token, "completed")
+      await submitTestNodeDone(runDir, nodeId, attempt.token, "completed")
       return reconcileRun(runDir, { surface })
     }
 
@@ -1421,7 +2004,7 @@ describe("crank shell", () => {
       }
       await mkdir(path.dirname(attempt.resultPath), { recursive: true })
       await Bun.write(attempt.resultPath, '{"clean":true}\n', { createPath: false })
-      await submitNodeDone(runDir, nodeId, attempt.token, "completed")
+      await submitTestNodeDone(runDir, nodeId, attempt.token, "completed")
       return reconcileRun(runDir, { surface })
     }
 
@@ -1500,7 +2083,7 @@ describe("crank shell", () => {
     }
     await mkdir(path.dirname(reviewerAttempt.resultPath), { recursive: true })
     await Bun.write(reviewerAttempt.resultPath, '{"clean":true}\n', { createPath: false })
-    await submitNodeDone(runDir, "reviewer", reviewerAttempt.token, "completed")
+    await submitTestNodeDone(runDir, "reviewer", reviewerAttempt.token, "completed")
     const afterReviewer = await reconcileRun(runDir, { surface })
     const settleAttempt = afterReviewer.state.nodes.settle?.attempts.at(-1)
     if (settleAttempt === undefined) {
@@ -1570,7 +2153,7 @@ describe("crank shell", () => {
       }
       await mkdir(path.dirname(attempt.resultPath), { recursive: true })
       await Bun.write(attempt.resultPath, `${JSON.stringify(result)}\n`, { createPath: false })
-      await submitNodeDone(runDir, nodeId, attempt.token, "completed")
+      await submitTestNodeDone(runDir, nodeId, attempt.token, "completed")
       return reconcileRun(runDir, { surface })
     }
 

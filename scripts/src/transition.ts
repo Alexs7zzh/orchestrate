@@ -16,6 +16,9 @@ import type {
   WorkflowSpec
 } from "./types.js"
 
+import { approvalPreview, validateWorkflowProvenance } from "./approval.js"
+import { digestGate, digestWorkflow } from "./digest.js"
+import { claudeSessionLineageIdAtCompletion } from "./session-lineage.js"
 import { diffState } from "./state-patch.js"
 import { hasResolvedHistory } from "./state.js"
 import {
@@ -789,9 +792,13 @@ export function transition(
               )
             }
             const preparedGate = prepared.gate
+            const gateDigest = digestGate(preparedGate.content)
+            if (preparedGate.digest !== gateDigest) {
+              throw new Error(`Prepared gate digest mismatch for node "${candidate.id}".`)
+            }
             emit(
               "gate.opened",
-              `Approval required for node "${candidate.id}". Approve with: orchestrate approve ${state.id} --gate ${candidate.id} --digest ${preparedGate.digest}`,
+              `Approval required for node "${candidate.id}". Approve with: orchestrate approve ${state.id} --gate ${candidate.id} --digest ${gateDigest}`,
               (current) => ({
                 ...replaceNode(current, {
                   ...candidate,
@@ -803,13 +810,13 @@ export function transition(
                     nodeId: candidate.id,
                     title: candidate.title,
                     content: preparedGate.content,
-                    digest: preparedGate.digest,
+                    digest: gateDigest,
                     openedAt: now,
                     approvedAt: null
                   }
                 }
               }),
-              { nodeId: candidate.id, data: { digest: preparedGate.digest } }
+              { nodeId: candidate.id, data: { digest: gateDigest } }
             )
             madeProgress = true
             continue
@@ -999,6 +1006,10 @@ export function transition(
               ? template.session.from
               : null
           const resumedSession = resumedAlias === null ? undefined : current.sessions[resumedAlias]
+          const lineageId =
+            template.provider === "claude"
+              ? claudeSessionLineageIdAtCompletion(template, current)
+              : null
           const sessions = {
             ...current.sessions,
             ...(resumedAlias === null || resumedSession === undefined
@@ -1007,6 +1018,7 @@ export function transition(
                   [resumedAlias]: {
                     ...resumedSession,
                     ...(promotedSessionId === null ? {} : { sessionId: promotedSessionId }),
+                    ...(lineageId === null ? {} : { lineageId }),
                     sourceNodeId: node.id
                   }
                 }),
@@ -1017,6 +1029,7 @@ export function transition(
                     alias: template.session.saveAs,
                     provider: template.provider,
                     sessionId: event.providerSessionId,
+                    ...(lineageId === null ? {} : { lineageId }),
                     sourceNodeId: node.id
                   }
                 })
@@ -1224,7 +1237,8 @@ export function transition(
       if (gate.approvedAt !== null) {
         throw new Error(`Gate for node "${event.nodeId}" is already approved.`)
       }
-      if (gate.digest !== event.digest) {
+      const recomputed = digestGate(gate.content)
+      if (gate.digest !== recomputed || event.digest !== recomputed) {
         throw new Error(`Gate digest mismatch for node "${event.nodeId}".`)
       }
       emit(
@@ -1351,6 +1365,7 @@ export function transition(
           ...current,
           status: "running",
           pause: null,
+          origin: event.origin ?? current.origin,
           fuseOverride: current.fuseOverride || event.overrideFuse,
           repeatRoundExtensions: extensions,
           repeats
@@ -1424,19 +1439,33 @@ export function transition(
       if (state.pendingRevision !== null) {
         throw new Error("A revision is already pending.")
       }
+      validateWorkflowProvenance(event.workflow, event.provenance)
+      const computedDigest = digestWorkflow(event.workflow)
+      if (event.digest !== computedDigest) {
+        throw new Error(
+          `Revision proposal digest mismatch: expected ${computedDigest}, received ${event.digest}.`
+        )
+      }
       emit(
         "revision.proposed",
-        `Proposed workflow revision ${event.digest}. Apply with: orchestrate approve ${state.id} --revision ${event.digest} — or discard with: orchestrate revise ${state.id} --discard`,
+        `Proposed workflow revision ${computedDigest}. Apply with: orchestrate approve ${state.id} --revision ${computedDigest} — or discard with: orchestrate revise ${state.id} --discard`,
         (current) => ({
           ...current,
           pendingRevision: {
             workflow: event.workflow,
-            digest: event.digest,
+            digest: computedDigest,
             summary: event.summary,
+            provenance: event.provenance,
             createdAt: now
           }
         }),
-        { data: { digest: event.digest, summary: event.summary } }
+        {
+          data: {
+            digest: computedDigest,
+            summary: event.summary,
+            provenance: event.provenance
+          }
+        }
       )
       break
     }
@@ -1448,6 +1477,11 @@ export function transition(
       if (pending.digest !== event.digest) {
         throw new Error("Revision digest mismatch.")
       }
+      const computedDigest = digestWorkflow(pending.workflow)
+      if (pending.digest !== computedDigest || event.digest !== computedDigest) {
+        throw new Error("Revision digest mismatch.")
+      }
+      approvalPreview(pending.workflow, pending.provenance)
       const revised = pending.workflow
       if (!same(workflow.repeats, revised.repeats)) {
         throw new Error("Revision changes the repeat contract of an active run.")
@@ -1525,7 +1559,11 @@ export function transition(
             existing === undefined
               ? nodeState(node)
               : !hasResolvedHistory(existing)
-                ? { ...existing, title: node.title }
+                ? {
+                    ...existing,
+                    title: node.title,
+                    status: existing.status === "awaiting-approval" ? "pending" : existing.status
+                  }
                 : existing
         }
       }
@@ -1546,7 +1584,7 @@ export function transition(
               ...current,
               workflowName: revised.name,
               objective: revised.objective,
-              digest: event.digest,
+              digest: computedDigest,
               pendingRevision: null,
               nodes: reconciledNodes,
               workrooms: reconciledWorkrooms,
@@ -1559,13 +1597,20 @@ export function transition(
               ),
               gates: Object.fromEntries(
                 Object.entries(current.gates).filter(
-                  ([id]) => reconciledNodes[id]?.attempts.length !== 0
+                  ([id]) =>
+                    reconciledNodes[id] !== undefined && reconciledNodes[id].attempts.length !== 0
                 )
               )
             },
             revised
           ),
-        { data: { digest: event.digest, workflow: revised } }
+        {
+          data: {
+            digest: computedDigest,
+            workflow: revised,
+            provenance: pending.provenance
+          }
+        }
       )
       break
     }

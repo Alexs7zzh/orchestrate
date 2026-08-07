@@ -22,13 +22,15 @@ Use Orchestrate only when the task is materially clearer or safer as an explicit
 7. Present the objective, graph, mutation boundaries, permissions, repeat limits, presentation
    workrooms/seats, and preview digest as a readable prose walkthrough in your reply message —
    describe the nodes, dependencies, loops, providers, and models in words. Never paste raw
-   workflow JSON or terminal preview output as the presentation, and never route approval through
+   workflow YAML or terminal preview output as the presentation, and never route approval through
    an interactive question tool: terminal output is often collapsed, so the human would be
    approving work they never saw. End your message after the walkthrough and wait for the human to
    reply. Do not start until the user approves that digest.
 8. Start with `orchestrate run <file> --approve <digest>`. Report the run ID. Initial panes run
    independently. `node-done` writes only the authenticated submission; Herdr's trusted plugin event
-   hook wakes the launching master when a workflow agent becomes blocked or done.
+   hook wakes the current wake-owning master when a workflow agent becomes blocked or done. An
+   authenticated agent-pane `resume` transfers wake ownership to that agent's exact provider
+   session; a non-agent resume preserves the current owner.
 9. Run `orchestrate reconcile <run>` after a wake-up or at any time to consume submissions and start
    newly ready work. A missed wake only delays progress. Observe with `board`, `status --wait`, or
    `events --follow`, and read durable node output with `result`.
@@ -39,15 +41,17 @@ Use Orchestrate only when the task is materially clearer or safer as an explicit
 
 - Keep the graph static. If downstream work is unknowable, add a planner that emits
   schema-validated JSON and put an approval gate on the executor that consumes it.
-- Use `session.saveAs` and `session.from` only for intentional provider lineage. Fork for fan-out;
-  resume for one dependency-ordered continuation. Persistent repeat sessions must resume an
-  unconditional alias seeded outside the repeat.
+- In `session`, create intentional provider lineage with `{fresh: alias}`, continue it with
+  `{resume: alias}`, and fan it out with `{fork: alias}`. Resume and fork may add `saveAs` to name
+  their resulting lineage. Persistent repeat sessions must resume an unconditional alias seeded
+  outside the repeat.
 - Use `shared` only for safe shared access, `existing` for an explicit directory, and
   `git-worktree` for isolated Git writes. Set `removeOnClean` deliberately.
 - Declare the narrowest honest `workspace.writes` and all exclusive external resources. Never use
   `allow-with-approval` as a substitute for understanding overlapping writes.
-- Use structured JSON results for machine decisions. Agent nodes write the declared result file
-  and invoke the exact completion command embedded in their prompt.
+- Use structured JSON results for machine decisions. The owning agent writes the declared result
+  file and invokes the exact completion command embedded in its prompt before its final response.
+  Delegated workers return evidence only and never write the result or invoke `node-done`.
 - Use node `when` for an approved branch over a direct schema-validated JSON dependency. A false
   value becomes scheduler-owned `skipped`; a missing pointer pauses as a contract error and resume
   requires an approved condition change. Never ask an agent to assert scheduler state in free text.

@@ -7,18 +7,20 @@ import type {
   NodeRunState,
   NodeStatus,
   RunState,
-  WorkflowNode
+  WorkflowNode,
+  WorkflowSpec
 } from "../src/types.js"
 
 import {
   buildBoardModel,
   gateApprovalCommand,
   mapBoardInput,
-  nodeDoneCommand,
   revisionApprovalCommand,
-  runtimeDependencyIds
+  runtimeDependencyIds,
+  stalledInspectionCommand
 } from "../src/board-model.js"
 import { classifyLivePane, renderBoardFrame, startClockRefresh } from "../src/board.js"
+import { workflowProvenance } from "./workflow-provenance-fixture.js"
 
 const START = "2026-08-02T12:00:00.000Z"
 const NOW = "2026-08-02T12:00:30.000Z"
@@ -270,10 +272,22 @@ describe("board view model", () => {
     ])
   })
 
-  test("orders needs-you items as gates, revision, maxRounds, held, workroom, then stalled", () => {
+  test("orders needs-you items as gates, revision, maxRounds, held, workroom, then stalled", async () => {
     const gated = node("gated", "awaiting-approval")
     const held = node("held", "completed")
     const running = node("running", "running")
+    const pendingWorkflow: WorkflowSpec = {
+      name: "Revised",
+      objective: "Revised",
+      cwd: "/tmp",
+      concurrency: 1,
+      callback: { type: "none" },
+      milestones: false,
+      limits: { maxStarts: null },
+      writeConflicts: "reject",
+      nodes: [workflowAgent("revision")],
+      repeats: []
+    }
     const model = buildBoardModel(
       state([gated, held, running], {
         status: "paused",
@@ -288,18 +302,8 @@ describe("board view model", () => {
           }
         },
         pendingRevision: {
-          workflow: {
-            name: "Revised",
-            objective: "Revised",
-            cwd: "/tmp",
-            concurrency: 1,
-            callback: { type: "none" },
-            milestones: false,
-            limits: { maxStarts: null },
-            writeConflicts: "reject",
-            nodes: [],
-            repeats: []
-          },
+          provenance: await workflowProvenance(pendingWorkflow),
+          workflow: pendingWorkflow,
           digest: "revision-digest",
           summary: ["change one"],
           createdAt: START
@@ -351,13 +355,88 @@ describe("board view model", () => {
       "orchestrate resume run-1 --accept-repeat review-loop",
       "orchestrate release run-1 held",
       "orchestrate reconcile run-1",
-      "orchestrate node-done run-1 running --token token-1 --outcome completed"
+      "orchestrate status run-1"
     ])
+    expect(model.needsYou[0]).toMatchObject({
+      kind: "gate",
+      content: "content",
+      detail: 'Content "content"\nDigest gate-digest'
+    })
+    expect(model.needsYou[1]).toMatchObject({
+      kind: "revision",
+      preview: { name: "Revised", objective: "Revised" }
+    })
     expect(model.needsYou[4]).toMatchObject({
       workroomId: "review-room",
       seatId: "reviewer",
       title: "review-room: seat reviewer needs occupancy attention"
     })
+  })
+
+  test("surfaces persisted invalid revision provenance as non-approvable attention", async () => {
+    const pendingWorkflow: WorkflowSpec = {
+      name: "Revised",
+      objective: "Revised",
+      cwd: "/tmp",
+      concurrency: 1,
+      callback: { type: "none" },
+      milestones: false,
+      limits: { maxStarts: null },
+      writeConflicts: "reject",
+      nodes: [workflowAgent("revision")],
+      repeats: []
+    }
+    const provenance = await workflowProvenance(pendingWorkflow)
+    const invalid = { ...provenance, origins: { ...provenance.origins } }
+    delete invalid.origins["/name"]
+    const model = buildBoardModel(
+      state([], {
+        pendingRevision: {
+          workflow: pendingWorkflow,
+          provenance: invalid,
+          digest: "revision-digest",
+          summary: [],
+          createdAt: START
+        }
+      }),
+      [],
+      { now: NOW }
+    )
+    expect(model.needsYou).toContainEqual(
+      expect.objectContaining({
+        kind: "revision",
+        title: "Pending revision has invalid provenance",
+        command: null,
+        preview: null
+      })
+    )
+
+    const invalidAnnotations = {
+      ...provenance,
+      inferredNeeds: { ghost: [] }
+    }
+    const annotationModel = buildBoardModel(
+      state([], {
+        pendingRevision: {
+          workflow: pendingWorkflow,
+          provenance: invalidAnnotations,
+          digest: "revision-digest",
+          summary: [],
+          createdAt: START
+        }
+      }),
+      [],
+      { now: NOW }
+    )
+    expect(annotationModel.needsYou).toContainEqual(
+      expect.objectContaining({
+        kind: "revision",
+        title: "Pending revision has invalid provenance",
+        detail: expect.stringContaining('Unknown inferredNeeds node "ghost"'),
+        command: null,
+        preview: null
+      })
+    )
   })
 
   test("shows the explicit fuse override instead of offering ordinary resume", () => {
@@ -608,7 +687,7 @@ describe("board view model", () => {
     expect(advancedFrame).toContain("↻ s1  round 2/2")
   })
 
-  test("treats stale-pane data as garnish only and gives agent panes a manual command", () => {
+  test("treats stale-pane data as garnish and gives every stalled pane safe guidance", () => {
     const command = node("command", "running", {
       type: "command",
       provider: null
@@ -624,12 +703,14 @@ describe("board view model", () => {
     expect(model.nodes.find((value) => value.id === "agent")?.status).toBe("running")
     expect(model.nodes.find((value) => value.id === "agent")?.stalledPane).toEqual({
       condition: "gone",
-      detail: "Pane gone.",
-      manualCommand: "orchestrate node-done run-1 agent --token token-1 --outcome completed"
+      detail:
+        "Pane gone. Inspect status, restore the owning pane or resume its provider session, and let that same owner finish and submit completion.",
+      guidanceCommand: "orchestrate status run-1"
     })
-    expect(model.nodes.find((value) => value.id === "command")?.stalledPane?.manualCommand).toBe(
-      null
-    )
+    expect(model.nodes.find((value) => value.id === "command")?.stalledPane).toMatchObject({
+      guidanceCommand: "orchestrate status run-1",
+      detail: expect.stringContaining("launcher-owned recovery")
+    })
   })
 
   test("treats done, blocked, and gone samples as actionable while startup samples stay transient", () => {
@@ -667,13 +748,29 @@ describe("board view model", () => {
     const doneFrame = renderBoardFrame(doneModel, "agent").text
     expect(doneModel.needsYou).toHaveLength(1)
     expect(doneModel.needsYou[0]?.title).toBe("agent: result missing")
-    expect(doneModel.needsYou[0]?.command).toBe(
-      "orchestrate node-done run-1 agent --token token-1 --outcome completed"
-    )
+    expect(doneModel.needsYou[0]?.command).toBe("orchestrate status run-1")
+    expect(doneModel.needsYou[0]?.detail).toContain("restore or resume the owning provider session")
     expect(doneFrame.match(/result missing/g)).toHaveLength(2)
-    expect(doneFrame).toContain(
-      "orchestrate node-done run-1 agent --token token-1 --outcome completed"
-    )
+    expect(doneFrame).toContain("orchestrate status run-1")
+    expect(doneFrame).not.toContain("--token")
+
+    const submittedModel = buildBoardModel(state([node("agent", "running")]), [], {
+      now: NOW,
+      paneGarnish: {
+        agent: {
+          condition: "submitted",
+          detail: "Authenticated completion submitted; pending reconcile."
+        }
+      }
+    })
+    const submittedFrame = renderBoardFrame(submittedModel, "agent").text
+    expect(submittedModel.needsYou).toEqual([])
+    expect(submittedModel.nodes[0]?.stalledPane).toMatchObject({
+      condition: "submitted",
+      guidanceCommand: "orchestrate reconcile run-1"
+    })
+    expect(submittedFrame).toContain("submitted; pending reconcile")
+    expect(submittedFrame).not.toContain("result missing")
 
     const transientModel = buildBoardModel(state([node("agent", "running")]), [], {
       now: NOW,
@@ -765,7 +862,7 @@ describe("board view model", () => {
     expect(calls).toBe(1)
   })
 
-  test("formats digest-bound and manual commands exactly", () => {
+  test("formats digest-bound and stalled-inspection commands exactly", () => {
     expect(
       gateApprovalCommand("run-1", {
         nodeId: "review",
@@ -779,9 +876,7 @@ describe("board view model", () => {
     expect(revisionApprovalCommand("run-1", "def456")).toBe(
       "orchestrate approve run-1 --revision def456"
     )
-    expect(nodeDoneCommand("run-1", "review", "token-1")).toBe(
-      "orchestrate node-done run-1 review --token token-1 --outcome completed"
-    )
+    expect(stalledInspectionCommand("run-1")).toBe("orchestrate status run-1")
   })
 })
 

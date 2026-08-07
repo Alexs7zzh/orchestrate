@@ -1,11 +1,14 @@
 import { afterEach, beforeEach, describe, expect, setDefaultTimeout, test } from "bun:test"
 import { spawnSync } from "node:child_process"
-import { chmod, mkdir, mkdtemp, readdir, rm } from "node:fs/promises"
+import { chmod, mkdir, mkdtemp, readdir, realpath, rm, symlink } from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 
+import type { AgentNode, WorkflowSpec } from "../src/types.js"
+
 import { PUBLIC_COMMANDS, PUBLIC_COMMAND_HELP } from "../src/cli.js"
 import { assertReleaseVersion } from "../src/semver.js"
+import { workflowSourceYaml } from "./workflow-source-fixture.js"
 
 setDefaultTimeout(30_000)
 
@@ -15,7 +18,7 @@ let stateDir = ""
 let shimDir = ""
 let herdrLog = ""
 
-function workflow() {
+function workflow(): WorkflowSpec {
   return {
     name: "packaged-test",
     objective: "Exercise the packaged CLI.",
@@ -53,7 +56,7 @@ function workflow() {
   }
 }
 
-function agentWorkflow() {
+function agentWorkflow(): WorkflowSpec {
   const base = workflow()
   const command = base.nodes[0]!
   return {
@@ -100,6 +103,18 @@ function run(args: readonly string[], extraEnv: Readonly<Record<string, string>>
   })
 }
 
+function completionContractPath(runId: string, nodeId: string, token: string): string {
+  return path.join(
+    path.dirname(stateDir),
+    `${path.basename(stateDir)}-submissions`,
+    runId,
+    nodeId,
+    token,
+    "control",
+    "completion-contract.json"
+  )
+}
+
 beforeEach(async () => {
   temporaryRoot = await mkdtemp(path.join(os.tmpdir(), "orchestrate-packaged-"))
   binary = path.resolve(import.meta.dir, "../dist/orchestrate")
@@ -124,7 +139,10 @@ case "$1 $2" in
     count=$((count + 1))
     printf '%s' "$count" > "$count_file"
     printf '{"id":"cli:tab:create","result":{"type":"tab_created","root_pane":{"terminal_id":"terminal-p%s","agent_status":"idle","workspace_id":"w1","tab_id":"t%s","pane_id":"p%s","focused":false,"revision":1},"tab":{"tab_id":"t%s","workspace_id":"w1","number":%s,"label":"check","focused":false,"pane_count":1,"agent_status":"idle"}}}\n' "$count" "$count" "$count" "$count" "$count" ;;
-  "pane get") printf '%s\n' '{"id":"cli:pane:get","result":{"type":"pane_info","pane":{"terminal_id":"terminal-p1","agent_status":"idle","workspace_id":"w1","tab_id":"t1","pane_id":"p1","focused":false,"revision":1}}}' ;;
+  "pane get")
+    pane_id="$3"
+    suffix="\${pane_id#p}"
+    printf '{"id":"cli:pane:get","result":{"type":"pane_info","pane":{"terminal_id":"terminal-%s","agent_status":"idle","workspace_id":"w1","tab_id":"t%s","pane_id":"%s","focused":false,"revision":1}}}\n' "$pane_id" "$suffix" "$pane_id" ;;
   "pane current") printf '%s\n' '{"id":"cli:pane:current","result":{"type":"pane_current","pane":{"terminal_id":"terminal-p1","agent_status":"idle","agent":null,"agent_session":null,"workspace_id":"w1","tab_id":"t1","pane_id":"p1","focused":false,"revision":1}}}' ;;
   "pane list")
     count_file=${JSON.stringify(`${herdrLog}.tabs`)}
@@ -134,13 +152,25 @@ case "$1 $2" in
     while [ "$index" -le "$count" ]; do
       [ "$index" -eq 1 ] || printf ','
       pane_id="p$index"
-      if [ "$pane_id" = "\${HERDR_DONE_PANE-}" ]; then status=done; else status=idle; fi
+      if [ "$pane_id" = "\${HERDR_DONE_PANE-}" ]; then
+        status=done
+      elif [ "$pane_id" = "\${HERDR_BLOCKED_PANE-}" ]; then
+        status=blocked
+      else
+        status=idle
+      fi
       printf '{"terminal_id":"terminal-%s","agent_status":"%s","workspace_id":"w1","tab_id":"t%s","pane_id":"%s","focused":false,"revision":1}' "$pane_id" "$status" "$index" "$pane_id"
       index=$((index + 1))
     done
     printf '%s\n' ']}}' ;;
   "agent get")
-    if [ "$3" = "\${HERDR_DONE_PANE-}" ]; then status=done; else status=idle; fi
+    if [ "$3" = "\${HERDR_DONE_PANE-}" ]; then
+      status=done
+    elif [ "$3" = "\${HERDR_BLOCKED_PANE-}" ]; then
+      status=blocked
+    else
+      status=idle
+    fi
     printf '{"id":"cli:agent:get","result":{"type":"agent_info","agent":{"terminal_id":"terminal-%s","agent_status":"%s","workspace_id":"w1","tab_id":"t1","pane_id":"%s","focused":false,"revision":1,"agent":"codex","agent_session":{"agent":"codex","kind":"id","source":"herdr:codex","value":"session-%s"}}}}\n' "$3" "$status" "$3" "$3" ;;
   "agent read") cat ${JSON.stringify(herdrLog)} 2>/dev/null || true ;;
   "plugin list") printf '%s\n' '{"result":{"plugins":[{"id":"orchestrate"}]}}' ;;
@@ -216,8 +246,8 @@ describe("packaged CLI", () => {
   })
 
   test("refuses build A state from build B even when the environment forges build A", async () => {
-    const file = path.join(temporaryRoot, "build-pinning-workflow.json")
-    await Bun.write(file, `${JSON.stringify(workflow(), null, 2)}\n`, { createPath: false })
+    const file = path.join(temporaryRoot, "build-pinning-workflow.yaml")
+    await Bun.write(file, workflowSourceYaml(workflow()), { createPath: false })
     const preview = run(["preview", file, "--json"])
     const digest = (JSON.parse(preview.stdout) as { digest: string }).digest
     const started = run(["run", file, "--approve", digest, "--json"])
@@ -238,8 +268,8 @@ describe("packaged CLI", () => {
   })
 
   test("validates, previews, dry-runs without state mutation, and starts fire-and-forget", async () => {
-    const file = path.join(temporaryRoot, "workflow.json")
-    await Bun.write(file, `${JSON.stringify(workflow(), null, 2)}\n`, { createPath: false })
+    const file = path.join(temporaryRoot, "workflow.yaml")
+    await Bun.write(file, workflowSourceYaml(workflow()), { createPath: false })
     const validated = run(["validate", file, "--json"])
     expect(validated.status).toBe(0)
     const validation = JSON.parse(validated.stdout)
@@ -249,7 +279,7 @@ describe("packaged CLI", () => {
     expect(previewed.status).toBe(0)
     const preview = JSON.parse(previewed.stdout)
     expect(preview.digest).toHaveLength(64)
-    expect(preview).toMatchObject({
+    expect(preview.preview).toMatchObject({
       limits: { maxStarts: null },
       callback: { type: "none" },
       milestones: false,
@@ -305,8 +335,8 @@ describe("packaged CLI", () => {
     })
     expect(run(["release", runId, "check", "--json"]).status).toBe(0)
     const revised = { ...workflow(), objective: "Exercise revision dispatch." }
-    const revisionFile = path.join(temporaryRoot, "revision.json")
-    await Bun.write(revisionFile, `${JSON.stringify(revised, null, 2)}\n`, { createPath: false })
+    const revisionFile = path.join(temporaryRoot, "revision.yaml")
+    await Bun.write(revisionFile, workflowSourceYaml(revised), { createPath: false })
     const proposed = run(["revise", runId, revisionFile, "--json"])
     expect(proposed.status).toBe(0)
     const revisionDigest = JSON.parse(proposed.stdout).digest as string
@@ -337,59 +367,100 @@ describe("packaged CLI", () => {
         },
         expected: {
           type: "command",
-          executable: "/usr/bin/env",
-          argumentCount: 2,
+          argv: ["/usr/bin/env", "SECRET=[redacted]", "publish"],
+          timeoutSeconds: 30
+        }
+      },
+      {
+        callback: {
+          type: "command" as const,
+          argv: ["/usr/bin/env", "SECRET=other-value", "rollback"],
+          timeoutSeconds: 30
+        },
+        expected: {
+          type: "command",
+          argv: ["/usr/bin/env", "SECRET=[redacted]", "rollback"],
           timeoutSeconds: 30
         }
       },
       {
         callback: {
           type: "webhook" as const,
-          url: "https://user:password@example.invalid/hook?token=secret#fragment",
+          url: "https://user:password@example.invalid/hook?action=publish&token=secret#fragment",
           headers: { Authorization: "Bearer secret", "X-Route": "release" },
           timeoutSeconds: 15
         },
         expected: {
           type: "webhook",
           endpoint: "https://example.invalid/hook",
+          query: [
+            { name: "action", value: "publish" },
+            { name: "token", value: "[redacted]" }
+          ],
+          headerNames: ["Authorization", "X-Route"],
+          timeoutSeconds: 15
+        }
+      },
+      {
+        callback: {
+          type: "webhook" as const,
+          url: "https://other:credential@example.invalid/hook?action=rollback&token=other-secret",
+          headers: { Authorization: "Bearer other-secret", "X-Route": "release" },
+          timeoutSeconds: 15
+        },
+        expected: {
+          type: "webhook",
+          endpoint: "https://example.invalid/hook",
+          query: [
+            { name: "action", value: "rollback" },
+            { name: "token", value: "[redacted]" }
+          ],
           headerNames: ["Authorization", "X-Route"],
           timeoutSeconds: 15
         }
       }
     ]
+    const previews: unknown[] = []
     for (const [index, candidate] of callbacks.entries()) {
-      const file = path.join(temporaryRoot, `callback-${index}.json`)
+      const file = path.join(temporaryRoot, `callback-${index}.yaml`)
       await Bun.write(
         file,
-        `${JSON.stringify({
+        workflowSourceYaml({
           ...workflow(),
           callback: candidate.callback,
           milestones: true,
           limits: { maxStarts: 7 },
           writeConflicts: "allow-with-approval"
-        })}\n`,
+        }),
         { createPath: false }
       )
       const jsonPreview = run(["preview", file, "--json"])
       expect(jsonPreview.status).toBe(0)
-      expect(JSON.parse(jsonPreview.stdout)).toMatchObject({
-        callback: candidate.expected,
-        milestones: true,
-        limits: { maxStarts: 7 },
-        writeConflicts: "allow-with-approval"
+      const parsed = JSON.parse(jsonPreview.stdout)
+      previews.push(parsed.preview.callback)
+      expect(parsed).toMatchObject({
+        preview: {
+          callback: candidate.expected,
+          milestones: true,
+          limits: { maxStarts: 7 },
+          writeConflicts: "allow-with-approval"
+        }
       })
       const plain = run(["preview", file])
-      expect(plain.stdout).toContain("Max starts: 7")
+      expect(plain.stdout).toContain('Limits: {"maxStarts":7}')
       expect(plain.stdout).toContain("Milestones: true")
       expect(plain.stdout).toContain("Write conflicts: allow-with-approval")
       expect(plain.stdout).not.toContain("password")
       expect(plain.stdout).not.toContain("secret")
+      expect(plain.stdout).not.toContain("other-value")
     }
+    expect(previews[0]).not.toEqual(previews[1])
+    expect(previews[2]).not.toEqual(previews[3])
   })
 
   test("dry-run performs the read-only herdr >=0.7 version preflight", async () => {
-    const file = path.join(temporaryRoot, "dry-run-version-workflow.json")
-    await Bun.write(file, `${JSON.stringify(workflow(), null, 2)}\n`, { createPath: false })
+    const file = path.join(temporaryRoot, "dry-run-version-workflow.yaml")
+    await Bun.write(file, workflowSourceYaml(workflow()), { createPath: false })
     const digest = JSON.parse(run(["preview", file, "--json"]).stdout).digest as string
     const oldBin = path.join(temporaryRoot, "old-herdr-bin")
     const oldLog = path.join(temporaryRoot, "old-herdr.log")
@@ -411,6 +482,105 @@ describe("packaged CLI", () => {
     expect(await readdir(stateDir).catch(() => [])).toEqual([])
   })
 
+  test("dry-run rejects provider entry, interpreter, and PATH precedence inside a write prefix", async () => {
+    const sourceRoot = path.join(temporaryRoot, "provider-authority-source")
+    const allowed = path.join(sourceRoot, "allowed")
+    const fakeClaude = path.join(allowed, "claude")
+    await mkdir(allowed, { recursive: true })
+
+    const base = agentWorkflow()
+    const agentBase = base.nodes[0] as Extract<AgentNode, { readonly provider: "codex" }>
+    const writer: Extract<AgentNode, { readonly provider: "codex" }> = {
+      ...agentBase,
+      id: "writer",
+      workspace: {
+        ...agentBase.workspace,
+        path: sourceRoot,
+        writes: ["allowed/**"]
+      },
+      permissions: {
+        ...agentBase.permissions,
+        execution: { sandbox: "workspace-write" as const }
+      }
+    }
+    const later: Extract<AgentNode, { readonly provider: "claude" }> = {
+      ...structuredClone(writer),
+      id: "later-claude",
+      needs: [writer.id],
+      retry: { maxAttempts: 3 },
+      provider: "claude" as const,
+      permissions: {
+        execution: { permissionMode: "dontAsk" as const },
+        escalation: "deny" as const,
+        extraArgs: [],
+        inheritEnv: [],
+        env: {}
+      }
+    }
+    const file = path.join(temporaryRoot, "provider-executable-authority.yaml")
+    await Bun.write(
+      file,
+      workflowSourceYaml({ ...base, cwd: sourceRoot, nodes: [writer, later] }),
+      { createPath: false }
+    )
+    const digest = JSON.parse(run(["preview", file, "--json"]).stdout).digest as string
+    const providerPath = path.join(shimDir, "claude")
+    const interpreter = path.join(allowed, "interpreter")
+    const precedence = path.join(allowed, "precedence")
+    const cases = [
+      {
+        label: "provider claude executable",
+        pathValue: `${shimDir}:/usr/bin:/bin:/usr/sbin:/sbin`,
+        prepare: async () => {
+          await Bun.write(fakeClaude, "#!/bin/sh\nexit 0\n", { createPath: false })
+          await chmod(fakeClaude, 0o755)
+          await symlink(fakeClaude, providerPath)
+        }
+      },
+      {
+        label: "provider interpreter",
+        pathValue: `${shimDir}:/usr/bin:/bin:/usr/sbin:/sbin`,
+        prepare: async () => {
+          await Bun.write(interpreter, "#!/bin/sh\nexit 0\n", { createPath: false })
+          await chmod(interpreter, 0o755)
+          await Bun.write(providerPath, `#!${interpreter}\nexit 0\n`, { createPath: false })
+          await chmod(providerPath, 0o755)
+        }
+      },
+      {
+        label: "PATH precedence",
+        pathValue: `${precedence}:${shimDir}:/usr/bin:/bin:/usr/sbin:/sbin`,
+        prepare: async () => {
+          await mkdir(precedence)
+          await Bun.write(providerPath, "#!/bin/sh\nexit 0\n", { createPath: false })
+          await chmod(providerPath, 0o755)
+        }
+      }
+    ]
+    for (const candidate of cases) {
+      await rm(providerPath, { force: true })
+      await candidate.prepare()
+      const rejected = run(["run", file, "--approve", digest, "--dry-run", "--json"], {
+        HOME: temporaryRoot,
+        ORCHESTRATE_BIN: binary,
+        CODEX_HOME: `${temporaryRoot}-codex-control`,
+        CLAUDE_CONFIG_DIR: `${temporaryRoot}-claude-control`,
+        PATH: candidate.pathValue
+      })
+
+      expect(rejected.status).toBe(1)
+      const check = JSON.parse(rejected.stdout).checks.find(
+        (entry: { name: string }) => entry.name === "provider-executable-authority"
+      )
+      expect(check).toMatchObject({ ok: false })
+      expect(check.detail).toContain("writer")
+      expect(check.detail).toContain(candidate.label)
+      expect(check.detail).toContain('declared write "allowed/**"')
+      expect(await readdir(stateDir).catch(() => [])).toEqual([])
+      expect(await Bun.file(`${herdrLog}.tabs`).exists()).toBe(false)
+    }
+  })
+
   test("rejects unknown commands and flags", () => {
     for (const command of ["unknown-one", "unknown-two"]) {
       const result = run([command])
@@ -424,8 +594,8 @@ describe("packaged CLI", () => {
 
   test("emits exactly one stable JSON error for dispatch plus every public command", () => {
     const commandCases: Record<(typeof PUBLIC_COMMANDS)[number], readonly string[]> = {
-      validate: ["validate", path.join(temporaryRoot, "missing.json"), "--json"],
-      preview: ["preview", path.join(temporaryRoot, "missing.json"), "--json"],
+      validate: ["validate", path.join(temporaryRoot, "missing.yaml"), "--json"],
+      preview: ["preview", path.join(temporaryRoot, "missing.yaml"), "--json"],
       run: ["run", path.join(temporaryRoot, "missing.json"), "--json"],
       status: ["status", "invalid!", "--json"],
       events: ["events", "invalid!", "--json"],
@@ -458,9 +628,18 @@ describe("packaged CLI", () => {
       expect(lines).toHaveLength(1)
       const payload = JSON.parse(lines[0] as string) as {
         readonly ok: boolean
-        readonly error: { readonly code: string; readonly message: string }
+        readonly error?: { readonly code: string; readonly message: string }
+        readonly diagnostics?: readonly unknown[]
       }
       expect(payload.ok).toBe(false)
+      if (args[0] === "validate" || args[0] === "preview") {
+        expect(payload.diagnostics?.length).toBeGreaterThan(0)
+        expect(payload.error).toBeUndefined()
+        continue
+      }
+      if (payload.error === undefined) {
+        throw new Error(`Expected ${args[0]} to return the generic error envelope.`)
+      }
       expect([
         "usage",
         "validation",
@@ -550,21 +729,32 @@ describe("packaged CLI", () => {
   })
 
   test("clean dry-run leaves the run directory byte-identical", async () => {
-    const file = path.join(temporaryRoot, "workflow.json")
-    await Bun.write(file, `${JSON.stringify(workflow(), null, 2)}\n`, { createPath: false })
+    const file = path.join(temporaryRoot, "workflow.yaml")
+    await Bun.write(file, workflowSourceYaml(workflow()), { createPath: false })
     const preview = JSON.parse(run(["preview", file, "--json"]).stdout)
     const started = JSON.parse(run(["run", file, "--approve", preview.digest, "--json"]).stdout)
     const runPath = path.join(stateDir, "runs", started.runId)
+    const providerSessionPath = path.join(`${stateDir}-provider-sessions`, started.runId)
+    const providerSessionMarker = path.join(providerSessionPath, "claude", "lineage", "data.txt")
+    await mkdir(path.dirname(providerSessionMarker), { recursive: true })
+    const canonicalProviderSessionPath = await realpath(providerSessionPath)
+    await Bun.write(providerSessionMarker, "run-owned provider session", { createPath: false })
     const before = await Bun.file(path.join(runPath, "state.json")).text()
     const dry = run(["clean", started.runId, "--dry-run", "--json"])
     expect(dry.status).toBe(0)
+    expect(JSON.parse(dry.stdout).runs[0].providerSessionDirectory).toBe(
+      canonicalProviderSessionPath
+    )
     expect(await Bun.file(path.join(runPath, "state.json")).text()).toBe(before)
+    expect(await Bun.file(providerSessionMarker).text()).toBe("run-owned provider session")
     const rejected = run(["clean", started.runId, "--json"])
     expect(rejected.status).toBe(1)
     expect(JSON.parse(rejected.stdout).error.message).toContain("stop it before cleaning")
+    expect(await Bun.file(providerSessionMarker).text()).toBe("run-owned provider session")
     expect(run(["stop", started.runId, "--yes", "--json"]).status).toBe(0)
     expect(run(["clean", started.runId, "--json"]).status).toBe(0)
     expect(await readdir(runPath).catch(() => [])).toEqual([])
+    expect(await readdir(providerSessionPath).catch(() => [])).toEqual([])
   })
 
   test("setup no-wizard leaves preferences untouched and defaults writes a valid layer", async () => {
@@ -642,16 +832,16 @@ describe("packaged CLI", () => {
     expect(run(["setup", "--defaults", "--json"], { HOME: home }).status).toBe(0)
     const preferencesPath = path.join(stateDir, "preferences.json")
     const before = await Bun.file(preferencesPath).text()
-    const file = path.join(temporaryRoot, "preferences-workflow.json")
-    await Bun.write(file, `${JSON.stringify(workflow(), null, 2)}\n`, { createPath: false })
+    const file = path.join(temporaryRoot, "preferences-workflow.yaml")
+    await Bun.write(file, workflowSourceYaml(workflow()), { createPath: false })
     const preview = JSON.parse(run(["preview", file, "--json"], { HOME: home }).stdout)
     expect(run(["run", file, "--approve", preview.digest, "--json"], { HOME: home }).status).toBe(0)
     expect(await Bun.file(preferencesPath).text()).toBe(before)
   })
 
   test("board --json remains noninteractive under a TTY with multiple runs", async () => {
-    const file = path.join(temporaryRoot, "tty-workflow.json")
-    await Bun.write(file, `${JSON.stringify(workflow(), null, 2)}\n`, { createPath: false })
+    const file = path.join(temporaryRoot, "tty-workflow.yaml")
+    await Bun.write(file, workflowSourceYaml(workflow()), { createPath: false })
     const digest = JSON.parse(run(["preview", file, "--json"]).stdout).digest as string
     expect(run(["run", file, "--approve", digest, "--json"]).status).toBe(0)
     expect(run(["run", file, "--approve", digest, "--json"]).status).toBe(0)
@@ -675,15 +865,40 @@ describe("packaged CLI", () => {
   })
 
   test("discovers an older live result-missing run across runs, board JSON, and the panel", async () => {
-    const file = path.join(temporaryRoot, "attention-workflow.json")
-    await Bun.write(file, `${JSON.stringify(agentWorkflow(), null, 2)}\n`, { createPath: false })
-    const digest = JSON.parse(run(["preview", file, "--json"]).stdout).digest as string
-    const older = JSON.parse(run(["run", file, "--approve", digest, "--json"]).stdout)
+    const homeEnv = { HOME: temporaryRoot, ORCHESTRATE_BIN: binary }
+    const file = path.join(temporaryRoot, "attention-workflow.yaml")
+    await Bun.write(file, workflowSourceYaml(agentWorkflow()), { createPath: false })
+    const digest = JSON.parse(run(["preview", file, "--json"], homeEnv).stdout).digest as string
+    const older = JSON.parse(run(["run", file, "--approve", digest, "--json"], homeEnv).stdout)
       .runId as string
-    const newer = JSON.parse(run(["run", file, "--approve", digest, "--json"]).stdout)
-      .runId as string
+    const newerFile = path.join(temporaryRoot, "newer-command-workflow.yaml")
+    await Bun.write(newerFile, workflowSourceYaml(workflow()), { createPath: false })
+    const newerDigest = JSON.parse(run(["preview", newerFile, "--json"], homeEnv).stdout)
+      .digest as string
+    const newer = JSON.parse(
+      run(["run", newerFile, "--approve", newerDigest, "--json"], homeEnv).stdout
+    ).runId as string
     expect(newer).not.toBe(older)
-    const env = { HERDR_DONE_PANE: "p1" }
+    const env = { ...homeEnv, HERDR_DONE_PANE: "p1" }
+    const persisted = JSON.parse(
+      await Bun.file(path.join(stateDir, "runs", older, "state.json")).text()
+    ) as {
+      nodes: { check: { attempts: Array<{ token: string; resultPath: string }> } }
+    }
+    const activeAttempt = persisted.nodes.check.attempts.at(-1)
+    if (activeAttempt === undefined) {
+      throw new Error("Expected the agent run to have an active attempt.")
+    }
+    const statusText = run(["status", older])
+    expect(statusText.stdout).toContain("restore the owning pane or resume its provider session")
+    expect(statusText.stdout).not.toContain(activeAttempt.token)
+    expect(statusText.stdout).not.toContain("node-done")
+    const boardText = run(["board", older], env)
+    expect(boardText.status).toBe(2)
+    expect(boardText.stdout).toContain("restore or resume the owning provider session")
+    expect(boardText.stdout).not.toContain(activeAttempt.token)
+    expect(boardText.stdout).not.toContain("orchestrate node-done")
+    expect(boardText.stdout).not.toContain("--token")
     const attention = run(["runs", "--needs-attention", "--json"], env)
     expect(attention.status).toBe(2)
     expect(JSON.parse(attention.stdout).runs.map((item: { runId: string }) => item.runId)).toEqual([
@@ -693,9 +908,7 @@ describe("packaged CLI", () => {
     expect(board.status).toBe(2)
     const model = JSON.parse(board.stdout)
     expect(model.run.id).toBe(older)
-    expect(model.needsYou).toEqual([
-      expect.objectContaining({ condition: "done", title: "check: result missing" })
-    ])
+    expect(JSON.stringify(model)).not.toContain(activeAttempt.token)
 
     const panelLog = path.join(temporaryRoot, "panel-cli.log")
     await Bun.write(
@@ -714,12 +927,143 @@ describe("packaged CLI", () => {
           PATH: `${shimDir}:${process.env.PATH ?? ""}`,
           ORCHESTRATE_STATE_DIR: stateDir,
           ORCHESTRATE_DISABLE_UI: "1",
+          ORCHESTRATE_BIN: binary,
+          HOME: temporaryRoot,
           HERDR_DONE_PANE: "p1"
         }
       }
     )
     expect(panel.status).toBe(2)
     expect(await Bun.file(panelLog).text()).toBe(`runs --needs-attention\nboard ${older}\n`)
-    expect(panel.stdout).toContain("result missing")
+  })
+
+  test("treats blocked with valid submitted completion as pending reconcile instead of live attention", async () => {
+    const homeEnv = { HOME: temporaryRoot, ORCHESTRATE_BIN: binary }
+    const file = path.join(temporaryRoot, "submitted-workflow.yaml")
+    await Bun.write(file, workflowSourceYaml(agentWorkflow()), { createPath: false })
+    const digest = JSON.parse(run(["preview", file, "--json"], homeEnv).stdout).digest as string
+    const runId = JSON.parse(run(["run", file, "--approve", digest, "--json"], homeEnv).stdout)
+      .runId as string
+    const persisted = JSON.parse(
+      await Bun.file(path.join(stateDir, "runs", runId, "state.json")).text()
+    ) as {
+      nodes: { check: { attempts: Array<{ token: string; resultPath: string }> } }
+    }
+    const activeAttempt = persisted.nodes.check.attempts.at(-1)
+    if (activeAttempt === undefined) {
+      throw new Error("Expected the agent run to have an active attempt.")
+    }
+    await Bun.write(activeAttempt.resultPath, "complete\n", { createPath: false })
+    const submitted = run(
+      ["node-done", runId, "check", "--token", activeAttempt.token, "--outcome", "completed"],
+      {
+        ...homeEnv,
+        ORCHESTRATE_COMPLETION_CONTRACT: completionContractPath(runId, "check", activeAttempt.token)
+      }
+    )
+    expect(submitted.status).toBe(0)
+
+    const env = { ...homeEnv, HERDR_BLOCKED_PANE: "p1" }
+    const human = run(["board", runId], env)
+    expect(human.status).toBe(0)
+    expect(human.stdout).not.toContain("NEEDS YOU")
+    expect(human.stdout).not.toContain("agent blocked")
+
+    const board = run(["board", runId, "--json"], env)
+    expect(board.status).toBe(0)
+    const model = JSON.parse(board.stdout)
+    expect(model.run.status).toBe("running")
+    expect(model.nodes[0].stalledPane).toMatchObject({
+      condition: "submitted",
+      detail: "Authenticated completion submitted; pending reconcile.",
+      guidanceCommand: `orchestrate reconcile ${runId}`
+    })
+    expect(model.needsYou).toEqual([])
+    expect(JSON.stringify(model)).not.toContain(activeAttempt.token)
+
+    const attention = run(["runs", "--needs-attention", "--json"], env)
+    expect(attention.status).toBe(0)
+    expect(JSON.parse(attention.stdout).runs).toEqual([])
+  })
+
+  test("reports a missing result stably and preflights structured output before submission", async () => {
+    const homeEnv = { HOME: temporaryRoot, ORCHESTRATE_BIN: binary }
+    const structured = agentWorkflow()
+    const structuredNode = structured.nodes[0]
+    if (structuredNode?.type !== "agent") {
+      throw new Error("Expected the completion contract fixture to contain an agent.")
+    }
+    const checked: WorkflowSpec = {
+      ...structured,
+      nodes: [
+        {
+          ...structuredNode,
+          output: {
+            format: "json",
+            schema: {
+              type: "object",
+              properties: {
+                verdict: { type: "boolean" },
+                rationale: { type: "string" }
+              },
+              required: ["verdict", "rationale"],
+              additionalProperties: false
+            }
+          }
+        }
+      ]
+    }
+    const file = path.join(temporaryRoot, "structured-completion.yaml")
+    await Bun.write(file, workflowSourceYaml(checked), { createPath: false })
+    const digest = JSON.parse(run(["preview", file, "--json"], homeEnv).stdout).digest as string
+    const runId = JSON.parse(run(["run", file, "--approve", digest, "--json"], homeEnv).stdout)
+      .runId as string
+    const persisted = JSON.parse(
+      await Bun.file(path.join(stateDir, "runs", runId, "state.json")).text()
+    ) as {
+      nodes: { check: { attempts: Array<{ token: string; resultPath: string }> } }
+    }
+    const attempt = persisted.nodes.check.attempts.at(-1)
+    if (attempt === undefined) {
+      throw new Error("Expected the structured agent to have an active attempt.")
+    }
+    const args = ["node-done", runId, "check", "--token", attempt.token, "--outcome", "completed"]
+    const completionEnv = {
+      ...homeEnv,
+      ORCHESTRATE_COMPLETION_CONTRACT: completionContractPath(runId, "check", attempt.token)
+    }
+    const completion = path.join(path.dirname(attempt.resultPath), "completion.json")
+    const missingMessage = `Declared result for node "check" was not found at ${attempt.resultPath}. Write the declared nonempty result to that exact path before rerunning node-done.`
+
+    const missingPlain = run(args, completionEnv)
+    expect(missingPlain.status).toBe(1)
+    expect(missingPlain.stdout).toBe("")
+    expect(missingPlain.stderr).toBe(`${missingMessage}\n`)
+    const missingJson = run([...args, "--json"], completionEnv)
+    expect(missingJson.status).toBe(1)
+    expect(missingJson.stderr).toBe("")
+    expect(JSON.parse(missingJson.stdout)).toEqual({
+      ok: false,
+      error: { code: "not_found", message: missingMessage }
+    })
+    expect(await Bun.file(completion).exists()).toBe(false)
+
+    await Bun.write(attempt.resultPath, '{"verdict":true}\n', { createPath: false })
+    const invalid = run([...args, "--json"], completionEnv)
+    expect(invalid.status).toBe(1)
+    expect(JSON.parse(invalid.stdout).error.message).toContain(
+      'Result for node "check" does not satisfy its output schema'
+    )
+    expect(await Bun.file(completion).exists()).toBe(false)
+
+    await Bun.write(attempt.resultPath, '{"verdict":true,"rationale":"verified"}\n', {
+      createPath: false
+    })
+    const corrected = run([...args, "--json"], completionEnv)
+    expect(corrected.status).toBe(0)
+    expect(JSON.parse(corrected.stdout)).toMatchObject({ submitted: true, nodeId: "check" })
+    const reconciled = run(["reconcile", runId, "--json"], homeEnv)
+    expect(reconciled.status).toBe(0)
+    expect(JSON.parse(reconciled.stdout).status).toBe("completed")
   })
 })

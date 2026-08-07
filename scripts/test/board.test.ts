@@ -43,6 +43,32 @@ function model(objective: string): BoardViewModel {
   }
 }
 
+function boardNode(id: string): BoardViewModel["nodes"][number] {
+  return {
+    id,
+    templateId: id,
+    title: id,
+    type: "command",
+    provider: null,
+    needs: [],
+    depth: 0,
+    status: "pending",
+    glyph: "○",
+    downstreamHeld: false,
+    continuation: "auto",
+    continuationGlyph: "▸",
+    repeatId: null,
+    round: null,
+    currentRound: true,
+    attempts: [],
+    elapsedMs: null,
+    pane: null,
+    resultPath: null,
+    skip: null,
+    stalledPane: null
+  }
+}
+
 describe("OpenTUI board viewport", () => {
   test("renders both the explanation and command for actionable attention", () => {
     const attention: BoardViewModel = {
@@ -221,6 +247,63 @@ describe("OpenTUI board viewport", () => {
 
     const clickY = text.screenY + secondNodeVisualRow - text.scrollY
     await setup.mockMouse.click(text.screenX + 1, clickY)
+    expect(clickedNodeId).toBe("second-node")
+  })
+
+  test("keeps node rows aligned after multiline gate attention", async () => {
+    const first = boardNode("first-node")
+    const second = boardNode("second-node")
+    const attention: BoardViewModel = {
+      ...model("gate row alignment"),
+      needsYou: [
+        {
+          kind: "gate",
+          nodeId: "first-node",
+          digest: "gate-digest",
+          content: "review content",
+          title: "Approve first-node",
+          detail: 'Content "review content"\nDigest gate-digest',
+          command: "orchestrate approve resize-run --gate first-node --digest gate-digest"
+        }
+      ],
+      nodes: [first, second],
+      rows: [
+        { kind: "node", key: first.id, depth: 0, node: first },
+        { kind: "node", key: second.id, depth: 0, node: second }
+      ],
+      selectableNodeIds: [first.id, second.id]
+    }
+    const frame = renderBoardFrame(attention, first.id)
+    const logicalLines = frame.text.split("\n")
+    const firstRow = logicalLines.findIndex((line) => line.includes("first-node  pending"))
+    const secondRow = logicalLines.findIndex((line) => line.includes("second-node  pending"))
+    expect(logicalLines).toContain('    Content "review content"')
+    expect(logicalLines).toContain("    Digest gate-digest")
+    expect(frame.rowNodeIds).toEqual({
+      [firstRow]: "first-node",
+      [secondRow]: "second-node"
+    })
+
+    const setup = await createTestRenderer({ width: 80, height: 6 })
+    renderers.push(setup.renderer)
+    let clickedNodeId = ""
+    const renderables = createBoardRenderables(setup.renderer, (mouse) => {
+      const logicalRow = boardLogicalRowAtScreenY(renderables.text, mouse.y)
+      clickedNodeId = logicalRow === null ? "" : (frame.rowNodeIds[logicalRow] ?? "")
+    })
+    renderables.text.content = frame.text
+    setup.renderer.root.add(renderables.root)
+    await setup.renderOnce()
+
+    scrollBoardRowIntoView(renderables.text, secondRow)
+    await setup.renderOnce()
+    const visualRow = renderables.text.lineInfo.lineSources.lastIndexOf(secondRow)
+    expect(visualRow).toBeGreaterThanOrEqual(renderables.text.scrollY)
+    expect(visualRow).toBeLessThan(renderables.text.scrollY + renderables.text.height)
+    await setup.mockMouse.click(
+      renderables.text.screenX + 1,
+      renderables.text.screenY + visualRow - renderables.text.scrollY
+    )
     expect(clickedNodeId).toBe("second-node")
   })
 })

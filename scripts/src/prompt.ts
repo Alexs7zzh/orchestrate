@@ -1,10 +1,12 @@
-import { createHash, randomBytes } from "node:crypto"
+import { randomBytes } from "node:crypto"
 import path from "node:path"
 
 import type { AgentNode, InputSpec, RunState, WorkflowNode, WorkflowSpec } from "./types.js"
 
+import { digestGate } from "./digest.js"
 import { orchestrateExecutable } from "./herdr-surface.js"
-import { attemptDirectory, submissionResultPath } from "./state.js"
+import { sourceRuntimeId } from "./prompt-inputs.js"
+import { attemptDirectory, submissionInboxArtifactPath, submissionResultPath } from "./state.js"
 
 export interface PreparedNode {
   readonly token: string
@@ -13,37 +15,31 @@ export interface PreparedNode {
   readonly gate: { readonly content: string; readonly digest: string } | null
 }
 
-function repeatForTemplate(workflow: WorkflowSpec, templateId: string): string | null {
-  return workflow.repeats.find((repeat) => repeat.members.includes(templateId))?.id ?? null
-}
+export { sourceRuntimeId } from "./prompt-inputs.js"
 
-function sourceRuntimeId(
+export function projectedPathMapForAttempt(
   workflow: WorkflowSpec,
   state: RunState,
   runtimeNodeId: string,
-  input: InputSpec
-): string | null {
-  const consumer = state.nodes[runtimeNodeId]
-  if (input.round === "previous") {
-    if (consumer?.round === null || consumer?.round === undefined || consumer.round <= 1) {
-      return null
-    }
-    return `${input.from}--r${consumer.round - 1}`
-  }
-  const sourceRepeat = repeatForTemplate(workflow, input.from)
-  if (
-    consumer?.repeatId !== null &&
-    consumer?.repeatId !== undefined &&
-    consumer.repeatId === sourceRepeat &&
-    consumer.round !== null
-  ) {
-    return `${input.from}--r${consumer.round}`
-  }
-  if (sourceRepeat !== null) {
-    const repeat = state.repeats[sourceRepeat]
-    return repeat === undefined ? null : `${input.from}--r${repeat.round}`
-  }
-  return input.from
+  inputs: readonly InputSpec[],
+  token: string
+): Readonly<Record<number, string>> {
+  return Object.fromEntries(
+    inputs.flatMap((input, inputIndex) => {
+      if (input.include !== "path") {
+        return []
+      }
+      const sourceNodeId = sourceRuntimeId(workflow, state, runtimeNodeId, input)
+      return sourceNodeId === null
+        ? []
+        : [
+            [
+              inputIndex,
+              submissionInboxArtifactPath(state.id, runtimeNodeId, token, inputIndex, sourceNodeId)
+            ] as const
+          ]
+    })
+  )
 }
 
 function resultContent(value: unknown): string {
@@ -65,10 +61,11 @@ export function renderInputs(
   workflow: WorkflowSpec,
   state: RunState,
   runtimeNodeId: string,
-  inputs: readonly InputSpec[]
+  inputs: readonly InputSpec[],
+  projectedPaths: Readonly<Record<number, string>> = {}
 ): string {
   const sections: string[] = []
-  for (const input of inputs) {
+  for (const [inputIndex, input] of inputs.entries()) {
     const sourceId = sourceRuntimeId(workflow, state, runtimeNodeId, input)
     if (sourceId === null) {
       continue
@@ -86,7 +83,18 @@ export function renderInputs(
     if (source === undefined || source.resultPath === null) {
       throw new Error(`Input "${input.from}" for node "${runtimeNodeId}" has no completed result.`)
     }
-    const value = input.include === "path" ? source.resultPath : resultContent(source.result)
+    const value =
+      input.include === "path"
+        ? (() => {
+            const projectedPath = projectedPaths[inputIndex]
+            if (projectedPath === undefined || !path.isAbsolute(projectedPath)) {
+              throw new Error(
+                `Input "${input.from}" for node "${runtimeNodeId}" has no projected inbox artifact.`
+              )
+            }
+            return projectedPath
+          })()
+        : resultContent(source.result)
     sections.push(`## ${input.as}\n\n${value}`)
   }
   return sections.join("\n\n")
@@ -96,9 +104,10 @@ export function renderNodeContent(
   workflow: WorkflowSpec,
   state: RunState,
   runtimeNodeId: string,
-  node: WorkflowNode
+  node: WorkflowNode,
+  projectedPaths: Readonly<Record<number, string>> = {}
 ): string {
-  const inputs = renderInputs(workflow, state, runtimeNodeId, node.inputs)
+  const inputs = renderInputs(workflow, state, runtimeNodeId, node.inputs, projectedPaths)
   if (node.type === "agent") {
     return [renderAgentDirective(state, runtimeNodeId, node), inputs]
       .filter((part) => part.length > 0)
@@ -153,6 +162,7 @@ export function promptContract(
       : "Write your final plain-text result."
   return [
     "## Orchestrate completion contract",
+    "You are the sole completion owner for this workflow node. Delegated workers and subagents must never write this result, create completion.json, or invoke node-done; they return evidence only to you.",
     `${resultRule} Save it at exactly: ${resultPath}`,
     "When the result is complete, run exactly:",
     nodeDoneCommand(runId, runtimeNodeId, token, "completed"),
@@ -161,7 +171,7 @@ export function promptContract(
     "If the attempt cannot complete, write a useful failure result and run:",
     nodeDoneCommand(runId, runtimeNodeId, token, "failed"),
     `A human can continue them later with: ${shellQuote(orchestrateExecutable())} release ${shellQuote(runId)} ${shellQuote(runtimeNodeId)}`,
-    "Do not leave the pane without reporting one of these outcomes."
+    "A chat answer, READY marker, idle pane, or delegated-worker action is not completion. Write the result and successfully invoke node-done yourself before your final response; do not leave the pane without reporting one of these outcomes."
   ].join("\n\n")
 }
 
@@ -170,9 +180,13 @@ export function renderAgentPrompt(
   state: RunState,
   runtimeNodeId: string,
   node: AgentNode,
-  prepared: PreparedNode
+  prepared: PreparedNode,
+  projectedPaths?: Readonly<Record<number, string>>
 ): string {
-  return `${renderNodeContent(workflow, state, runtimeNodeId, node)}\n\n${promptContract(
+  const effectiveProjectedPaths =
+    projectedPaths ??
+    projectedPathMapForAttempt(workflow, state, runtimeNodeId, node.inputs, prepared.token)
+  return `${renderNodeContent(workflow, state, runtimeNodeId, node, effectiveProjectedPaths)}\n\n${promptContract(
     state.id,
     runtimeNodeId,
     prepared.token,
@@ -197,8 +211,15 @@ export function prepareNode(
   }
   const attempt = runtimeNode.attempts.length + 1
   const attemptDir = attemptDirectory(runDir, runtimeNodeId, attempt)
-  const content = renderNodeContent(workflow, state, runtimeNodeId, node)
   const token = randomBytes(32).toString("hex")
+  const projectedPaths = projectedPathMapForAttempt(
+    workflow,
+    state,
+    runtimeNodeId,
+    node.inputs,
+    token
+  )
+  const content = renderNodeContent(workflow, state, runtimeNodeId, node, projectedPaths)
   return {
     token,
     resultPath:
@@ -206,9 +227,6 @@ export function prepareNode(
         ? submissionResultPath(state.id, runtimeNodeId, token)
         : path.join(attemptDir, "result.txt"),
     outputPath: path.join(attemptDir, "output.log"),
-    gate:
-      node.gate === "approval"
-        ? { content, digest: createHash("sha256").update(content).digest("hex") }
-        : null
+    gate: node.gate === "approval" ? { content, digest: digestGate(content) } : null
   }
 }

@@ -192,7 +192,9 @@ export function renderBoardFrame(
     lines.push("NEEDS YOU")
     for (const item of model.needsYou) {
       lines.push(`  ! ${item.title}`)
-      lines.push(`    ${item.detail}`)
+      for (const detailLine of item.detail.split(/\r?\n/)) {
+        lines.push(`    ${detailLine}`)
+      }
       if (item.command !== null) {
         lines.push(`    ${item.command}`)
       }
@@ -231,9 +233,11 @@ export function renderBoardFrame(
         ? ""
         : node.stalledPane.condition === "blocked"
           ? "  ! agent blocked"
-          : node.stalledPane.condition === "done"
-            ? "  ! result missing"
-            : "  ! pane gone"
+          : node.stalledPane.condition === "submitted"
+            ? "  submitted; pending reconcile"
+            : node.stalledPane.condition === "done"
+              ? "  ! result missing"
+              : "  ! pane gone"
     const dependencyRelease = node.downstreamHeld
       ? ` ${node.continuationGlyph} downstream held`
       : ` ${node.continuationGlyph}`

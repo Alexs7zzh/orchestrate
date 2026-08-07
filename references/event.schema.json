@@ -1623,11 +1623,15 @@
             },
             "summary": {
               "$ref": "#/$defs/Arrays_1"
+            },
+            "provenance": {
+              "$ref": "#/$defs/Objects_2"
             }
           },
           "required": [
             "digest",
-            "summary"
+            "summary",
+            "provenance"
           ],
           "additionalProperties": false
         }
@@ -1804,15 +1808,27 @@
                               "minLength": 1
                             },
                             {
-                              "pattern": "^https?:\\/\\/[^\\s/$.?#].[^\\s]*$"
+                              "pattern": "^[Hh][Tt][Tt][Pp][Ss]?:\\/\\/(?:[^\\s/?#@]+@)?(?:\\[[0-9A-Fa-f:.]+\\]|[^\\s/?#:]+)(?::[0-9]+)?(?:[/?#][^\\s]*)?$"
                             }
                           ]
                         },
                         "headers": {
                           "type": "object",
                           "additionalProperties": {
-                            "type": "string"
-                          }
+                            "type": "string",
+                            "allOf": [
+                              {
+                                "pattern": "^[\\t\\x20-\\x7e\\x80-\\xff]*$"
+                              }
+                            ]
+                          },
+                          "allOf": [
+                            {
+                              "propertyNames": {
+                                "pattern": "^[!#$%&'*+\\-.^_`|~0-9A-Za-z]+$"
+                              }
+                            }
+                          ]
                         },
                         "timeoutSeconds": {
                           "type": "number",
@@ -2067,13 +2083,13 @@
                             ]
                           },
                           "workspace": {
-                            "$ref": "#/$defs/Union_"
+                            "$ref": "#/$defs/Union_1"
                           },
                           "inputs": {
                             "$ref": "#/$defs/Arrays_4"
                           },
                           "retry": {
-                            "$ref": "#/$defs/Objects_2"
+                            "$ref": "#/$defs/Objects_3"
                           },
                           "gate": {
                             "type": "string",
@@ -2083,7 +2099,7 @@
                             ]
                           },
                           "when": {
-                            "$ref": "#/$defs/Objects_3"
+                            "$ref": "#/$defs/Objects_4"
                           },
                           "type": {
                             "type": "string",
@@ -2113,10 +2129,10 @@
                             "type": "string"
                           },
                           "session": {
-                            "$ref": "#/$defs/Objects_4"
+                            "$ref": "#/$defs/Objects_5"
                           },
                           "output": {
-                            "$ref": "#/$defs/Objects_5"
+                            "$ref": "#/$defs/Objects_6"
                           },
                           "provider": {
                             "type": "string",
@@ -2158,7 +2174,7 @@
                                 "$ref": "#/$defs/Arrays_5"
                               },
                               "env": {
-                                "$ref": "#/$defs/Objects_6"
+                                "$ref": "#/$defs/Objects_7"
                               }
                             },
                             "required": [
@@ -2257,13 +2273,13 @@
                             ]
                           },
                           "workspace": {
-                            "$ref": "#/$defs/Union_"
+                            "$ref": "#/$defs/Union_1"
                           },
                           "inputs": {
                             "$ref": "#/$defs/Arrays_4"
                           },
                           "retry": {
-                            "$ref": "#/$defs/Objects_2"
+                            "$ref": "#/$defs/Objects_3"
                           },
                           "gate": {
                             "type": "string",
@@ -2273,7 +2289,7 @@
                             ]
                           },
                           "when": {
-                            "$ref": "#/$defs/Objects_3"
+                            "$ref": "#/$defs/Objects_4"
                           },
                           "type": {
                             "type": "string",
@@ -2303,10 +2319,10 @@
                             "type": "string"
                           },
                           "session": {
-                            "$ref": "#/$defs/Objects_4"
+                            "$ref": "#/$defs/Objects_5"
                           },
                           "output": {
-                            "$ref": "#/$defs/Objects_5"
+                            "$ref": "#/$defs/Objects_6"
                           },
                           "provider": {
                             "type": "string",
@@ -2352,7 +2368,7 @@
                                 "$ref": "#/$defs/Arrays_5"
                               },
                               "env": {
-                                "$ref": "#/$defs/Objects_6"
+                                "$ref": "#/$defs/Objects_7"
                               }
                             },
                             "required": [
@@ -2451,13 +2467,13 @@
                             ]
                           },
                           "workspace": {
-                            "$ref": "#/$defs/Union_"
+                            "$ref": "#/$defs/Union_1"
                           },
                           "inputs": {
                             "$ref": "#/$defs/Arrays_4"
                           },
                           "retry": {
-                            "$ref": "#/$defs/Objects_2"
+                            "$ref": "#/$defs/Objects_3"
                           },
                           "gate": {
                             "type": "string",
@@ -2467,7 +2483,7 @@
                             ]
                           },
                           "when": {
-                            "$ref": "#/$defs/Objects_3"
+                            "$ref": "#/$defs/Objects_4"
                           },
                           "type": {
                             "type": "string",
@@ -2496,12 +2512,7 @@
                             }
                           },
                           "env": {
-                            "type": "object",
-                            "patternProperties": {
-                              "^[A-Za-z_][A-Za-z0-9_]*$": {
-                                "type": "string"
-                              }
-                            }
+                            "$ref": "#/$defs/Objects_7"
                           },
                           "allowedExitCodes": {
                             "type": "array",
@@ -2677,11 +2688,15 @@
                 "repeats"
               ],
               "additionalProperties": false
+            },
+            "provenance": {
+              "$ref": "#/$defs/Objects_2"
             }
           },
           "required": [
             "digest",
-            "workflow"
+            "workflow",
+            "provenance"
           ],
           "additionalProperties": false
         }
@@ -3328,6 +3343,330 @@
         "type": "string"
       }
     },
+    "Union_": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "file": {
+              "type": "string",
+              "allOf": [
+                {
+                  "minLength": 1
+                },
+                {
+                  "pattern": "^\\/"
+                }
+              ]
+            },
+            "line": {
+              "type": "null"
+            },
+            "column": {
+              "type": "null"
+            },
+            "endLine": {
+              "type": "null"
+            },
+            "endColumn": {
+              "type": "null"
+            }
+          },
+          "required": [
+            "file",
+            "line",
+            "column",
+            "endLine",
+            "endColumn"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "file": {
+              "type": "string",
+              "allOf": [
+                {
+                  "minLength": 1
+                },
+                {
+                  "pattern": "^\\/"
+                }
+              ]
+            },
+            "line": {
+              "type": "integer",
+              "allOf": [
+                {
+                  "exclusiveMinimum": 0
+                }
+              ]
+            },
+            "column": {
+              "type": "integer",
+              "allOf": [
+                {
+                  "exclusiveMinimum": 0
+                }
+              ]
+            },
+            "endLine": {
+              "type": "integer",
+              "allOf": [
+                {
+                  "exclusiveMinimum": 0
+                }
+              ]
+            },
+            "endColumn": {
+              "type": "integer",
+              "allOf": [
+                {
+                  "exclusiveMinimum": 0
+                }
+              ]
+            }
+          },
+          "required": [
+            "file",
+            "line",
+            "column",
+            "endLine",
+            "endColumn"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "Objects_2": {
+      "type": "object",
+      "properties": {
+        "source": {
+          "type": "string",
+          "allOf": [
+            {
+              "minLength": 1
+            },
+            {
+              "pattern": "^\\/"
+            }
+          ]
+        },
+        "origins": {
+          "type": "object",
+          "additionalProperties": {
+            "anyOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "explicit"
+                    ]
+                  },
+                  "sourcePath": {
+                    "type": "string",
+                    "allOf": [
+                      {
+                        "pattern": "^(?:\\/(?:[^~/]|~[01])*)*$"
+                      }
+                    ]
+                  },
+                  "location": {
+                    "$ref": "#/$defs/Union_"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "sourcePath",
+                  "location"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "default"
+                    ]
+                  },
+                  "rule": {
+                    "type": "string",
+                    "allOf": [
+                      {
+                        "minLength": 1
+                      }
+                    ]
+                  },
+                  "sourcePath": {
+                    "type": "string",
+                    "allOf": [
+                      {
+                        "pattern": "^(?:\\/(?:[^~/]|~[01])*)*$"
+                      }
+                    ]
+                  },
+                  "location": {
+                    "$ref": "#/$defs/Union_"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "rule",
+                  "sourcePath",
+                  "location"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "expanded"
+                    ]
+                  },
+                  "shorthand": {
+                    "type": "string",
+                    "enum": [
+                      "agent-discriminator",
+                      "command-discriminator",
+                      "retry-integer",
+                      "retry-map",
+                      "session-scalar",
+                      "session-map",
+                      "execution-profile"
+                    ]
+                  },
+                  "sourcePath": {
+                    "type": "string",
+                    "allOf": [
+                      {
+                        "pattern": "^(?:\\/(?:[^~/]|~[01])*)*$"
+                      }
+                    ]
+                  },
+                  "location": {
+                    "$ref": "#/$defs/Union_"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "shorthand",
+                  "sourcePath",
+                  "location"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "inferred"
+                    ]
+                  },
+                  "reason": {
+                    "type": "string",
+                    "enum": [
+                      "input-current",
+                      "when"
+                    ]
+                  },
+                  "sourcePath": {
+                    "type": "string",
+                    "allOf": [
+                      {
+                        "pattern": "^(?:\\/(?:[^~/]|~[01])*)*$"
+                      }
+                    ]
+                  },
+                  "location": {
+                    "$ref": "#/$defs/Union_"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "reason",
+                  "sourcePath",
+                  "location"
+                ],
+                "additionalProperties": false
+              }
+            ]
+          },
+          "allOf": [
+            {
+              "propertyNames": {
+                "pattern": "^(?:\\/(?:[^~/]|~[01])*)*$"
+              }
+            }
+          ]
+        },
+        "inferredNeeds": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "node": {
+                  "type": "string",
+                  "allOf": [
+                    {
+                      "minLength": 1
+                    },
+                    {
+                      "pattern": "^(?!.*--r[1-9][0-9]*$)[a-z0-9][a-z0-9-]*$"
+                    }
+                  ]
+                },
+                "reason": {
+                  "type": "string",
+                  "enum": [
+                    "input-current",
+                    "when"
+                  ]
+                },
+                "sourcePath": {
+                  "type": "string",
+                  "allOf": [
+                    {
+                      "pattern": "^(?:\\/(?:[^~/]|~[01])*)*$"
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "node",
+                "reason",
+                "sourcePath"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "allOf": [
+            {
+              "propertyNames": {
+                "pattern": "^(?!.*--r[1-9][0-9]*$)[a-z0-9][a-z0-9-]*$"
+              }
+            }
+          ]
+        }
+      },
+      "required": [
+        "source",
+        "origins",
+        "inferredNeeds"
+      ],
+      "additionalProperties": false
+    },
     "Arrays_2": {
       "type": "array",
       "items": {
@@ -3358,7 +3697,7 @@
         ]
       }
     },
-    "Union_": {
+    "Union_1": {
       "anyOf": [
         {
           "type": "object",
@@ -3561,7 +3900,7 @@
         "additionalProperties": false
       }
     },
-    "Objects_2": {
+    "Objects_3": {
       "type": "object",
       "properties": {
         "maxAttempts": {
@@ -3578,7 +3917,7 @@
       ],
       "additionalProperties": false
     },
-    "Objects_3": {
+    "Objects_4": {
       "type": "object",
       "properties": {
         "type": {
@@ -3616,7 +3955,7 @@
       ],
       "additionalProperties": false
     },
-    "Objects_4": {
+    "Objects_5": {
       "type": "object",
       "properties": {
         "mode": {
@@ -3665,7 +4004,7 @@
       ],
       "additionalProperties": false
     },
-    "Objects_5": {
+    "Objects_6": {
       "type": "object",
       "properties": {
         "format": {
@@ -3706,13 +4045,18 @@
         ]
       }
     },
-    "Objects_6": {
+    "Objects_7": {
       "type": "object",
-      "patternProperties": {
-        "^[A-Za-z_][A-Za-z0-9_]*$": {
-          "type": "string"
+      "additionalProperties": {
+        "type": "string"
+      },
+      "allOf": [
+        {
+          "propertyNames": {
+            "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+          }
         }
-      }
+      ]
     }
   }
 }

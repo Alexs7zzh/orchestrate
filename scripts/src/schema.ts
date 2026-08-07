@@ -11,11 +11,251 @@ const NodeId = NonEmptyString.check(Schema.isPattern(/^(?!.*--r[1-9][0-9]*$)[a-z
 const RuntimeNodeId = NonEmptyString.check(Schema.isPattern(/^[a-z0-9][a-z0-9-]*$/))
 const EnvironmentName = NonEmptyString.check(Schema.isPattern(/^[A-Za-z_][A-Za-z0-9_]*$/))
 const JsonPointer = Schema.String.check(Schema.isPattern(/^(?:\/(?:[^~/]|~[01])*)*$/))
-const HttpUrl = NonEmptyString.check(Schema.isPattern(/^https?:\/\/[^\s/$.?#].[^\s]*$/i))
+const Sha256 = Schema.String.check(Schema.isPattern(/^[0-9a-f]{64}$/))
+const HTTP_URL_PREFILTER =
+  /^[Hh][Tt][Tt][Pp][Ss]?:\/\/(?:[^\s/?#@]+@)?(?:\[[0-9A-Fa-f:.]+\]|[^\s/?#:]+)(?::[0-9]+)?(?:[/?#][^\s]*)?$/
+const HTTP_HEADER_NAME = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/
+const HTTP_HEADER_VALUE = /^[\t\x20-\x7e\x80-\xff]*$/
+
+export function isAbsoluteHttpUrl(value: string): boolean {
+  if (!HTTP_URL_PREFILTER.test(value)) {
+    return false
+  }
+  try {
+    const parsed = new URL(value)
+    return (
+      (parsed.protocol === "http:" || parsed.protocol === "https:") && parsed.hostname.length > 0
+    )
+  } catch {
+    return false
+  }
+}
+
+const HttpUrl = NonEmptyString.check(
+  Schema.makeFilter(isAbsoluteHttpUrl, {
+    message: "Expected a valid absolute http or https URL.",
+    toJsonSchema: () => ({ pattern: HTTP_URL_PREFILTER.source })
+  })
+)
 const StringArray = Schema.Array(Schema.String)
 const NonEmptyStringArray = Schema.Array(NonEmptyString).check(Schema.isMinLength(1))
-const StringRecord = Schema.Record(Schema.String, Schema.String)
 const UnknownRecord = Schema.Record(Schema.String, Schema.Unknown)
+
+function strictKeyedRecord<Value extends Schema.Top>(
+  keyPattern: RegExp,
+  value: Value,
+  expected: string
+) {
+  const base = Schema.Record(Schema.String, value)
+  return base.check(
+    Schema.makeFilter(
+      (input: Schema.Schema.Type<typeof base>) =>
+        Object.keys(input)
+          .filter((key) => !keyPattern.test(key))
+          .map((key) => ({ path: [key], issue: `Expected ${expected}.` })),
+      {
+        toJsonSchema: () => ({ propertyNames: { pattern: keyPattern.source } })
+      }
+    )
+  )
+}
+
+const EnvironmentRecord = strictKeyedRecord(
+  /^[A-Za-z_][A-Za-z0-9_]*$/,
+  Schema.String,
+  "an environment variable name"
+)
+const HeaderValue = Schema.String.check(
+  Schema.isPattern(HTTP_HEADER_VALUE, {
+    message: "Expected an HTTP header value without invalid control characters."
+  })
+)
+const HeaderRecord = strictKeyedRecord(HTTP_HEADER_NAME, HeaderValue, "an HTTP field-name token")
+
+const SourceInputSchema = Schema.Struct({
+  from: NodeId,
+  as: NonEmptyString,
+  include: Schema.optionalKey(Schema.Literals(["content", "path"])),
+  round: Schema.optionalKey(Schema.Literals(["current", "previous"]))
+})
+
+const SourceWorkspaceCommonFields = {
+  writes: Schema.optionalKey(StringArray),
+  exclusiveResources: Schema.optionalKey(StringArray)
+}
+
+const SourceSharedWorkspaceSchema = Schema.Struct({
+  mode: Schema.Literal("shared"),
+  path: Schema.optionalKey(Schema.NullOr(AbsolutePath)),
+  vcs: Schema.optionalKey(Schema.Literals(["git", "plastic", "other", "none"])),
+  ...SourceWorkspaceCommonFields
+})
+
+const SourceExistingWorkspaceSchema = Schema.Struct({
+  mode: Schema.Literal("existing"),
+  path: AbsolutePath,
+  vcs: Schema.optionalKey(Schema.Literals(["git", "plastic", "other", "none"])),
+  ...SourceWorkspaceCommonFields
+})
+
+const SourceGitWorktreeWorkspaceSchema = Schema.Struct({
+  mode: Schema.Literal("git-worktree"),
+  path: Schema.optionalKey(Schema.NullOr(AbsolutePath)),
+  vcs: Schema.optionalKey(Schema.Literal("git")),
+  git: Schema.Struct({
+    branch: NonEmptyString,
+    startPoint: NonEmptyString,
+    removeOnClean: Schema.Boolean
+  }),
+  ...SourceWorkspaceCommonFields
+})
+
+const SourceWorkspaceSchema = Schema.Union([
+  SourceSharedWorkspaceSchema,
+  SourceExistingWorkspaceSchema,
+  SourceGitWorktreeWorkspaceSchema
+])
+
+const SourceOutputSchema = Schema.Union([
+  Schema.Struct({ format: Schema.Literal("text") }),
+  Schema.Struct({ format: Schema.Literal("json"), schema: UnknownRecord })
+])
+
+const SourceSessionSchema = Schema.Union([
+  Schema.Literal("fresh"),
+  Schema.Struct({ fresh: NonEmptyString }),
+  Schema.Struct({ resume: NonEmptyString }),
+  Schema.Struct({ resume: NonEmptyString, saveAs: NonEmptyString }),
+  Schema.Struct({ fork: NonEmptyString }),
+  Schema.Struct({ fork: NonEmptyString, saveAs: NonEmptyString })
+])
+
+const SourceCommonFields = {
+  id: NodeId,
+  title: Schema.optionalKey(NonEmptyString),
+  needs: Schema.optionalKey(Schema.Array(NodeId)),
+  workroom: Schema.optionalKey(NodeId),
+  seat: Schema.optionalKey(NodeId),
+  cwd: Schema.optionalKey(Schema.NullOr(AbsolutePath)),
+  workspace: Schema.optionalKey(SourceWorkspaceSchema),
+  inputs: Schema.optionalKey(Schema.Array(SourceInputSchema)),
+  retry: Schema.optionalKey(
+    Schema.Union([PositiveInteger, Schema.Struct({ maxAttempts: PositiveInteger })])
+  ),
+  gate: Schema.optionalKey(Schema.Literals(["none", "approval"])),
+  when: Schema.optionalKey(
+    Schema.Struct({
+      type: Schema.Literal("agent-output"),
+      node: NodeId,
+      pointer: JsonPointer,
+      equals: Schema.Unknown
+    })
+  )
+}
+
+const SourceAgentCommonFields = {
+  ...SourceCommonFields,
+  prompt: Schema.String,
+  model: Schema.optionalKey(NonEmptyString),
+  effort: Schema.optionalKey(Schema.String),
+  escalation: Schema.optionalKey(Schema.Literals(["deny", "ask-user", "auto-review"])),
+  extraArgs: Schema.optionalKey(StringArray),
+  inheritEnv: Schema.optionalKey(Schema.Array(EnvironmentName)),
+  env: Schema.optionalKey(EnvironmentRecord),
+  output: Schema.optionalKey(SourceOutputSchema),
+  session: Schema.optionalKey(SourceSessionSchema)
+}
+
+const CodexAgentSourceSchema = Schema.Struct({
+  ...SourceAgentCommonFields,
+  agent: Schema.Literal("codex"),
+  execution: Schema.Literals(["read-only", "workspace-write"])
+})
+
+const ClaudeAgentSourceSchema = Schema.Struct({
+  ...SourceAgentCommonFields,
+  agent: Schema.Literal("claude"),
+  execution: Schema.Literal("dont-ask"),
+  escalation: Schema.optionalKey(Schema.Literal("deny")),
+  extraArgs: Schema.optionalKey(Schema.Array(Schema.String).check(Schema.isMaxLength(0)))
+})
+
+const CommandSourceSchema = Schema.Struct({
+  ...SourceCommonFields,
+  command: NonEmptyStringArray,
+  mutates: Schema.Boolean,
+  inheritEnv: Schema.optionalKey(Schema.Array(EnvironmentName)),
+  env: Schema.optionalKey(EnvironmentRecord),
+  allowedExitCodes: Schema.optionalKey(Schema.Array(Schema.Int).check(Schema.isMinLength(1)))
+})
+
+export const WorkflowSourceNodeSchema = Schema.Union([
+  CodexAgentSourceSchema,
+  ClaudeAgentSourceSchema,
+  CommandSourceSchema
+])
+
+const SourceCallbackSchema = Schema.Union([
+  Schema.Struct({ type: Schema.Literal("none") }),
+  Schema.Struct({ type: Schema.Literal("notification") }),
+  Schema.Struct({
+    type: Schema.Literal("command"),
+    argv: NonEmptyStringArray,
+    timeoutSeconds: PositiveNumber
+  }),
+  Schema.Struct({
+    type: Schema.Literal("webhook"),
+    url: HttpUrl,
+    headers: Schema.optionalKey(HeaderRecord),
+    timeoutSeconds: PositiveNumber
+  })
+])
+
+export const WorkflowSourceSchema = Schema.Struct({
+  name: NonEmptyString,
+  objective: NonEmptyString,
+  cwd: AbsolutePath,
+  concurrency: Schema.optionalKey(PositiveInteger),
+  callback: Schema.optionalKey(SourceCallbackSchema),
+  milestones: Schema.optionalKey(Schema.Boolean),
+  limits: Schema.Struct({ maxStarts: NullablePositiveInteger }),
+  writeConflicts: Schema.optionalKey(Schema.Literals(["reject", "allow-with-approval"])),
+  presentation: Schema.optionalKey(
+    Schema.Struct({
+      workrooms: Schema.Array(
+        Schema.Struct({
+          id: NodeId,
+          label: NonEmptyString,
+          layout: Schema.Literals(["columns", "rows"]),
+          seats: Schema.Array(Schema.Struct({ id: NodeId, label: NonEmptyString })).check(
+            Schema.isMinLength(1),
+            Schema.isMaxLength(4)
+          ),
+          settlesOn: Schema.Array(NodeId).check(Schema.isMinLength(1))
+        })
+      ).check(Schema.isMinLength(1))
+    })
+  ),
+  nodes: Schema.Array(WorkflowSourceNodeSchema).check(Schema.isMinLength(1)),
+  repeats: Schema.optionalKey(
+    Schema.Array(
+      Schema.Struct({
+        id: NodeId,
+        members: Schema.Array(NodeId).check(Schema.isMinLength(1)),
+        until: Schema.Union([
+          Schema.Struct({ type: Schema.Literal("command-success"), node: NodeId }),
+          Schema.Struct({
+            type: Schema.Literal("agent-output"),
+            node: NodeId,
+            pointer: JsonPointer,
+            equals: Schema.Unknown
+          })
+        ]),
+        maxRounds: PositiveInteger
+      })
+    )
+  )
+})
 
 const InputSchema = Schema.Struct({
   from: NodeId,
@@ -76,7 +316,7 @@ const PermissionsCommonFields = {
   escalation: Schema.Literals(["deny", "ask-user", "auto-review"]),
   extraArgs: StringArray,
   inheritEnv: Schema.Array(EnvironmentName),
-  env: Schema.Record(EnvironmentName, Schema.String)
+  env: EnvironmentRecord
 }
 
 const CodexPermissionsSchema = Schema.Struct({
@@ -156,7 +396,7 @@ export const CommandNodeSchema = Schema.Struct({
   argv: NonEmptyStringArray,
   mutates: Schema.Boolean,
   inheritEnv: Schema.Array(EnvironmentName),
-  env: Schema.Record(EnvironmentName, Schema.String),
+  env: EnvironmentRecord,
   allowedExitCodes: Schema.Array(Schema.Int).check(Schema.isMinLength(1))
 })
 
@@ -188,7 +428,7 @@ const CallbackSchema = Schema.Union([
   Schema.Struct({
     type: Schema.Literal("webhook"),
     url: HttpUrl,
-    headers: StringRecord,
+    headers: HeaderRecord,
     timeoutSeconds: PositiveNumber
   }),
   Schema.Struct({ type: Schema.Literal("notification") })
@@ -395,7 +635,8 @@ const SessionStateSchema = Schema.Struct({
   alias: NonEmptyString,
   provider: Schema.Literals(["codex", "claude"]),
   sessionId: NonEmptyString,
-  sourceNodeId: NonEmptyString
+  sourceNodeId: NonEmptyString,
+  lineageId: Schema.optionalKey(Sha256)
 })
 
 const GateStateSchema = Schema.Struct({
@@ -430,10 +671,110 @@ const SpawnIntentSchema = Schema.Struct({
   createdAt: NonEmptyString
 })
 
+const UnknownSourceLocationSchema = Schema.Struct({
+  file: AbsolutePath,
+  line: Schema.Null,
+  column: Schema.Null,
+  endLine: Schema.Null,
+  endColumn: Schema.Null
+})
+
+const KnownSourceLocationSchema = Schema.Struct({
+  file: AbsolutePath,
+  line: PositiveInteger,
+  column: PositiveInteger,
+  endLine: PositiveInteger,
+  endColumn: PositiveInteger
+}).check(
+  Schema.makeFilter(
+    (location) =>
+      location.line < location.endLine ||
+      (location.line === location.endLine && location.column <= location.endColumn),
+    {
+      message: "Expected a source range whose start does not follow its end.",
+      // JSON Schema cannot compare sibling numeric properties. The union still
+      // publishes the all-null-or-all-positive shape; Effect enforces ordering.
+      toJsonSchema: () => ({})
+    }
+  )
+)
+
+export const SourceLocationSchema = Schema.Union([
+  UnknownSourceLocationSchema,
+  KnownSourceLocationSchema
+])
+
+const ExplicitFieldOriginSchema = Schema.Struct({
+  kind: Schema.Literal("explicit"),
+  sourcePath: JsonPointer,
+  location: SourceLocationSchema
+})
+
+const DefaultFieldOriginSchema = Schema.Struct({
+  kind: Schema.Literal("default"),
+  rule: NonEmptyString,
+  sourcePath: JsonPointer,
+  location: SourceLocationSchema
+})
+
+const ExpandedFieldOriginSchema = Schema.Struct({
+  kind: Schema.Literal("expanded"),
+  shorthand: Schema.Literals([
+    "agent-discriminator",
+    "command-discriminator",
+    "retry-integer",
+    "retry-map",
+    "session-scalar",
+    "session-map",
+    "execution-profile"
+  ]),
+  sourcePath: JsonPointer,
+  location: SourceLocationSchema
+})
+
+const InferredFieldOriginSchema = Schema.Struct({
+  kind: Schema.Literal("inferred"),
+  reason: Schema.Literals(["input-current", "when"]),
+  sourcePath: JsonPointer,
+  location: SourceLocationSchema
+})
+
+export const FieldOriginSchema = Schema.Union([
+  ExplicitFieldOriginSchema,
+  DefaultFieldOriginSchema,
+  ExpandedFieldOriginSchema,
+  InferredFieldOriginSchema
+])
+
+const OriginRecord = strictKeyedRecord(
+  /^(?:\/(?:[^~/]|~[01])*)*$/,
+  FieldOriginSchema,
+  "an RFC 6901 JSON pointer"
+)
+
+export const InferredNeedAnnotationSchema = Schema.Struct({
+  node: NodeId,
+  reason: Schema.Literals(["input-current", "when"]),
+  sourcePath: JsonPointer
+})
+
+const InferredNeedsRecord = strictKeyedRecord(
+  /^(?!.*--r[1-9][0-9]*$)[a-z0-9][a-z0-9-]*$/,
+  Schema.Array(InferredNeedAnnotationSchema),
+  "a source node id"
+)
+
+export const WorkflowProvenanceSchema = Schema.Struct({
+  source: AbsolutePath,
+  origins: OriginRecord,
+  inferredNeeds: InferredNeedsRecord
+})
+
 const PendingRevisionSchema = Schema.Struct({
   workflow: WorkflowSchema,
   digest: NonEmptyString,
   summary: StringArray,
+  provenance: WorkflowProvenanceSchema,
   createdAt: NonEmptyString
 })
 
@@ -455,11 +796,20 @@ export const RunOriginSchema = Schema.Struct({
 })
 
 export const NodeDoneSubmissionSchema = Schema.Struct({
+  version: Schema.Literal(2),
   runId: NonEmptyString,
   nodeId: NonEmptyString,
   token: NonEmptyString,
   outcome: Schema.Literals(["completed", "failed"]),
-  hold: Schema.Boolean
+  hold: Schema.Boolean,
+  capability: Schema.Struct({
+    digest: Sha256,
+    completionContractSha256: Sha256
+  }),
+  result: Schema.Struct({
+    sha256: Sha256,
+    byteLength: NonNegativeInteger
+  })
 })
 
 export const HerdrAgentStatusEventSchema = Schema.Struct({
@@ -630,11 +980,19 @@ export const EventRecordSchema = Schema.Union([
   nodeEventWithData("hold.released", Schema.Struct({ scope: HoldScope })),
   eventWithData(
     "revision.proposed",
-    Schema.Struct({ digest: NonEmptyString, summary: StringArray })
+    Schema.Struct({
+      digest: NonEmptyString,
+      summary: StringArray,
+      provenance: WorkflowProvenanceSchema
+    })
   ),
   eventWithData(
     "revision.approved",
-    Schema.Struct({ digest: NonEmptyString, workflow: WorkflowSchema })
+    Schema.Struct({
+      digest: NonEmptyString,
+      workflow: WorkflowSchema,
+      provenance: WorkflowProvenanceSchema
+    })
   ),
   eventWithData("revision.discarded", DigestData),
   eventWithData(

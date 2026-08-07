@@ -8,6 +8,7 @@ import {
   renderAgentPrompt,
   renderInputs
 } from "../src/prompt.js"
+import { submissionInboxArtifactPath } from "../src/state.js"
 
 function workspace() {
   return {
@@ -192,8 +193,39 @@ describe("prompt rendering", () => {
     ).toThrow("requests a path from a skipped node")
   })
 
+  test("renders only an explicit projected inbox path for path inputs", () => {
+    const spec = workflow()
+    const current = state()
+    const input = {
+      from: "review",
+      as: "Final review path",
+      include: "path" as const,
+      round: "current" as const
+    }
+    const producerPath = current.nodes["review--r2"]!.resultPath as string
+    const projectedPath = submissionInboxArtifactPath(
+      current.id,
+      "summarize",
+      "b".repeat(64),
+      0,
+      "review--r2"
+    )
+
+    expect(() => renderInputs(spec, current, "summarize", [input])).toThrow(
+      'Input "review" for node "summarize" has no projected inbox artifact.'
+    )
+    const rendered = renderInputs(spec, current, "summarize", [input], {
+      0: projectedPath
+    })
+    expect(rendered).toContain(projectedPath)
+    expect(rendered).not.toContain(producerPath)
+    expect(() =>
+      renderInputs(spec, current, "summarize", [input], { 0: "relative/result.txt" })
+    ).toThrow("has no projected inbox artifact")
+  })
+
   test("keeps gate content separate from the operational completion contract", () => {
-    process.env.ORCHESTRATE_BIN = "/opt/orchestrate"
+    process.env.ORCHESTRATE_BIN = process.execPath
     const spec = workflow()
     const current = state()
     const review = spec.nodes[1] as AgentNode
@@ -202,11 +234,45 @@ describe("prompt rendering", () => {
 
     expect(prepared.gate?.content).toBe("Stable frame for review.")
     expect(prepared.gate?.content).not.toContain("node-done")
-    expect(prompt).toContain("/opt/orchestrate")
+    expect(prompt).toContain(process.execPath)
     expect(prompt).toContain("node-done")
+    expect(prompt).toContain("sole completion owner")
+    expect(prompt).toContain("Delegated workers and subagents must never write this result")
+    expect(prompt).toContain("A chat answer, READY marker, idle pane")
+    expect(prompt).toContain("successfully invoke node-done yourself before your final response")
     expect(prompt).toContain(prepared.resultPath)
     expect(prompt).toContain("'--hold'")
     expect(prompt).not.toContain("To stop dependents after you finish")
+  })
+
+  test("renders gated path inputs from the token-derived inbox before approval", () => {
+    const base = workflow()
+    const current = state()
+    const summarize = {
+      ...(base.nodes[2] as AgentNode),
+      gate: "approval" as const,
+      inputs: [
+        {
+          from: "review",
+          as: "Final review path",
+          include: "path" as const,
+          round: "current" as const
+        }
+      ]
+    }
+    const spec = { ...base, nodes: [base.nodes[0]!, base.nodes[1]!, summarize] }
+    const prepared = prepareNode(spec, current, "/tmp/run", "summarize")
+    const producerPath = current.nodes["review--r2"]!.resultPath as string
+    const expected = submissionInboxArtifactPath(
+      current.id,
+      "summarize",
+      prepared.token,
+      0,
+      "review--r2"
+    )
+
+    expect(prepared.gate?.content).toContain(expected)
+    expect(prepared.gate?.content).not.toContain(producerPath)
   })
 
   test("renders the approved round placeholder for a repeat directive", () => {

@@ -5,6 +5,8 @@ import { chmod, mkdir, mkdtemp, readdir, rm } from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 
+import type { WorkflowSpec } from "../src/types.js"
+
 import {
   buildToolchainIdentity,
   COMPILED_BUNDLE_TARGET,
@@ -16,13 +18,14 @@ import {
 } from "../src/build-contract.js"
 import { assembleRelease, RELEASE_PAYLOAD_FILES } from "../src/release.js"
 import { assertReleaseVersion, parseSemVer } from "../src/semver.js"
+import { workflowSourceYaml } from "./workflow-source-fixture.js"
 
 setDefaultTimeout(30_000)
 
 let root = ""
 let shimDir = ""
 
-function workflow(cwd: string) {
+function workflow(cwd: string): WorkflowSpec {
   return {
     name: "release-contract",
     objective: "Exercise the exact release payload.",
@@ -155,7 +158,8 @@ describe("release payload contract", () => {
       "fast-uri",
       "json-schema-traverse",
       "pure-rand",
-      "web-tree-sitter"
+      "web-tree-sitter",
+      "yaml"
     ])
     const notice = await Bun.file(path.join(scriptsRoot, "THIRD_PARTY_LICENSES.txt")).text()
     expect(notice).toContain(`Bun runtime ${Bun.version} (revision\n${Bun.revision})`)
@@ -360,8 +364,8 @@ describe("release payload contract", () => {
     const state = path.join(root, "state")
     await mkdir(cwd)
     await mkdir(home)
-    const file = path.join(root, "workflow.json")
-    await Bun.write(file, `${JSON.stringify(workflow(cwd), null, 2)}\n`, { createPath: false })
+    const file = path.join(root, "workflow.yaml")
+    await Bun.write(file, workflowSourceYaml(workflow(cwd)), { createPath: false })
     expect(run(binary, ["validate", file, "--json"], home, state).status).toBe(0)
     const preview = run(binary, ["preview", file, "--json"], home, state)
     expect(preview.status).toBe(0)

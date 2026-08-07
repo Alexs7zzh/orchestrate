@@ -1,10 +1,6 @@
 import { Ajv2020 } from "ajv/dist/2020.js"
 import { Option, Schema } from "effect"
-import { constants } from "node:fs"
-import { open } from "node:fs/promises"
-import path from "node:path"
 
-import type { NodeDoneSubmission } from "./state.js"
 import type {
   AgentNode,
   CrankAction,
@@ -20,6 +16,12 @@ import type {
 } from "./types.js"
 
 import {
+  CompletionEvidenceError,
+  MAX_RESULT_BYTES,
+  readAuthenticatedCompletionEvidence,
+  readBoundedRegularFile
+} from "./completion-evidence.js"
+import {
   HerdrObservationError,
   HerdrSurface,
   herdrError,
@@ -28,15 +30,10 @@ import {
 import { classifyEvent, dispatchEventNotification } from "./notifications.js"
 import { resolveAutoContinue, resolvePlacement } from "./placement.js"
 import { prepareNode, renderAgentPrompt } from "./prompt.js"
-import {
-  HerdrAgentStatusEventSchema,
-  HerdrPaneGoneEventSchema,
-  NodeDoneSubmissionSchema
-} from "./schema.js"
+import { HerdrAgentStatusEventSchema, HerdrPaneGoneEventSchema } from "./schema.js"
 import { applyStatePatch, diffState } from "./state-patch.js"
 import {
   acquireRunLock,
-  atomicWriteJson,
   commitRun,
   completionSubmissionPath,
   hasResolvedHistory,
@@ -46,51 +43,15 @@ import {
   readUiSnapshot,
   readWorkflow,
   runDirectory,
-  runtimeBuild,
-  submissionDirectory
+  runtimeBuild
 } from "./state.js"
 import { createInitialRunState, transition, type TransitionContext } from "./transition.js"
 import { validateWorkflow } from "./validation.js"
 import { seatSpecFor, templateForRuntimeNode, workroomSpecFor } from "./workflow-lookup.js"
 
-export const MAX_RESULT_BYTES = 1024 * 1024
+export { MAX_RESULT_BYTES }
 
-export async function readBoundedResult(file: string, label: string): Promise<string> {
-  const flags = constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0)
-  let handle: Awaited<ReturnType<typeof open>>
-  try {
-    handle = await open(file, flags)
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ELOOP") {
-      throw new Error(`${label} must be a regular file, not a symbolic link.`, { cause: error })
-    }
-    throw error
-  }
-  try {
-    const metadata = await handle.stat()
-    if (!metadata.isFile()) {
-      throw new Error(`${label} must be a regular file.`)
-    }
-    if (metadata.size > MAX_RESULT_BYTES) {
-      throw new Error(`${label} exceeds the ${MAX_RESULT_BYTES}-byte result limit.`)
-    }
-    const buffer = Buffer.alloc(MAX_RESULT_BYTES + 1)
-    let bytesRead = 0
-    while (bytesRead < buffer.length) {
-      const read = await handle.read(buffer, bytesRead, buffer.length - bytesRead, bytesRead)
-      if (read.bytesRead === 0) {
-        break
-      }
-      bytesRead += read.bytesRead
-    }
-    if (bytesRead > MAX_RESULT_BYTES) {
-      throw new Error(`${label} exceeds the ${MAX_RESULT_BYTES}-byte result limit.`)
-    }
-    return buffer.subarray(0, bytesRead).toString("utf8")
-  } finally {
-    await handle.close()
-  }
-}
+export const readBoundedResult = readBoundedRegularFile
 
 export interface CrankSurface {
   connect(): Promise<void>
@@ -567,7 +528,7 @@ async function presentActions(
       await surface
         .notify(
           `${workflow.name} · origin handoff fallback`,
-          `Run ${state.id} could not prompt its launching agent. Inspect orchestrate status ${state.id}.`,
+          `Run ${state.id} could not prompt its current wake-owning master. Inspect orchestrate status ${state.id}.`,
           "request"
         )
         .catch(() => undefined)
@@ -611,7 +572,10 @@ async function reconcilePlannedSpawns(
   surface: CrankSurface,
   options: CrankOptions,
   collected: EventRecord[]
-): Promise<{ readonly workflow: WorkflowSpec; readonly state: RunState }> {
+): Promise<{
+  readonly workflow: WorkflowSpec
+  readonly state: RunState
+}> {
   let currentWorkflow = workflow
   let currentState = state
   const deferred: HerdrObservationError[] = []
@@ -777,7 +741,6 @@ export async function startWorkflowRun(
   return { ...reconciled, events: [...initialEvents, ...reconciled.events] }
 }
 
-const decodeNodeDoneSubmission = Schema.decodeUnknownOption(NodeDoneSubmissionSchema)
 const decodeHerdrAgentStatusEvent = Schema.decodeUnknownOption(HerdrAgentStatusEventSchema)
 const decodeHerdrPaneGoneEvent = Schema.decodeUnknownOption(HerdrPaneGoneEventSchema)
 
@@ -809,17 +772,15 @@ async function handlePaneGoneEvent(
     if (state.origin === null) {
       continue
     }
-    const submission = await readBoundedResult(
-      completionSubmissionPath(attempt.resultPath),
-      `Completion submission for node "${node.id}"`
+    const submitted = await readAuthenticatedCompletionEvidence({
+      runId: state.id,
+      nodeId: node.id,
+      token: attempt.token,
+      resultPath: attempt.resultPath
+    }).then(
+      () => true,
+      () => false
     )
-      .then((raw) => Option.getOrNull(decodeNodeDoneSubmission(JSON.parse(raw) as unknown)))
-      .catch(() => null)
-    const submitted =
-      submission !== null &&
-      submission.runId === state.id &&
-      submission.nodeId === node.id &&
-      submission.token === attempt.token
     if (submitted) {
       // The pane closing after a valid submission is expected teardown; the
       // agent-status event already requested reconciliation.
@@ -837,6 +798,11 @@ async function handlePaneGoneEvent(
   return { status: "handled", matched: matches.length, prompted }
 }
 
+interface InvalidNodeDoneSubmission {
+  readonly nodeId: string
+  readonly message: string
+}
+
 async function consumeNodeDoneSubmissions(
   runDir: string,
   workflow: WorkflowSpec,
@@ -845,10 +811,14 @@ async function consumeNodeDoneSubmissions(
   surface: CrankSurface,
   options: CrankOptions,
   collected: EventRecord[]
-): Promise<{ readonly workflow: WorkflowSpec; readonly state: RunState }> {
+): Promise<{
+  readonly workflow: WorkflowSpec
+  readonly state: RunState
+  readonly invalidSubmissions: readonly InvalidNodeDoneSubmission[]
+}> {
   let currentWorkflow = workflow
   let currentState = state
-  const invalidSubmissions: string[] = []
+  const invalidSubmissions: InvalidNodeDoneSubmission[] = []
   for (const candidate of Object.values(state.nodes)) {
     const liveCandidate = currentState.nodes[candidate.id]
     if (liveCandidate?.type !== "agent" || liveCandidate.status !== "running") {
@@ -859,41 +829,36 @@ async function consumeNodeDoneSubmissions(
       continue
     }
     const submissionPath = completionSubmissionPath(attempt.resultPath)
-    let raw: string
+    let evidence: Awaited<ReturnType<typeof readAuthenticatedCompletionEvidence>>
     try {
-      raw = await readBoundedResult(
-        submissionPath,
-        `Completion submission for node "${liveCandidate.id}"`
-      )
+      evidence = await readAuthenticatedCompletionEvidence({
+        runId: currentState.id,
+        nodeId: liveCandidate.id,
+        token: attempt.token,
+        resultPath: attempt.resultPath
+      })
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      if (error instanceof CompletionEvidenceError && error.kind === "missing-envelope") {
         continue
       }
-      throw error
-    }
-    let submission: NodeDoneSubmission | null
-    try {
-      submission = Option.getOrNull(decodeNodeDoneSubmission(JSON.parse(raw) as unknown))
-    } catch {
-      invalidSubmissions.push(
-        `Node "${liveCandidate.id}" submission ${submissionPath} is not valid JSON.`
-      )
+      invalidSubmissions.push({
+        nodeId: liveCandidate.id,
+        message: `Node "${liveCandidate.id}" submission ${submissionPath} could not be validated: ${herdrError(error)}`
+      })
       continue
     }
-    if (
-      submission === null ||
-      submission.runId !== currentState.id ||
-      submission.nodeId !== liveCandidate.id ||
-      submission.token !== attempt.token ||
-      (submission.hold && submission.outcome !== "completed")
-    ) {
-      invalidSubmissions.push(
-        `Node "${liveCandidate.id}" submission ${submissionPath} is invalid or stale.`
-      )
-      continue
-    }
+    const submission = evidence.submission
     let event: CrankEvent
     try {
+      const liveTemplate = agentTemplate(currentWorkflow, currentState, liveCandidate.id)
+      if (
+        evidence.manifest.attempt.attempt !== attempt.attempt ||
+        evidence.manifest.attempt.provider !== liveTemplate.provider
+      ) {
+        throw new Error(
+          `Attempt capability for node "${liveCandidate.id}" does not match its active attempt.`
+        )
+      }
       event = await validatedNodeDoneEventFromState(
         runDir,
         currentState,
@@ -901,12 +866,14 @@ async function consumeNodeDoneSubmissions(
         liveCandidate.id,
         attempt.token,
         submission.outcome,
-        submission.hold
+        submission.hold,
+        evidence.declaredResult
       )
     } catch (error) {
-      invalidSubmissions.push(
-        `Node "${liveCandidate.id}" submission ${submissionPath} could not be validated: ${herdrError(error)}`
-      )
+      invalidSubmissions.push({
+        nodeId: liveCandidate.id,
+        message: `Node "${liveCandidate.id}" submission ${submissionPath} could not be validated: ${herdrError(error)}`
+      })
       continue
     }
     const result = transition(
@@ -921,12 +888,7 @@ async function consumeNodeDoneSubmissions(
     currentWorkflow = result.workflow
     currentState = result.state
   }
-  if (invalidSubmissions.length > 0) {
-    throw new Error(
-      `${invalidSubmissions.join("\n")} Replace or remove the named completion envelope, then rerun orchestrate reconcile.`
-    )
-  }
-  return { workflow: currentWorkflow, state: currentState }
+  return { workflow: currentWorkflow, state: currentState, invalidSubmissions }
 }
 
 export async function reconcileRun(
@@ -942,6 +904,7 @@ export async function reconcileRun(
     assertWorkflowState(workflow, state)
     const ui = await readUiSnapshot(runDir)
     const events: EventRecord[] = []
+    let invalidSubmissions = new Map<string, string>()
 
     // Pause blocks new pane starts only: finished panes' submissions still
     // commit while paused (reconcilePlannedSpawns and the reconcile transition
@@ -959,6 +922,10 @@ export async function reconcileRun(
       )
       state = submitted.state
       workflow = submitted.workflow
+      invalidSubmissions = new Map()
+      for (const diagnostic of submitted.invalidSubmissions) {
+        invalidSubmissions.set(diagnostic.nodeId, diagnostic.message)
+      }
       if (state.status !== "running" && state.status !== "paused") {
         break
       }
@@ -989,6 +956,11 @@ export async function reconcileRun(
       if (state.sequence === sequenceBefore) {
         break
       }
+    }
+    if (invalidSubmissions.size > 0) {
+      throw new Error(
+        `${[...invalidSubmissions.values()].join("\n")} Replace or remove the named completion envelope, then rerun orchestrate reconcile.`
+      )
     }
     return { workflow, state, events }
   } finally {
@@ -1035,6 +1007,12 @@ export async function crankRun(
     }
 
     let effectiveEvent = event
+    if (event.type === "resume" && surface.captureOrigin !== undefined) {
+      const resumedOrigin = await surface.captureOrigin()
+      if (resumedOrigin !== null) {
+        effectiveEvent = { ...event, origin: resumedOrigin }
+      }
+    }
     if (event.type === "node-exit") {
       const target = state.nodes[event.nodeId]
       const attempt = target?.attempts.at(-1)
@@ -1098,7 +1076,12 @@ async function validatedNodeDoneEventFromState(
   nodeId: string,
   token: string,
   outcome: "completed" | "failed",
-  hold: boolean
+  hold: boolean,
+  declaredResult: string,
+  options: {
+    readonly allowPlannedAttempt?: boolean
+    readonly expectedResultPath?: string
+  } = {}
 ): Promise<CrankEvent> {
   const node = state.nodes[nodeId]
   const attempt = node?.attempts.at(-1)
@@ -1108,14 +1091,23 @@ async function validatedNodeDoneEventFromState(
   if (attempt.token !== token) {
     throw new Error(`Invalid or stale token for node "${nodeId}".`)
   }
-  if (attempt.status !== "running") {
+  if (
+    attempt.status !== "running" &&
+    !(options.allowPlannedAttempt === true && attempt.status === "planned")
+  ) {
     throw new Error(`Node "${nodeId}" has no running attempt.`)
+  }
+  if (
+    options.expectedResultPath !== undefined &&
+    attempt.resultPath !== options.expectedResultPath
+  ) {
+    throw new Error(`Declared result path for node "${nodeId}" does not match its active attempt.`)
   }
   const template = agentTemplate(workflow, state, nodeId)
   let result: unknown = null
   let error: string | null = null
   try {
-    const raw = await readBoundedResult(attempt.resultPath, `Result for node "${nodeId}"`)
+    const raw = declaredResult
     if (template.output.format === "text") {
       result = raw
     } else {
@@ -1168,28 +1160,7 @@ async function validatedNodeDoneEventFromState(
   }
 }
 
-export async function submitNodeDone(
-  runDir: string,
-  nodeId: string,
-  token: string,
-  outcome: "completed" | "failed",
-  hold = false
-): Promise<NodeDoneSubmission> {
-  if (hold && outcome !== "completed") {
-    throw new Error("--hold is valid only with --outcome completed.")
-  }
-  const runId = path.basename(runDir)
-  const directory = submissionDirectory(runId, nodeId, token)
-  const submission: NodeDoneSubmission = {
-    runId,
-    nodeId,
-    token,
-    outcome,
-    hold
-  }
-  await atomicWriteJson(path.join(directory, "completion.json"), submission)
-  return submission
-}
+export { submitNodeDone } from "./completion-submission.js"
 
 export interface HerdrEventBridgeResult {
   readonly status: "ignored" | "handled"
@@ -1256,25 +1227,25 @@ export async function handleHerdrAgentStatusEvent(
     if (state.origin === null) {
       continue
     }
+    const evidence = await readAuthenticatedCompletionEvidence({
+      runId: state.id,
+      nodeId: node.id,
+      token: attempt.token,
+      resultPath: attempt.resultPath
+    }).catch(() => null)
     let prompt: string
-    if (event.data.agent_status === "blocked") {
+    if (evidence !== null) {
+      prompt = [
+        `Orchestrate node "${node.id}" submitted ${evidence.submission.outcome} for run ${state.id}.`,
+        `Run orchestrate reconcile ${state.id} to validate it and advance the workflow.`
+      ].join("\n")
+    } else if (event.data.agent_status === "blocked") {
       prompt = [
         `Orchestrate node "${node.id}" requires attention in run ${state.id}.`,
         `Inspect its Herdr pane or run orchestrate board ${state.id}.`
       ].join("\n")
     } else {
-      const submission = await readBoundedResult(
-        completionSubmissionPath(attempt.resultPath),
-        `Completion submission for node "${node.id}"`
-      )
-        .then((raw) => Option.getOrNull(decodeNodeDoneSubmission(JSON.parse(raw) as unknown)))
-        .catch(() => null)
-      const valid =
-        submission !== null &&
-        submission.runId === state.id &&
-        submission.nodeId === node.id &&
-        submission.token === attempt.token
-      if (!valid && surface.waitForAgentStatus !== undefined) {
+      if (surface.waitForAgentStatus !== undefined) {
         const resumed = await surface
           .waitForAgentStatus(event.data.pane_id, "working", DONE_WAKE_RECHECK_MS)
           .catch(() => false)
@@ -1282,16 +1253,11 @@ export async function handleHerdrAgentStatusEvent(
           continue
         }
       }
-      prompt = valid
-        ? [
-            `Orchestrate node "${node.id}" submitted ${submission.outcome} for run ${state.id}.`,
-            `Run orchestrate reconcile ${state.id} to validate it and advance the workflow.`
-          ].join("\n")
-        : [
-            `Orchestrate node "${node.id}" became done without a valid completion submission for run ${state.id}.`,
-            `Inspect its pane with: herdr pane read ${event.data.pane_id} — the provider may have failed to start (for example an invalid model) or lost its prompt.`,
-            `The rendered prompt is saved as prompt.txt beside the attempt output. Debug and resume the node, or fail the attempt with the recovery command from: orchestrate status ${state.id}`
-          ].join("\n")
+      prompt = [
+        `Orchestrate node "${node.id}" became done without a valid completion submission for run ${state.id}.`,
+        `Inspect its pane with: herdr pane read ${event.data.pane_id} — the provider may have failed to start (for example an invalid model) or lost its prompt.`,
+        `The rendered prompt is saved as prompt.txt beside the attempt output. Inspect with orchestrate status ${state.id}, then restore or resume the owning provider session; only that owner may write the result and submit node-done.`
+      ].join("\n")
     }
     await surface.promptOrigin(state.origin, prompt)
     prompted += 1

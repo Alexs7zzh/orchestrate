@@ -11,6 +11,7 @@ import type {
 } from "../src/types.js"
 
 import { reconcileApprovedRevisionState } from "../src/crank.js"
+import { digestGate, digestWorkflow } from "../src/digest.js"
 import { runNeedsAttention } from "../src/state.js"
 import {
   createInitialRunState,
@@ -20,6 +21,7 @@ import {
   type TransitionContext
 } from "../src/transition.js"
 import { validateWorkflow } from "../src/validation.js"
+import { workflowProvenance } from "./workflow-provenance-fixture.js"
 
 const NOW = "2026-08-02T12:00:00.000Z"
 
@@ -44,7 +46,7 @@ function command(id: string, overrides: Partial<CommandNode> = {}): CommandNode 
     inputs: [],
     retry: { maxAttempts: 1 },
     gate: "none",
-    argv: ["true"],
+    argv: ["/usr/bin/true"],
     mutates: false,
     inheritEnv: [],
     env: {},
@@ -108,7 +110,7 @@ function context(...ids: readonly string[]): TransitionContext {
         token: `token:${id}`,
         resultPath: `nodes/${id}/result.json`,
         outputPath: `nodes/${id}/output.log`,
-        gate: { content: `rendered:${id}`, digest: `digest:${id}` }
+        gate: { content: `rendered:${id}`, digest: digestGate(`rendered:${id}`) }
       }
     ])
   )
@@ -544,7 +546,7 @@ describe("pure crank transition", () => {
     expect(runNeedsAttention(failed.state)).toBe(true)
   })
 
-  test("keeps an opened room immutable while allowing an ordered future seat turn", () => {
+  test("keeps an opened room immutable while allowing an ordered future seat turn", async () => {
     const work = agent("work", { workroom: "review-room", seat: "reviewer" })
     const finish = command("finish", { needs: ["work"], workroom: "review-room" })
     const presentation: NonNullable<WorkflowSpec["presentation"]> = {
@@ -568,14 +570,15 @@ describe("pure crank transition", () => {
     })
     const proposedChange = crank(started.state, spec, {
       type: "propose-revision",
+      provenance: await workflowProvenance(changedRoom),
       workflow: changedRoom,
-      digest: "changed-room",
+      digest: digestWorkflow(changedRoom),
       summary: ["~ presentation"]
     })
     expect(() =>
       crank(proposedChange.state, spec, {
         type: "approve-revision",
-        digest: "changed-room"
+        digest: proposedChange.state.pendingRevision?.digest as string
       })
     ).toThrow('already-opened or reserved workroom "review-room"')
 
@@ -601,13 +604,14 @@ describe("pure crank transition", () => {
     expect(validateWorkflow(safeRevision).workflow).not.toBeNull()
     const proposedSafe = crank(observed.state, spec, {
       type: "propose-revision",
+      provenance: await workflowProvenance(safeRevision),
       workflow: safeRevision,
-      digest: "safe-room",
+      digest: digestWorkflow(safeRevision),
       summary: ["+ future"]
     })
     const approved = crank(proposedSafe.state, spec, {
       type: "approve-revision",
-      digest: "safe-room"
+      digest: proposedSafe.state.pendingRevision?.digest as string
     })
     expect(approved.workflow).toEqual(safeRevision)
     expect(approved.state.workrooms["review-room"]?.status).toBe("active")
@@ -692,7 +696,7 @@ describe("pure crank transition", () => {
     expect(missing.state.nodes.optional?.attempts).toEqual([])
   })
 
-  test("requires an approved condition change before resuming a missing-pointer pause", () => {
+  test("requires an approved condition change before resuming a missing-pointer pause", async () => {
     const decision = agent("decision", {
       output: {
         format: "json",
@@ -737,13 +741,14 @@ describe("pure crank transition", () => {
     const revised = workflow([{ ...decision }, unconditionalOptional])
     const proposed = crank(paused.state, base, {
       type: "propose-revision",
+      provenance: await workflowProvenance(revised),
       workflow: revised,
-      digest: "condition-revision",
+      digest: digestWorkflow(revised),
       summary: ["remove malformed condition"]
     })
     const approved = crank(proposed.state, base, {
       type: "approve-revision",
-      digest: "condition-revision"
+      digest: proposed.state.pendingRevision?.digest as string
     })
     expect(approved.state.status).toBe("paused")
     const resumed = crank(
@@ -760,7 +765,7 @@ describe("pure crank transition", () => {
     expect(resumed.state.nodes.optional?.status).toBe("running")
   })
 
-  test("revises only the current and future condition after prior repeat history", () => {
+  test("revises only the current and future condition after prior repeat history", async () => {
     const decision = agent("decision", {
       output: {
         format: "json",
@@ -835,13 +840,14 @@ describe("pure crank transition", () => {
     const revised = workflow([decision, revisedOptional], { repeats: [repeat] })
     const proposed = crank(paused.state, base, {
       type: "propose-revision",
+      provenance: await workflowProvenance(revised),
       workflow: revised,
-      digest: "repeat-condition-revision",
+      digest: digestWorkflow(revised),
       summary: ["repair current repeat condition"]
     })
     const approved = crank(proposed.state, base, {
       type: "approve-revision",
-      digest: "repeat-condition-revision"
+      digest: proposed.state.pendingRevision?.digest as string
     })
     expect(approved.state.nodes["optional--r1"]?.status).toBe("completed")
     const resumed = crank(
@@ -987,6 +993,16 @@ describe("pure crank transition", () => {
 
   test("opens a digest-bound gate, rejects the wrong digest, and schedules after approval", () => {
     const spec = workflow([agent("review", { gate: "approval" })])
+    expect(() =>
+      start(spec, {
+        prepareNode: () => ({
+          token: "token:review",
+          resultPath: "nodes/review/result.json",
+          outputPath: "nodes/review/output.log",
+          gate: { content: "rendered:review", digest: "tampered" }
+        })
+      })
+    ).toThrow("Prepared gate digest mismatch")
     const opened = start(spec, context("review"))
     expect(opened.state.nodes.review?.status).toBe("awaiting-approval")
     expect(opened.state.gates.review?.content).toBe("rendered:review")
@@ -997,11 +1013,25 @@ describe("pure crank transition", () => {
     expect(() =>
       crank(opened.state, spec, { type: "approve-gate", nodeId: "review", digest: "wrong" })
     ).toThrow("digest mismatch")
+    expect(() =>
+      crank(
+        {
+          ...opened.state,
+          gates: { review: { ...opened.state.gates.review!, digest: "tampered" } }
+        },
+        spec,
+        { type: "approve-gate", nodeId: "review", digest: "tampered" }
+      )
+    ).toThrow("digest mismatch")
 
     const approved = crank(
       opened.state,
       spec,
-      { type: "approve-gate", nodeId: "review", digest: "digest:review" },
+      {
+        type: "approve-gate",
+        nodeId: "review",
+        digest: opened.state.gates.review?.digest as string
+      },
       context("review")
     )
     expect(approved.state.nodes.review?.status).toBe("running")
@@ -1636,6 +1666,75 @@ describe("pure crank transition", () => {
     })
   })
 
+  test("completes a Claude resume or fork with a missing source alias but rejects the wrong provider", () => {
+    for (const mode of ["resume", "fork"] as const) {
+      const seed = agent("seed", {
+        provider: "claude",
+        session: { mode: "fresh", from: null, saveAs: "root" }
+      })
+      const resumed = agent("resumed", {
+        provider: "claude",
+        needs: ["seed"],
+        session: { mode, from: "root", saveAs: "continued" }
+      })
+      const spec = workflow([seed, resumed])
+      const seeded = observe(start(spec, context("seed")).state, spec, "seed", "claude-root")
+      const resumedPlanned = crank(
+        seeded.state,
+        spec,
+        {
+          type: "node-done",
+          nodeId: "seed",
+          token: token(seeded.state, "seed"),
+          outcome: "completed",
+          hold: false,
+          result: "seeded",
+          error: null,
+          providerSessionId: "claude-root"
+        },
+        context("resumed")
+      )
+      const running = observe(resumedPlanned.state, spec, "resumed", "claude-resumed")
+      const completion = {
+        type: "node-done" as const,
+        nodeId: "resumed",
+        token: token(running.state, "resumed"),
+        outcome: "completed" as const,
+        hold: false,
+        result: "recovered",
+        error: null,
+        providerSessionId: "claude-resumed"
+      }
+
+      expect(() =>
+        crank(
+          {
+            ...running.state,
+            sessions: {
+              root: {
+                alias: "root",
+                provider: "codex",
+                sessionId: "codex-root",
+                sourceNodeId: "seed"
+              }
+            }
+          },
+          spec,
+          completion
+        )
+      ).toThrow('Node "resumed" cannot resolve its Claude session lineage.')
+
+      const recovered = crank({ ...running.state, sessions: {} }, spec, completion)
+      expect(recovered.state.status).toBe("completed")
+      expect(recovered.state.sessions.continued).toEqual({
+        alias: "continued",
+        provider: "claude",
+        sessionId: "claude-resumed",
+        sourceNodeId: "resumed"
+      })
+    }
+  })
+
   test("treats reordered object keys as the same agent-output verdict", () => {
     const review = agent("review", {
       output: { format: "json", schema: { type: "object" } }
@@ -1693,7 +1792,11 @@ describe("pure crank transition", () => {
     const approved = crank(
       held.state,
       spec,
-      { type: "approve-gate", nodeId: "review--r1", digest: "digest:review--r1" },
+      {
+        type: "approve-gate",
+        nodeId: "review--r1",
+        digest: held.state.gates["review--r1"]?.digest as string
+      },
       context("review--r1")
     )
     const observed = observe(approved.state, spec, "review--r1")
@@ -1717,7 +1820,7 @@ describe("pure crank transition", () => {
       context("review--r2")
     )
     expect(released.state.nodes["review--r2"]?.status).toBe("awaiting-approval")
-    expect(released.state.gates["review--r2"]?.digest).toBe("digest:review--r2")
+    expect(released.state.gates["review--r2"]?.digest).toBe(digestGate("rendered:review--r2"))
   })
 
   test("keeps an atomic repeat hold instance-scoped", () => {
@@ -1799,17 +1902,29 @@ describe("pure crank transition", () => {
     expect(stopped.state.nodes.after?.status).toBe("cancelled")
   })
 
-  test("proposes, digest-checks, approves, and discards safe remaining-plan revisions", () => {
+  test("proposes, digest-checks, approves, and discards safe remaining-plan revisions", async () => {
     const base = workflow([command("first"), command("old", { needs: ["first"] })])
     const running = start(base, context("first"))
     const held = crank(running.state, base, { type: "hold", nodeId: "old" })
     const revised = workflow([command("first"), command("new", { needs: ["first"] })], {
       objective: "Revised objective"
     })
+    const provenance = await workflowProvenance(revised)
+    expect(() =>
+      crank(held.state, base, {
+        type: "propose-revision",
+        provenance,
+        workflow: revised,
+        digest: "mismatched-revision-digest",
+        summary: ["old -> new"]
+      })
+    ).toThrow("Revision proposal digest mismatch")
+    expect(held.state.pendingRevision).toBeNull()
     const proposed = crank(held.state, base, {
       type: "propose-revision",
+      provenance,
       workflow: revised,
-      digest: "revision-digest",
+      digest: digestWorkflow(revised),
       summary: ["old -> new"]
     })
     expect(() =>
@@ -1817,7 +1932,7 @@ describe("pure crank transition", () => {
     ).toThrow("digest mismatch")
     const approved = crank(proposed.state, base, {
       type: "approve-revision",
-      digest: "revision-digest"
+      digest: proposed.state.pendingRevision?.digest as string
     })
     expect(approved.workflow).toEqual(revised)
     expect(approved.state.nodes.old).toBeUndefined()
@@ -1825,21 +1940,206 @@ describe("pure crank transition", () => {
     expect(approved.state.nodes.new?.status).toBe("pending")
     expect(approved.state.objective).toBe("Revised objective")
     expect(approved.events.find((event) => event.type === "revision.approved")?.data).toEqual({
-      digest: "revision-digest",
-      workflow: revised
+      digest: digestWorkflow(revised),
+      workflow: revised,
+      provenance
     })
 
     const reproposed = crank(approved.state, revised, {
       type: "propose-revision",
+      provenance: await workflowProvenance(revised),
       workflow: revised,
-      digest: "discard-me",
+      digest: digestWorkflow(revised),
       summary: []
     })
     const discarded = crank(reproposed.state, revised, { type: "discard-revision" })
     expect(discarded.state.pendingRevision).toBeNull()
   })
 
-  test("accepts a revision whose repeat contract only reorders object keys", () => {
+  test("rejects invalid final-IR provenance before proposal persistence and approval", async () => {
+    const base = workflow([command("first")])
+    const revised = workflow([command("first"), command("next", { needs: ["first"] })])
+    const running = start(base, context("first"))
+    const invalid = await workflowProvenance(revised)
+    const missingLeaf = { ...invalid, origins: { ...invalid.origins } }
+    delete missingLeaf.origins["/nodes/1/title"]
+    expect(() =>
+      crank(running.state, base, {
+        type: "propose-revision",
+        provenance: missingLeaf,
+        workflow: revised,
+        digest: digestWorkflow(revised),
+        summary: []
+      })
+    ).toThrow("Missing final-IR origin /nodes/1/title")
+    expect(running.state.pendingRevision).toBeNull()
+
+    const exactInference = await workflowProvenance(revised)
+    const nameOrigin = exactInference.origins["/name"]
+    if (nameOrigin === undefined) {
+      throw new Error("missing workflow name origin")
+    }
+    const wrongFile = {
+      ...exactInference,
+      origins: {
+        ...exactInference.origins,
+        "/name": {
+          ...nameOrigin,
+          location: { ...nameOrigin.location, file: "/tmp/unrelated.yaml" }
+        }
+      }
+    }
+    expect(() =>
+      crank(running.state, base, {
+        type: "propose-revision",
+        provenance: wrongFile,
+        workflow: revised,
+        digest: digestWorkflow(revised),
+        summary: []
+      })
+    ).toThrow("does not match provenance source")
+
+    for (const location of [
+      { file: exactInference.source, line: 0, column: 1, endLine: 1, endColumn: 1 },
+      { file: exactInference.source, line: 1, column: null, endLine: 1, endColumn: 1 },
+      { file: exactInference.source, line: 2, column: 1, endLine: 1, endColumn: 9 },
+      { file: exactInference.source, line: 1, column: 9, endLine: 1, endColumn: 8 }
+    ]) {
+      const impossibleLocation = {
+        ...exactInference,
+        origins: {
+          ...exactInference.origins,
+          "/name": { ...nameOrigin, location }
+        }
+      } as typeof exactInference
+      expect(() =>
+        crank(running.state, base, {
+          type: "propose-revision",
+          provenance: impossibleLocation,
+          workflow: revised,
+          digest: digestWorkflow(revised),
+          summary: []
+        })
+      ).toThrow(/all null or all positive integers|range start must not follow its end/)
+    }
+
+    const typeOrigin = exactInference.origins["/nodes/1/type"]
+    if (typeOrigin === undefined) {
+      throw new Error("missing normalized type origin")
+    }
+    const impossibleExplicit = {
+      ...exactInference,
+      origins: {
+        ...exactInference.origins,
+        "/nodes/1/type": {
+          kind: "explicit" as const,
+          sourcePath: "/nodes/1/type",
+          location: typeOrigin.location
+        }
+      }
+    }
+    expect(() =>
+      crank(running.state, base, {
+        type: "propose-revision",
+        provenance: impossibleExplicit,
+        workflow: revised,
+        digest: digestWorkflow(revised),
+        summary: []
+      })
+    ).toThrow("exists only in normalized IR")
+
+    const needOrigin = exactInference.origins["/nodes/1/needs/0"]
+    if (needOrigin === undefined) {
+      throw new Error("missing dependency origin")
+    }
+    const invalidInference = {
+      ...exactInference,
+      origins: {
+        ...exactInference.origins,
+        "/nodes/1/needs/0": {
+          kind: "inferred" as const,
+          reason: "when" as const,
+          sourcePath: "/nodes/1/when/node",
+          location: needOrigin.location
+        }
+      }
+    }
+    expect(() =>
+      crank(running.state, base, {
+        type: "propose-revision",
+        provenance: invalidInference,
+        workflow: revised,
+        digest: digestWorkflow(revised),
+        summary: []
+      })
+    ).toThrow("when source does not identify the matching condition node")
+    expect(running.state.pendingRevision).toBeNull()
+
+    const proposed = crank(running.state, base, {
+      type: "propose-revision",
+      provenance: await workflowProvenance(revised),
+      workflow: revised,
+      digest: digestWorkflow(revised),
+      summary: []
+    })
+    const persistedInvalid = {
+      ...proposed.state,
+      pendingRevision: {
+        ...proposed.state.pendingRevision!,
+        provenance: missingLeaf
+      }
+    }
+    expect(() =>
+      crank(persistedInvalid, base, {
+        type: "approve-revision",
+        digest: persistedInvalid.pendingRevision.digest
+      })
+    ).toThrow("Missing final-IR origin /nodes/1/title")
+
+    const persistedInvalidInference = {
+      ...proposed.state,
+      pendingRevision: {
+        ...proposed.state.pendingRevision!,
+        provenance: invalidInference
+      }
+    }
+    expect(() =>
+      crank(persistedInvalidInference, base, {
+        type: "approve-revision",
+        digest: persistedInvalidInference.pendingRevision.digest
+      })
+    ).toThrow("when source does not identify the matching condition node")
+
+    const persistedWrongFile = {
+      ...proposed.state,
+      pendingRevision: {
+        ...proposed.state.pendingRevision!,
+        provenance: wrongFile
+      }
+    }
+    expect(() =>
+      crank(persistedWrongFile, base, {
+        type: "approve-revision",
+        digest: persistedWrongFile.pendingRevision.digest
+      })
+    ).toThrow("does not match provenance source")
+
+    const persistedImpossible = {
+      ...proposed.state,
+      pendingRevision: {
+        ...proposed.state.pendingRevision!,
+        provenance: impossibleExplicit
+      }
+    }
+    expect(() =>
+      crank(persistedImpossible, base, {
+        type: "approve-revision",
+        digest: persistedImpossible.pendingRevision.digest
+      })
+    ).toThrow("exists only in normalized IR")
+  })
+
+  test("accepts a revision whose repeat contract only reorders object keys", async () => {
     const review = agent("review", {
       output: { format: "json", schema: { type: "object" } }
     })
@@ -1876,20 +2176,21 @@ describe("pure crank transition", () => {
     const running = start(base, context("review--r1"))
     const proposed = crank(running.state, base, {
       type: "propose-revision",
+      provenance: await workflowProvenance(revised),
       workflow: revised,
-      digest: "revision-digest",
+      digest: digestWorkflow(revised),
       summary: []
     })
     const approved = crank(proposed.state, base, {
       type: "approve-revision",
-      digest: "revision-digest"
+      digest: proposed.state.pendingRevision?.digest as string
     })
 
     expect(approved.workflow).toEqual(revised)
     expect(approved.state.pendingRevision).toBeNull()
   })
 
-  test("holds old-plan scheduling while a revision decision is pending", () => {
+  test("holds old-plan scheduling while a revision decision is pending", async () => {
     const base = workflow([command("first"), command("after", { needs: ["first"] })], {
       concurrency: 1
     })
@@ -1904,8 +2205,9 @@ describe("pure crank transition", () => {
     )
     const proposed = crank(started.state, base, {
       type: "propose-revision",
+      provenance: await workflowProvenance(revised),
       workflow: revised,
-      digest: "revision-digest",
+      digest: digestWorkflow(revised),
       summary: ["+ node barrier", "~ node after"]
     })
     const completed = crank(proposed.state, base, {
@@ -1921,19 +2223,19 @@ describe("pure crank transition", () => {
 
     const reconciled = reconcileApprovedRevisionState(completed.state, {
       type: "approve-revision",
-      digest: "revision-digest"
+      digest: proposed.state.pendingRevision?.digest as string
     })
     const approved = crank(
       reconciled,
       base,
-      { type: "approve-revision", digest: "revision-digest" },
+      { type: "approve-revision", digest: proposed.state.pendingRevision?.digest as string },
       context("barrier")
     )
     expect(approved.state.nodes.barrier?.status).toBe("running")
     expect(approved.state.nodes.after?.status).toBe("pending")
   })
 
-  test("reconciles changed dependencies and inserted nodes before revision scheduling", () => {
+  test("reconciles changed dependencies and inserted nodes before revision scheduling", async () => {
     const base = workflow([
       command("board-ui-fix"),
       command("quality-fix", { needs: ["board-ui-fix"] }),
@@ -1953,13 +2255,14 @@ describe("pure crank transition", () => {
     ])
     const proposed = crank(running.state, base, {
       type: "propose-revision",
+      provenance: await workflowProvenance(revised),
       workflow: revised,
-      digest: "revision-digest",
+      digest: digestWorkflow(revised),
       summary: ["insert completion and live fixes"]
     })
     const reconciled = reconcileApprovedRevisionState(proposed.state, {
       type: "approve-revision",
-      digest: "revision-digest"
+      digest: proposed.state.pendingRevision?.digest as string
     })
 
     expect(Object.keys(reconciled.nodes)).toEqual(revised.nodes.map((node) => node.id))
@@ -1973,7 +2276,7 @@ describe("pure crank transition", () => {
 
     const approved = crank(reconciled, base, {
       type: "approve-revision",
-      digest: "revision-digest"
+      digest: proposed.state.pendingRevision?.digest as string
     })
     expect(approved.state.nodes["completion-control-fix"]?.status).toBe("pending")
     expect(approved.state.nodes["board-live-placement-fix"]?.status).toBe("pending")
@@ -1991,20 +2294,24 @@ describe("pure crank transition", () => {
     ])
     const unsafeProposal = crank(running.state, base, {
       type: "propose-revision",
+      provenance: await workflowProvenance(unsafe),
       workflow: unsafe,
-      digest: "unsafe-digest",
+      digest: digestWorkflow(unsafe),
       summary: []
     })
     const unsafeState = reconcileApprovedRevisionState(unsafeProposal.state, {
       type: "approve-revision",
-      digest: "unsafe-digest"
+      digest: unsafeProposal.state.pendingRevision?.digest as string
     })
     expect(() =>
-      crank(unsafeState, base, { type: "approve-revision", digest: "unsafe-digest" })
+      crank(unsafeState, base, {
+        type: "approve-revision",
+        digest: unsafeProposal.state.pendingRevision?.digest as string
+      })
     ).toThrow('changes already-started node template "board-ui-fix"')
   })
 
-  test("rebuilds an unstarted repeat instance from the approved revision", () => {
+  test("rebuilds an unstarted repeat instance from the approved revision", async () => {
     const originalMember = command("review", {
       title: "Old repeat review",
       needs: [],
@@ -2028,19 +2335,20 @@ describe("pure crank transition", () => {
       title: "Revised repeat review",
       needs: [],
       gate: "none",
-      argv: ["true", "--revised"]
+      argv: ["/usr/bin/true", "--revised"]
     })
     const revised = workflow([revisedMember], { repeats: base.repeats })
     const pending: RunState = {
       ...started.state,
       pendingRevision: {
+        provenance: await workflowProvenance(revised),
         workflow: revised,
-        digest: "revision-digest",
+        digest: digestWorkflow(revised),
         summary: ["~ node review"],
         createdAt: NOW
       }
     }
-    const event = { type: "approve-revision", digest: "revision-digest" } as const
+    const event = { type: "approve-revision", digest: digestWorkflow(revised) } as const
     const reconciled = reconcileApprovedRevisionState(pending, event)
     expect(reconciled.nodes["review--r1"]).toMatchObject({
       id: "review--r1",
@@ -2056,7 +2364,48 @@ describe("pure crank transition", () => {
     expect(approved.workflow).toEqual(revised)
   })
 
-  test("preserves a zero-attempt skipped node as immutable revision history", () => {
+  test("drops deleted zero-attempt gates and reopens retained revised gates", async () => {
+    const removed = command("removed", { gate: "approval" })
+    const retained = command("retained", { gate: "approval" })
+    const base = workflow([removed, retained], { concurrency: 2 })
+    const started = start(base, context("removed", "retained"))
+    expect(started.state.nodes.removed?.status).toBe("awaiting-approval")
+    expect(started.state.nodes.retained?.status).toBe("awaiting-approval")
+    expect(started.state.nodes.removed?.attempts).toEqual([])
+    expect(started.state.nodes.retained?.attempts).toEqual([])
+    expect(Object.keys(started.state.gates).toSorted()).toEqual(["removed", "retained"])
+
+    const revised = workflow([{ ...retained, title: "Retained after revision" }])
+    const proposed = crank(started.state, base, {
+      type: "propose-revision",
+      provenance: await workflowProvenance(revised),
+      workflow: revised,
+      digest: digestWorkflow(revised),
+      summary: ["- removed", "~ retained"]
+    })
+    const approved = crank(
+      proposed.state,
+      base,
+      {
+        type: "approve-revision",
+        digest: digestWorkflow(revised)
+      },
+      context("retained")
+    )
+    expect(approved.state.nodes.removed).toBeUndefined()
+    expect(approved.state.gates.removed).toBeUndefined()
+    expect(approved.state.nodes.retained).toMatchObject({
+      title: "Retained after revision",
+      status: "awaiting-approval",
+      attempts: []
+    })
+    expect(approved.state.gates.retained).toMatchObject({
+      nodeId: "retained",
+      approvedAt: null
+    })
+  })
+
+  test("preserves a zero-attempt skipped node as immutable revision history", async () => {
     const decision = agent("decision", {
       output: {
         format: "json",
@@ -2095,14 +2444,15 @@ describe("pure crank transition", () => {
     const revised = workflow([decision, { ...optional, title: "changed after skip" }, gate])
     const proposed = crank(skipped.state, base, {
       type: "propose-revision",
+      provenance: await workflowProvenance(revised),
       workflow: revised,
-      digest: "revision-digest",
+      digest: digestWorkflow(revised),
       summary: ["change skipped node"]
     })
     expect(() =>
       crank(proposed.state, base, {
         type: "approve-revision",
-        digest: "revision-digest"
+        digest: proposed.state.pendingRevision?.digest as string
       })
     ).toThrow('Revision changes already-started node template "optional"')
   })

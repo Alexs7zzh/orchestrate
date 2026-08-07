@@ -1,7 +1,16 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test"
 import { Option } from "effect"
-import { access, chmod, mkdir, mkdtemp, readdir, realpath, rm, symlink } from "node:fs/promises"
-import os from "node:os"
+import {
+  access,
+  chmod,
+  mkdir,
+  mkdtemp,
+  readdir,
+  realpath,
+  rm,
+  stat,
+  symlink
+} from "node:fs/promises"
 import path from "node:path"
 
 import type {
@@ -14,6 +23,7 @@ import type {
   WorkflowSpec
 } from "../src/types.js"
 
+import { submitNodeDone } from "../src/completion-submission.js"
 import {
   decodeHerdrErrorResponse,
   decodeHerdrPaneCurrentResponse
@@ -27,6 +37,7 @@ import {
   HerdrSurface,
   injectAfterAgentPromptForTests,
   injectBeforeProviderBoundaryForTests,
+  injectProviderAncestorInspectionForTests,
   removeWorkflowWorktrees,
   setAgentSessionTimeoutForTests
 } from "../src/herdr-surface.js"
@@ -35,11 +46,20 @@ import { prepareNode } from "../src/prompt.js"
 import {
   completionSubmissionPath,
   persistNewRun,
+  providerSessionsRoot,
   runDirectory as stateRunDirectory,
-  runtimeBuild
+  runtimeBuild,
+  submissionDirectory as nodeSubmissionDirectory,
+  submissionControlDirectory,
+  submissionInboxDirectory,
+  submissionOutboxDirectory,
+  submissionResultPath,
+  submissionScratchDirectory,
+  submissionRunDirectory,
+  submissionsRoot
 } from "../src/state.js"
 import { createInitialRunState, transition } from "../src/transition.js"
-import { validateWorkflow } from "../src/validation.js"
+import { injectPathInspectionForTests, validateWorkflow } from "../src/validation.js"
 
 let temporaryRoot = ""
 let shimDirectory = ""
@@ -47,6 +67,10 @@ let logPath = ""
 let profileCapturePath = ""
 let originalPath = ""
 let originalCodexHome: string | undefined
+let originalClaudeConfigDirectory: string | undefined
+let originalHome: string | undefined
+
+const ATTEMPT_TOKEN = "1".repeat(64)
 
 function workspace() {
   return {
@@ -150,14 +174,14 @@ function runtimeNode(id: string): NodeRunState {
       {
         attempt: 1,
         status: "planned",
-        token: "token-1",
+        token: ATTEMPT_TOKEN,
         pane: null,
         providerSessionId: null,
         startedAt: null,
         finishedAt: null,
         exitCode: null,
         error: null,
-        resultPath: path.join(temporaryRoot, "submission", id, "token-1", "result.txt"),
+        resultPath: submissionResultPath("20260802120000-1234abcd", id, ATTEMPT_TOKEN),
         outputPath: path.join(temporaryRoot, "output.log")
       }
     ],
@@ -216,7 +240,7 @@ function intent(id: string): SpawnIntent {
     id: `intent-${id}`,
     nodeId: id,
     attempt: 1,
-    token: "token-1",
+    token: ATTEMPT_TOKEN,
     status: "planned",
     createdAt: "2026-08-02T12:00:00.000Z"
   }
@@ -497,36 +521,66 @@ esac
 }
 
 beforeEach(async () => {
-  temporaryRoot = await mkdtemp(path.join(os.tmpdir(), "orchestrate-herdr-surface-"))
-  shimDirectory = path.join(temporaryRoot, "bin")
+  const testTemporaryRoot = path.join(import.meta.dir, ".tmp")
+  await mkdir(testTemporaryRoot, { recursive: true })
+  temporaryRoot = await mkdtemp(path.join(testTemporaryRoot, "orchestrate-herdr-surface-"))
+  shimDirectory = `${temporaryRoot}-bin`
   logPath = path.join(temporaryRoot, "herdr.log")
   profileCapturePath = path.join(temporaryRoot, "codex-profile.toml")
   await mkdir(shimDirectory)
   originalPath = process.env.PATH ?? ""
   process.env.PATH = `${shimDirectory}:${originalPath}`
-  process.env.ORCHESTRATE_BIN = "/tmp/orchestrate"
+  process.env.ORCHESTRATE_BIN = path.join(shimDirectory, "orchestrate")
   process.env.ORCHESTRATE_STATE_DIR = `${temporaryRoot}-state`
+  originalHome = process.env.HOME
+  process.env.HOME = `${temporaryRoot}-home`
   originalCodexHome = process.env.CODEX_HOME
-  process.env.CODEX_HOME = path.join(temporaryRoot, "codex-home")
+  process.env.CODEX_HOME = `${temporaryRoot}-codex-home`
+  originalClaudeConfigDirectory = process.env.CLAUDE_CONFIG_DIR
+  process.env.CLAUDE_CONFIG_DIR = `${temporaryRoot}-claude-config`
   await writeShim()
+  for (const provider of ["codex", "claude", "orchestrate"] as const) {
+    const executable = path.join(shimDirectory, provider)
+    await Bun.write(executable, "#!/bin/sh\nexit 0\n", { createPath: false })
+    await chmod(executable, 0o755)
+  }
 })
 
 afterEach(async () => {
   injectAfterAgentPromptForTests(null)
   injectBeforeProviderBoundaryForTests(null)
+  injectProviderAncestorInspectionForTests(null)
+  injectPathInspectionForTests(null)
   setAgentSessionTimeoutForTests(null)
   process.env.PATH = originalPath
   delete process.env.ORCHESTRATE_BIN
+  await rm(submissionsRoot(), { recursive: true, force: true })
+  await rm(providerSessionsRoot(), { recursive: true, force: true })
   await rm(process.env.ORCHESTRATE_STATE_DIR as string, {
     recursive: true,
     force: true
   })
   delete process.env.ORCHESTRATE_STATE_DIR
+  if (originalHome === undefined) {
+    delete process.env.HOME
+  } else {
+    process.env.HOME = originalHome
+  }
   if (originalCodexHome === undefined) {
     delete process.env.CODEX_HOME
   } else {
     process.env.CODEX_HOME = originalCodexHome
   }
+  if (originalClaudeConfigDirectory === undefined) {
+    delete process.env.CLAUDE_CONFIG_DIR
+  } else {
+    process.env.CLAUDE_CONFIG_DIR = originalClaudeConfigDirectory
+  }
+  await rm(`${temporaryRoot}-home`, { recursive: true, force: true })
+  await rm(`${temporaryRoot}-codex-home`, { recursive: true, force: true })
+  await rm(`${temporaryRoot}-claude-config`, { recursive: true, force: true })
+  await rm(`${temporaryRoot}-bin`, { recursive: true, force: true })
+  await rm(`${temporaryRoot}-canonical-provider-control`, { recursive: true, force: true })
   await rm(temporaryRoot, { recursive: true, force: true })
 })
 
@@ -757,7 +811,9 @@ describe("herdr surface", () => {
     expect(log).toContain("tab rename t1 Board")
     expect(log).not.toContain("tab create")
     expect(log).toContain("pane rename p1 surface-test: board")
-    expect(log).toContain("pane run p1 /tmp/orchestrate board 20260802120000-1234abcd")
+    expect(log).toContain(
+      `pane run p1 ${process.env.ORCHESTRATE_BIN} board 20260802120000-1234abcd`
+    )
   })
 
   test("falls back to the run workspace when the launching pane vanishes before board split", async () => {
@@ -778,7 +834,9 @@ describe("herdr surface", () => {
     const log = await Bun.file(logPath).text()
     expect(log).toContain("pane split --pane origin-pane --direction right")
     expect(log).toContain("workspace create")
-    expect(log).toContain("pane run p1 /tmp/orchestrate board 20260802120000-1234abcd")
+    expect(log).toContain(
+      `pane run p1 ${process.env.ORCHESTRATE_BIN} board 20260802120000-1234abcd`
+    )
   })
 
   test("moves a current-workspace board fallback into the run workspace when its new pane vanishes", async () => {
@@ -795,7 +853,9 @@ describe("herdr surface", () => {
     const log = await Bun.file(logPath).text()
     expect(log).toContain("tab create --workspace origin-workspace")
     expect(log).toContain("workspace create")
-    expect(log).toContain("pane run p1 /tmp/orchestrate board 20260802120000-1234abcd")
+    expect(log).toContain(
+      `pane run p1 ${process.env.ORCHESTRATE_BIN} board 20260802120000-1234abcd`
+    )
   })
 
   test("distinguishes explicit pane absence from herdr transport failure", async () => {
@@ -828,17 +888,22 @@ describe("herdr surface", () => {
       providerSessionId: "session-1"
     })
     expect(log).toContain("agent start o-review-7f87e2e85f26e92d --kind codex --pane p1")
-    const submissionDirectory = path.dirname(state(node.id).nodes[node.id]!.attempts[0]!.resultPath)
+    const submissionDirectory = nodeSubmissionDirectory(state(node.id).id, node.id, ATTEMPT_TOKEN)
+    const controlDirectory = submissionControlDirectory(state(node.id).id, node.id, ATTEMPT_TOKEN)
+    const outboxDirectory = submissionOutboxDirectory(state(node.id).id, node.id, ATTEMPT_TOKEN)
     const runDirectory = path.join(process.env.ORCHESTRATE_STATE_DIR!, "runs", state(node.id).id)
     const profileDocument = await Bun.file(profileCapturePath).text()
     expect(log).toContain("--ask-for-approval never")
-    expect(log).toContain("--profile orchestrate-control-")
+    expect(log).toContain("--disable multi_agent")
+    expect(log).toContain("--profile orchestrate-attempt-")
     expect(log).not.toContain("default_permissions")
-    expect(profileDocument).toContain('default_permissions="orchestrate-control-')
-    expect(profileDocument).toContain('[permissions."orchestrate-control-')
+    expect(profileDocument).toContain('default_permissions="orchestrate-attempt-')
+    expect(profileDocument).toContain('[permissions."orchestrate-attempt-')
     expect(profileDocument).toContain('extends=":read-only"')
     expect(profileDocument).toContain(".filesystem]")
-    expect(profileDocument).toContain(`${JSON.stringify(submissionDirectory)}="write"`)
+    expect(profileDocument).toContain(`${JSON.stringify(controlDirectory)}="read"`)
+    expect(profileDocument).toContain(`${JSON.stringify(outboxDirectory)}="write"`)
+    expect(profileDocument).not.toContain(`${JSON.stringify(submissionDirectory)}="write"`)
     expect(profileDocument).not.toContain(`filesystem={"${runDirectory}"="write"}`)
     expect(await readdir(process.env.CODEX_HOME!)).toHaveLength(1)
     await surface.closePane(observation.pane.paneId)
@@ -847,8 +912,86 @@ describe("herdr surface", () => {
     expect(log).not.toContain(`--add-dir ${process.env.ORCHESTRATE_STATE_DIR}`)
     expect(log).toContain("agent get p1")
     expect(log).toContain("agent prompt p1 Rendered prompt and node-done contract.")
+    expect(log).toContain(
+      `--env TMPDIR=${submissionScratchDirectory(state(node.id).id, node.id, ATTEMPT_TOKEN)}`
+    )
+    expect(log).toContain(
+      `--env TMP=${submissionScratchDirectory(state(node.id).id, node.id, ATTEMPT_TOKEN)}`
+    )
+    expect(log).toContain(
+      `--env TEMP=${submissionScratchDirectory(state(node.id).id, node.id, ATTEMPT_TOKEN)}`
+    )
+    expect(log).not.toContain("/ambient/")
+    const scratch = submissionScratchDirectory(state(node.id).id, node.id, ATTEMPT_TOKEN)
+    expect((await stat(scratch)).mode & 0o777).toBe(0o700)
+    await Bun.write(path.join(scratch, "intermediate.txt"), "usable\n")
     expect(log).toContain("--until working --until done --until blocked")
     expect(log.lastIndexOf("agent get p1")).toBeGreaterThan(log.indexOf("agent prompt p1"))
+  })
+
+  test("binds both providers to launcher-resolved executables and matching control roots", async () => {
+    for (const provider of ["codex", "claude"] as const) {
+      const node = provider === "codex" ? agent() : claudeAgent()
+      const runState = state(node.id)
+      await new HerdrSurface().spawn({
+        workflow: workflow(node),
+        state: runState,
+        intent: intent(node.id),
+        prompt: `Launch ${provider} with launcher authority.`,
+        placement: placement(node.id)
+      })
+      const launcherDirectory = path.join(
+        submissionControlDirectory(runState.id, node.id, ATTEMPT_TOKEN),
+        "provider-launcher"
+      )
+      const executable = await realpath(path.join(shimDirectory, provider))
+      expect(await Bun.file(path.join(launcherDirectory, provider)).text()).toContain(executable)
+      const log = await Bun.file(logPath).text()
+      expect(log).toContain(`--env PATH=${launcherDirectory}:`)
+      expect(log).toContain(`--env HOME=${process.env.HOME}`)
+      expect(log).toContain(
+        provider === "codex"
+          ? `--env CODEX_HOME=${process.env.CODEX_HOME}`
+          : `--env CLAUDE_CONFIG_DIR=${process.env.CLAUDE_CONFIG_DIR}`
+      )
+      await rm(nodeSubmissionDirectory(runState.id, node.id, ATTEMPT_TOKEN), {
+        recursive: true,
+        force: true
+      })
+    }
+  })
+
+  test("rejects persisted control environment for both providers before Herdr launch", async () => {
+    const codex = agent()
+    const claude = claudeAgent()
+    for (const node of [
+      {
+        ...codex,
+        permissions: { ...codex.permissions, env: { PATH: "/authored/bin" } }
+      },
+      {
+        ...claude,
+        permissions: {
+          ...claude.permissions,
+          inheritEnv: ["CLAUDE_CONFIG_DIR"]
+        }
+      }
+    ]) {
+      await expect(
+        new HerdrSurface().spawn({
+          workflow: workflow(node),
+          state: state(node.id),
+          intent: intent(node.id),
+          prompt: "Do not trust persisted control environment.",
+          placement: placement(node.id)
+        })
+      ).rejects.toThrow("persisted launcher-owned environment variable")
+    }
+    expect(
+      await Bun.file(logPath)
+        .text()
+        .catch(() => "")
+    ).not.toContain("agent start")
   })
 
   test("does not require a provider session id when no lineage alias is saved", async () => {
@@ -984,20 +1127,29 @@ describe("herdr surface", () => {
       placement: placement(node.id)
     })
     const log = await Bun.file(logPath).text()
-    const submissionDirectory = path.dirname(runState.nodes[node.id]!.attempts[0]!.resultPath)
+    const submissionDirectory = nodeSubmissionDirectory(runState.id, node.id, ATTEMPT_TOKEN)
+    const outboxDirectory = submissionOutboxDirectory(runState.id, node.id, ATTEMPT_TOKEN)
+    const scratchDirectory = submissionScratchDirectory(runState.id, node.id, ATTEMPT_TOKEN)
     const authoritativeRunDirectory = path.join(
       process.env.ORCHESTRATE_STATE_DIR!,
       "runs",
       runState.id
     )
     const canonicalTemporaryRoot = await realpath(temporaryRoot)
-    const canonicalAllowedRoot = path.join(canonicalTemporaryRoot, "allowed")
     const canonicalSubmissionsRoot = `${canonicalTemporaryRoot}-state-submissions`
+    const canonicalAllowedRoot = path.join(canonicalTemporaryRoot, "allowed")
     const profileDocument = await Bun.file(profileCapturePath).text()
-    expect(log).toContain("--ask-for-approval never --profile orchestrate-control-")
+    expect(log).toContain("--ask-for-approval never --profile orchestrate-attempt-")
+    expect(log).toContain(`--env TMPDIR=${scratchDirectory}`)
+    expect(log).toContain(`--env TMP=${scratchDirectory}`)
+    expect(log).toContain(`--env TEMP=${scratchDirectory}`)
+    const scratch = scratchDirectory
+    expect((await stat(scratch)).mode & 0o777).toBe(0o700)
+    await Bun.write(path.join(scratch, "intermediate.txt"), "usable\n")
     expect(profileDocument).toContain('extends=":read-only"')
     expect(profileDocument).toContain(`${JSON.stringify(canonicalAllowedRoot)}="write"`)
-    expect(profileDocument).toContain(`${JSON.stringify(submissionDirectory)}="write"`)
+    expect(profileDocument).toContain(`${JSON.stringify(outboxDirectory)}="write"`)
+    expect(profileDocument).not.toContain(`${JSON.stringify(submissionDirectory)}="write"`)
     expect(profileDocument).toContain(`${JSON.stringify(canonicalSubmissionsRoot)}="deny"`)
     expect(profileDocument).not.toContain('extends=":workspace"')
     expect(log).not.toContain("--sandbox workspace-write")
@@ -1044,6 +1196,97 @@ describe("herdr surface", () => {
         .text()
         .catch(() => "")
     ).not.toContain("tab create")
+  })
+
+  test("canonicalizes symlinked provider control roots and rejects root and nested write authority at spawn", async () => {
+    const canonicalControlParent = `${temporaryRoot}-canonical-provider-control`
+    const lexicalControlParent = path.join(temporaryRoot, "linked-provider-control")
+    const canonicalCodexHome = path.join(canonicalControlParent, "codex")
+    const canonicalClaudeConfig = path.join(canonicalControlParent, "claude")
+    await mkdir(canonicalCodexHome, { recursive: true })
+    await mkdir(canonicalClaudeConfig)
+    await symlink(canonicalControlParent, lexicalControlParent)
+    process.env.CODEX_HOME = path.join(lexicalControlParent, "codex")
+    process.env.CLAUDE_CONFIG_DIR = path.join(lexicalControlParent, "claude")
+
+    const codex = {
+      ...agent(),
+      id: "codex-control-root",
+      workspace: { ...workspace(), path: canonicalControlParent, writes: ["source/**"] },
+      permissions: {
+        ...agent().permissions,
+        execution: { sandbox: "workspace-write" as const }
+      }
+    }
+    const claude = {
+      ...claudeAgent(),
+      id: "claude-control-write",
+      workspace: {
+        ...workspace(),
+        writes: [path.join(canonicalClaudeConfig, "projects", "**")]
+      }
+    }
+    for (const node of [codex, claude]) {
+      await expect(
+        new HerdrSurface().spawn({
+          workflow: workflow(node),
+          state: state(node.id),
+          intent: intent(node.id),
+          prompt: "Do not enter provider control authority.",
+          placement: placement(node.id)
+        })
+      ).rejects.toThrow("overlaps Orchestrate-owned authority")
+    }
+    expect(
+      await Bun.file(logPath)
+        .text()
+        .catch(() => "")
+    ).toBe("")
+  })
+
+  test("rejects a sequential retry provider executable inside another provider's write prefix before Herdr launch", async () => {
+    const allowed = path.join(temporaryRoot, "allowed")
+    const fakeClaude = path.join(allowed, "claude")
+    await mkdir(allowed)
+    await Bun.write(fakeClaude, "#!/bin/sh\nexit 0\n", { createPath: false })
+    await chmod(fakeClaude, 0o755)
+    await rm(path.join(shimDirectory, "claude"))
+    await symlink(fakeClaude, path.join(shimDirectory, "claude"))
+
+    const writer = {
+      ...agent(),
+      id: "writer",
+      workspace: { ...workspace(), writes: ["allowed/**"] },
+      permissions: {
+        ...agent().permissions,
+        execution: { sandbox: "workspace-write" as const }
+      }
+    }
+    const later = {
+      ...claudeAgent(),
+      id: "later-claude",
+      needs: [writer.id],
+      retry: { maxAttempts: 3 }
+    }
+    const sequentialWorkflow = {
+      ...workflow(writer),
+      nodes: [writer, later]
+    }
+
+    await expect(
+      new HerdrSurface().spawn({
+        workflow: sequentialWorkflow,
+        state: state(writer.id),
+        intent: intent(writer.id),
+        prompt: "Do not launch through mutable provider authority.",
+        placement: placement(writer.id)
+      })
+    ).rejects.toThrow(`overlaps claude provider claude executable "${await realpath(fakeClaude)}"`)
+    expect(
+      await Bun.file(logPath)
+        .text()
+        .catch(() => "")
+    ).not.toContain("agent start")
   })
 
   test("rejects direct-launch Claude mode and argument adversaries before Herdr access", async () => {
@@ -1113,7 +1356,7 @@ describe("herdr surface", () => {
       await Bun.file(logPath)
         .text()
         .catch(() => "")
-    ).toBe("")
+    ).not.toContain("agent start")
     expect(await Bun.file(path.join(protectedRoot, "state-marker")).text()).toBe("untouched\n")
   })
 
@@ -1146,7 +1389,99 @@ describe("herdr surface", () => {
     ).toBe("")
   })
 
-  test("gives Claude only the attempt submission directory and exact completion operations", async () => {
+  test("fails closed on every mutating-provider ancestor inspection error before Herdr access", async () => {
+    const canonicalRoot = await realpath(temporaryRoot)
+    const positions = [canonicalRoot, path.dirname(canonicalRoot)]
+    for (const provider of ["codex", "claude"] as const) {
+      for (const code of ["EACCES", "EPERM"] as const) {
+        for (const failedAncestor of positions) {
+          const node =
+            provider === "codex"
+              ? {
+                  ...agent(),
+                  workspace: { ...workspace(), writes: ["allowed/**"] },
+                  permissions: {
+                    ...agent().permissions,
+                    execution: { sandbox: "workspace-write" as const }
+                  }
+                }
+              : {
+                  ...claudeAgent(),
+                  workspace: { ...workspace(), writes: ["allowed/**"] }
+                }
+          injectProviderAncestorInspectionForTests((_nodeId, ancestor) => {
+            if (ancestor !== failedAncestor) {
+              return
+            }
+            throw Object.assign(new Error(`${code} while inspecting ${ancestor}`), { code })
+          })
+          await expect(
+            new HerdrSurface().spawn({
+              workflow: workflow(node),
+              state: state(node.id),
+              intent: intent(node.id),
+              prompt: "Do not launch through an uninspected ancestor.",
+              placement: placement(node.id)
+            })
+          ).rejects.toThrow(
+            `Mutating provider node "${node.id}" could not inspect root ancestor "${failedAncestor}" (${code})`
+          )
+        }
+      }
+    }
+    expect(
+      await Bun.file(logPath)
+        .text()
+        .catch(() => "")
+    ).toBe("")
+  })
+
+  test("rejects provider write-prefix inspection errors with exact context before Herdr access", async () => {
+    const candidate = path.join(await realpath(temporaryRoot), "blocked", "target")
+    for (const provider of ["codex", "claude"] as const) {
+      const node =
+        provider === "codex"
+          ? {
+              ...agent(),
+              workspace: { ...workspace(), writes: ["blocked/target/**"] },
+              permissions: {
+                ...agent().permissions,
+                execution: { sandbox: "workspace-write" as const }
+              }
+            }
+          : {
+              ...claudeAgent(),
+              workspace: { ...workspace(), writes: ["blocked/target/**"] }
+            }
+      injectPathInspectionForTests((ancestor) => {
+        if (ancestor === candidate) {
+          throw Object.assign(new Error(`ELOOP while inspecting ${ancestor}`), { code: "ELOOP" })
+        }
+      })
+      const failure = await new HerdrSurface()
+        .spawn({
+          workflow: workflow(node),
+          state: state(node.id),
+          intent: intent(node.id),
+          prompt: "Do not launch through an uncertain write prefix.",
+          placement: placement(node.id)
+        })
+        .catch((error: unknown) => error)
+      expect(failure).toBeInstanceOf(Error)
+      expect((failure as Error).message).toContain(`Node "${node.id}"`)
+      expect((failure as Error).message).toContain('"blocked/target/**"')
+      expect((failure as Error).message).toContain(`candidate "${candidate}"`)
+      expect((failure as Error).message).toContain(`ancestor "${candidate}" (ELOOP)`)
+      injectPathInspectionForTests(null)
+    }
+    expect(
+      await Bun.file(logPath)
+        .text()
+        .catch(() => "")
+    ).toBe("")
+  })
+
+  test("gives Claude sandboxed core tools, source reads, attempt scratch, and completion operations", async () => {
     const node = claudeAgent()
     const runState = state(node.id)
     await new HerdrSurface().spawn({
@@ -1157,19 +1492,38 @@ describe("herdr surface", () => {
       placement: placement(node.id)
     })
     const log = await Bun.file(logPath).text()
-    const submissionDirectory = path.dirname(runState.nodes[node.id]!.attempts[0]!.resultPath)
-    const canonicalSubmissionDirectory = await realpath(submissionDirectory)
+    const submissionDirectory = nodeSubmissionDirectory(runState.id, node.id, ATTEMPT_TOKEN)
+    const controlDirectory = await realpath(
+      submissionControlDirectory(runState.id, node.id, ATTEMPT_TOKEN)
+    )
+    const inboxDirectory = await realpath(
+      submissionInboxDirectory(runState.id, node.id, ATTEMPT_TOKEN)
+    )
+    const outboxDirectory = await realpath(
+      submissionOutboxDirectory(runState.id, node.id, ATTEMPT_TOKEN)
+    )
+    const scratchDirectory = await realpath(
+      submissionScratchDirectory(runState.id, node.id, ATTEMPT_TOKEN)
+    )
     const canonicalTemporaryRoot = await realpath(temporaryRoot)
-    const canonicalSubmissionsRoot = `${canonicalTemporaryRoot}-state-submissions`
+    const canonicalSubmissionsRoot = await realpath(submissionsRoot())
+    const canonicalProviderSessionsRoot = await realpath(providerSessionsRoot())
     const authoritativeRunDirectory = path.join(
       process.env.ORCHESTRATE_STATE_DIR!,
       "runs",
       runState.id
     )
-    const settingsPath = path.join(submissionDirectory, "claude-settings.json")
+    const settingsPath = path.join(
+      submissionControlDirectory(runState.id, node.id, ATTEMPT_TOKEN),
+      "claude-settings.json"
+    )
     const settings = await Bun.file(settingsPath).text()
+    const settingsDocument = JSON.parse(settings) as {
+      permissions: { allow: string[]; deny: string[] }
+      sandbox: { filesystem: { denyRead: string[]; denyWrite: string[] } }
+    }
     expect(log).toContain(`--safe-mode --settings ${settingsPath}`)
-    expect(log).toContain("--permission-mode dontAsk")
+    expect(log).toContain("--permission-mode bypassPermissions")
     expect(log).toContain("--tools Bash")
     // The PTY input line caps at 1024 bytes, so every launch stays typed
     // configuration-free: settings live in the file, never inline.
@@ -1180,21 +1534,32 @@ describe("herdr surface", () => {
     expect((startLine as string).length).toBeLessThan(1_024)
     expect(settings).toContain('"failIfUnavailable":true')
     expect(settings).toContain('"allowUnsandboxedCommands":false')
-    expect(settings).toContain(`"allowRead":[${JSON.stringify(submissionDirectory)}]`)
-    expect(settings).toContain(JSON.stringify(canonicalSubmissionsRoot))
+    expect(settings).toContain('"allow":["Bash"]')
+    expect(settings).toContain('"deny":[]')
+    expect(settings).toContain(
+      `"allowRead":[${JSON.stringify(canonicalTemporaryRoot)},${JSON.stringify(controlDirectory)},${JSON.stringify(inboxDirectory)},${JSON.stringify(await realpath(process.env.ORCHESTRATE_BIN as string))},${JSON.stringify(outboxDirectory)},${JSON.stringify(scratchDirectory)}]`
+    )
+    expect(settings).toContain(
+      `"allowWrite":[${JSON.stringify(outboxDirectory)},${JSON.stringify(scratchDirectory)}]`
+    )
+    expect(log).toContain(`--env TMPDIR=${scratchDirectory}`)
+    expect(log).toContain(`--env TMP=${scratchDirectory}`)
+    expect(log).toContain(`--env TEMP=${scratchDirectory}`)
+    const claudeScratch = scratchDirectory
+    expect((await stat(claudeScratch)).mode & 0o777).toBe(0o700)
+    await Bun.write(path.join(claudeScratch, "intermediate.txt"), "usable\n")
+    expect(settingsDocument.sandbox.filesystem.denyRead).toContain(canonicalSubmissionsRoot)
+    expect(settingsDocument.sandbox.filesystem.denyRead).toContain(canonicalProviderSessionsRoot)
+    expect(settingsDocument.sandbox.filesystem.denyWrite).not.toContain(canonicalSubmissionsRoot)
+    expect(settingsDocument.sandbox.filesystem.denyWrite).toContain(canonicalProviderSessionsRoot)
+    expect(settingsDocument.sandbox.filesystem.denyWrite).toContain(controlDirectory)
+    expect(settingsDocument.sandbox.filesystem.denyWrite).toContain(inboxDirectory)
     expect(log).not.toContain(`--add-dir ${submissionDirectory}`)
-    expect(log).toContain(`--cwd ${canonicalSubmissionDirectory}`)
+    expect(log).toContain(`--cwd ${inboxDirectory}`)
     expect(settings).not.toContain(`Edit(${submissionDirectory}/**)`)
     expect(log).not.toContain(`--add-dir ${authoritativeRunDirectory}`)
-    expect(settings).toContain(
-      `Bash('/tmp/orchestrate' 'node-done' '${runState.id}' '${node.id}' '--token' 'token-1' '--outcome' 'completed')`
-    )
-    expect(settings).toContain(
-      `Bash('/tmp/orchestrate' 'node-done' '${runState.id}' '${node.id}' '--token' 'token-1' '--outcome' 'failed')`
-    )
-    expect(settings).toContain(
-      `Bash('/tmp/orchestrate' 'node-done' '${runState.id}' '${node.id}' '--token' 'token-1' '--outcome' 'completed' '--hold')`
-    )
+    expect(settingsDocument.permissions).toEqual({ allow: ["Bash"], deny: [] })
+    expect(log).toContain("--env ORCHESTRATE_COMPLETION_CONTRACT=")
     expect(log).not.toContain(`--add-dir ${process.env.ORCHESTRATE_STATE_DIR} `)
   })
 
@@ -1216,7 +1581,7 @@ describe("herdr surface", () => {
     const log = await Bun.file(logPath).text()
     const profileDocument = await Bun.file(profileCapturePath).text()
     expect(log).toContain("--ask-for-approval on-request")
-    expect(log).toContain("--profile orchestrate-control-")
+    expect(log).toContain("--profile orchestrate-attempt-")
     expect(profileDocument).toContain('extends=":read-only"')
     expect(log).toContain('approvals_reviewer="auto_review"')
   })
@@ -2138,7 +2503,9 @@ describe("herdr surface", () => {
       placement: placement(node.id)
     }
     await mkdir(target)
-    await expect(new HerdrSurface().spawn(request)).rejects.toThrow("not a valid Git worktree")
+    await expect(new HerdrSurface().spawn(request)).rejects.toThrow(
+      /not a valid Git worktree|not its Git worktree root/
+    )
     await rm(target, { recursive: true, force: true })
     expect(
       Bun.spawnSync(["git", "worktree", "add", "-b", "wrong", target, "HEAD"], {
@@ -2192,14 +2559,16 @@ describe("herdr surface", () => {
       placement: placement(node.id)
     })
     expect(observation.providerSessionId).toBe("session-1")
-    const attempt = runState.nodes[node.id]!.attempts[0]!
-    const promptFile = path.join(path.dirname(attempt.resultPath), "prompt.txt")
+    const promptFile = path.join(
+      submissionInboxDirectory(runState.id, node.id, ATTEMPT_TOKEN),
+      "prompt.txt"
+    )
     expect(await Bun.file(promptFile).text()).toBe(longPrompt)
     const log = await Bun.file(logPath).text()
     const promptLine = log.split("\n").find((line) => line.startsWith("agent prompt")) as string
     expect(promptLine).toContain(`saved it to ${promptFile}`)
     expect(promptLine).toContain("orchestrate launcher")
-    expect(log).toContain("[orchestrate-delivery:token-1]")
+    expect(log).toContain(`[orchestrate-delivery:${ATTEMPT_TOKEN}]`)
     expect(promptLine).not.toContain("Detail. Detail.")
     expect(promptLine.length).toBeLessThan(1_024)
   })
@@ -2217,7 +2586,7 @@ describe("herdr surface", () => {
     expect(observation.providerSessionId).toBe("session-1")
     const log = await Bun.file(logPath).text()
     expect(log.split("\n").filter((line) => line.startsWith("agent prompt")).length).toBe(1)
-    expect(log).toContain("[orchestrate-delivery:token-1]")
+    expect(log).toContain(`[orchestrate-delivery:${ATTEMPT_TOKEN}]`)
     expect(log).toContain("agent send-keys p1 enter")
     expect(log).toContain("agent wait p1 --until working --until done --until blocked --timeout")
     expect(log).not.toContain("pane close p1")
@@ -2240,7 +2609,7 @@ describe("herdr surface", () => {
     expect(log).not.toContain("pane close p1")
   }, 15_000)
 
-  test("recovers an ambiguous Claude spawn from its recorded id and a token-valid submission", async () => {
+  test("requires a declared result before recovering a dead ambiguous Claude spawn", async () => {
     await writeShim({ reportSession: false, promptFailure: "always" })
     const node = {
       ...claudeAgent(),
@@ -2267,29 +2636,74 @@ describe("herdr surface", () => {
       /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
     )
 
-    // The agent finishes out of band and submits, then its pane disappears.
-    // Recovery must adopt the exact launcher-chosen id without observing a
-    // replacement session or re-prompting.
-    await mkdir(path.dirname(attempt.resultPath), { recursive: true })
-    await Bun.write(
-      completionSubmissionPath(attempt.resultPath),
-      JSON.stringify({
-        runId: runState.id,
-        nodeId: node.id,
-        token: "token-1",
-        outcome: "completed",
-        hold: false
-      }),
-      { createPath: false }
-    )
+    // Its pane disappears before the agent submits, so recovery cannot reuse
+    // the completion token without exact result-bound evidence.
     await writeShim({ reportSession: false, missingPane: "p1", promptFailure: "always" })
     const before = await Bun.file(logPath).text()
+    await expect(surface.recoverOrSpawn(request)).rejects.toThrow(
+      "failing this attempt instead of reusing its completion token"
+    )
+
+    // The same owner then writes and submits its result. Recovery may now
+    // adopt the launcher-chosen id without observing a replacement session or
+    // re-prompting.
+    await mkdir(path.dirname(attempt.resultPath), { recursive: true })
+    const declaredResult = '{"clean":true}\n'
+    await Bun.write(attempt.resultPath, declaredResult, { createPath: false })
+    await submitNodeDone(
+      runState.id,
+      node.id,
+      ATTEMPT_TOKEN,
+      "completed",
+      false,
+      path.join(
+        submissionControlDirectory(runState.id, node.id, ATTEMPT_TOKEN),
+        "completion-contract.json"
+      )
+    )
     const observation = await surface.recoverOrSpawn(request)
     expect(observation.providerSessionId).toBe(receipt.providerSessionId)
     const after = await Bun.file(logPath).text()
     expect(after.split("agent get p1").length).toBe(before.split("agent get p1").length)
     expect(after.split("agent prompt").length).toBe(before.split("agent prompt").length)
     expect(after.split("agent start").length).toBe(before.split("agent start").length)
+  })
+
+  test("does not promote a live ambiguous receipt from an envelope without a result", async () => {
+    await writeShim({ reportSession: false, promptFailure: "always" })
+    const node = {
+      ...claudeAgent(),
+      session: { mode: "fresh" as const, from: null, saveAs: "claude-session" }
+    }
+    const runState = state(node.id)
+    const activeIntent = intent(node.id)
+    const request = {
+      workflow: workflow(node),
+      state: runState,
+      intent: activeIntent,
+      prompt: "Review and report completion.",
+      placement: placement(node.id)
+    }
+    const surface = new HerdrSurface()
+    await expect(surface.spawn(request)).rejects.toBeInstanceOf(HerdrObservationError)
+    const attempt = runState.nodes[node.id]!.attempts[0]!
+    await Bun.write(
+      completionSubmissionPath(attempt.resultPath),
+      JSON.stringify({
+        runId: runState.id,
+        nodeId: node.id,
+        token: activeIntent.token,
+        outcome: "completed",
+        hold: false
+      }),
+      { createPath: false }
+    )
+
+    await expect(surface.recoverOrSpawn(request)).rejects.toThrow("is ambiguous")
+    const receipt = JSON.parse(
+      await Bun.file(path.join(path.dirname(attempt.outputPath), "spawn.json")).text()
+    ) as { status: string }
+    expect(receipt.status).toBe("ambiguous")
   })
 
   test("fails a dead prompt-bearing receipt instead of cross-wiring its completion token", async () => {
@@ -2343,9 +2757,10 @@ describe("herdr surface", () => {
       ...claudeAgent(),
       session: { mode: "fresh" as const, from: null, saveAs: "claude-session" }
     }
+    const runState = state(node.id)
     const observation = await new HerdrSurface().spawn({
       workflow: workflow(node),
-      state: state(node.id),
+      state: runState,
       intent: intent(node.id),
       prompt: "Review and report completion.",
       placement: placement(node.id)
@@ -2357,19 +2772,331 @@ describe("herdr surface", () => {
     expect(log).toContain(`--session-id ${observation.providerSessionId}`)
     expect(log.slice(log.indexOf("agent prompt p1"))).not.toContain("agent get p1")
     // Claude sessions are project-scoped by cwd: lineage nodes launch from
-    // the run-shared session directory, carved into the sandbox.
+    // their canonical lineage directory outside node submission transport.
     const workspaceLine = log
       .split("\n")
       .find((line) => line.startsWith("workspace create")) as string
-    expect(workspaceLine).toContain("claude-sessions")
-    const runState = state(node.id)
+    expect(workspaceLine).toContain("-provider-sessions")
+    const lineageDirectory = workspaceLine.match(/--cwd (\S+)/)?.[1] as string
+    expect(lineageDirectory.startsWith(providerSessionsRoot())).toBeTrue()
+    expect(lineageDirectory.startsWith(submissionRunDirectory(runState.id))).toBeFalse()
+    expect((await stat(lineageDirectory)).mode & 0o777).toBe(0o700)
     const settings = await Bun.file(
       path.join(
-        path.dirname(runState.nodes[node.id]!.attempts[0]!.resultPath),
+        submissionControlDirectory(runState.id, node.id, ATTEMPT_TOKEN),
         "claude-settings.json"
       )
     ).text()
-    expect(settings).toContain("claude-sessions")
+    expect(settings).toContain(lineageDirectory)
+  })
+
+  test("isolates Claude project roots while preserving resume and fork lineage reuse", async () => {
+    await writeShim({ reportSession: false })
+    const launchCwd = async (
+      node: Extract<AgentNode, { readonly provider: "claude" }>,
+      runState: RunState
+    ): Promise<string> => {
+      const before = (
+        await Bun.file(logPath)
+          .text()
+          .catch(() => "")
+      )
+        .split("\n")
+        .filter((line) => line.startsWith("workspace create")).length
+      await new HerdrSurface().spawn({
+        workflow: workflow(node),
+        state: runState,
+        intent: intent(node.id),
+        prompt: "Continue this Claude lineage.",
+        placement: placement(node.id)
+      })
+      const lines = (await Bun.file(logPath).text())
+        .split("\n")
+        .filter((line) => line.startsWith("workspace create"))
+      return (lines[before] as string).match(/--cwd (\S+)/)?.[1] as string
+    }
+
+    const rootNode = {
+      ...claudeAgent(),
+      id: "root",
+      session: { mode: "fresh" as const, from: null, saveAs: "root-lineage" }
+    }
+    const rootState = state(rootNode.id)
+    const rootDirectory = await launchCwd(rootNode, rootState)
+    const lineageId = path.basename(rootDirectory)
+    const sourceSession = {
+      alias: "root-lineage",
+      provider: "claude" as const,
+      sessionId: "root-session-id",
+      sourceNodeId: rootNode.id,
+      lineageId
+    }
+    const resumed = {
+      ...claudeAgent(),
+      id: "resumed",
+      session: { mode: "resume" as const, from: "root-lineage", saveAs: null }
+    }
+    const forked = {
+      ...claudeAgent(),
+      id: "forked",
+      session: { mode: "fork" as const, from: "root-lineage", saveAs: "fork-lineage" }
+    }
+    expect(
+      await launchCwd(resumed, {
+        ...state(resumed.id),
+        sessions: { "root-lineage": sourceSession }
+      })
+    ).toBe(rootDirectory)
+    expect(
+      await launchCwd(forked, { ...state(forked.id), sessions: { "root-lineage": sourceSession } })
+    ).toBe(rootDirectory)
+
+    const independent = {
+      ...claudeAgent(),
+      id: "independent",
+      session: { mode: "fresh" as const, from: null, saveAs: "independent-lineage" }
+    }
+    const independentState = state(independent.id)
+    const independentDirectory = await launchCwd(independent, independentState)
+    expect(independentDirectory).not.toBe(rootDirectory)
+    expect(path.dirname(independentDirectory)).toBe(path.dirname(rootDirectory))
+    expect((await stat(rootDirectory)).mode & 0o777).toBe(0o700)
+    expect((await stat(independentDirectory)).mode & 0o777).toBe(0o700)
+
+    const settings = JSON.parse(
+      await Bun.file(
+        path.join(
+          submissionControlDirectory(rootState.id, rootNode.id, ATTEMPT_TOKEN),
+          "claude-settings.json"
+        )
+      ).text()
+    ) as {
+      sandbox: {
+        filesystem: {
+          allowRead: string[]
+          allowWrite: string[]
+          denyRead: string[]
+          denyWrite: string[]
+        }
+      }
+    }
+    const filesystem = settings.sandbox.filesystem
+    const exactControl = submissionControlDirectory(rootState.id, rootNode.id, ATTEMPT_TOKEN)
+    const exactInbox = submissionInboxDirectory(rootState.id, rootNode.id, ATTEMPT_TOKEN)
+    const exactOutbox = submissionOutboxDirectory(rootState.id, rootNode.id, ATTEMPT_TOKEN)
+    const exactScratch = submissionScratchDirectory(rootState.id, rootNode.id, ATTEMPT_TOKEN)
+    expect(filesystem.allowRead).toContain(rootDirectory)
+    expect(filesystem.allowWrite).toContain(rootDirectory)
+    expect(filesystem.allowRead).toContain(exactControl)
+    expect(filesystem.allowRead).toContain(exactInbox)
+    expect(filesystem.allowWrite).toContain(exactOutbox)
+    expect(filesystem.allowWrite).toContain(exactScratch)
+    expect(filesystem.allowRead).not.toContain(independentDirectory)
+    expect(filesystem.allowWrite).not.toContain(independentDirectory)
+    expect(filesystem.denyRead).toContain(await realpath(providerSessionsRoot()))
+    expect(filesystem.denyWrite).not.toContain(await realpath(providerSessionsRoot()))
+    expect(filesystem.denyRead).toContain(await realpath(submissionsRoot()))
+    expect(filesystem.denyWrite).not.toContain(await realpath(submissionsRoot()))
+    expect(filesystem.denyWrite).toContain(exactControl)
+    expect(filesystem.denyWrite).toContain(exactInbox)
+
+    const collidingNodeAttempt = nodeSubmissionDirectory(
+      rootState.id,
+      "claude-sessions",
+      "a".repeat(64)
+    )
+    expect(rootDirectory.startsWith(submissionRunDirectory(rootState.id))).toBeFalse()
+    expect(filesystem.allowRead).not.toContain(collidingNodeAttempt)
+    expect(filesystem.allowWrite).not.toContain(collidingNodeAttempt)
+  })
+
+  test("canonicalizes Claude parent denials and exact grants through a symlinked state ancestor", async () => {
+    const defaultStateRoot = process.env.ORCHESTRATE_STATE_DIR as string
+    const canonicalStateAncestor = `${temporaryRoot}-canonical-state-ancestor`
+    const lexicalStateAncestor = path.join(temporaryRoot, "linked-state-ancestor")
+    await mkdir(canonicalStateAncestor)
+    await symlink(canonicalStateAncestor, lexicalStateAncestor)
+    process.env.ORCHESTRATE_STATE_DIR = path.join(lexicalStateAncestor, "state")
+    try {
+      const node = {
+        ...claudeAgent(),
+        id: "canonical",
+        session: { mode: "fresh" as const, from: null, saveAs: "canonical-lineage" }
+      }
+      const runState = state(node.id)
+      await new HerdrSurface().spawn({
+        workflow: workflow(node),
+        state: runState,
+        intent: intent(node.id),
+        prompt: "Use only this canonical transport and lineage.",
+        placement: placement(node.id)
+      })
+
+      const lexicalAttempt = nodeSubmissionDirectory(runState.id, node.id, ATTEMPT_TOKEN)
+      const settings = JSON.parse(
+        await Bun.file(
+          path.join(
+            submissionControlDirectory(runState.id, node.id, ATTEMPT_TOKEN),
+            "claude-settings.json"
+          )
+        ).text()
+      ) as {
+        sandbox: {
+          filesystem: {
+            allowRead: string[]
+            allowWrite: string[]
+            denyRead: string[]
+            denyWrite: string[]
+          }
+        }
+      }
+      const filesystem = settings.sandbox.filesystem
+      const canonicalAttempt = await realpath(lexicalAttempt)
+      const canonicalSubmissionsParent = await realpath(submissionsRoot())
+      const canonicalProviderSessionsParent = await realpath(providerSessionsRoot())
+      const canonicalLineage = filesystem.allowRead.find((candidate) =>
+        candidate.startsWith(`${canonicalProviderSessionsParent}${path.sep}`)
+      )
+      const siblingAttempt = path.join(canonicalSubmissionsParent, "sibling", "node", "token")
+      const siblingLineage = path.join(
+        canonicalProviderSessionsParent,
+        runState.id,
+        "claude",
+        "b".repeat(64)
+      )
+
+      expect(canonicalAttempt).toBe(lexicalAttempt)
+      expect(filesystem.allowRead).toContain(path.join(canonicalAttempt, "control"))
+      expect(filesystem.allowRead).toContain(path.join(canonicalAttempt, "inbox"))
+      expect(filesystem.allowWrite).toContain(path.join(canonicalAttempt, "outbox"))
+      expect(filesystem.allowWrite).toContain(path.join(canonicalAttempt, "scratch"))
+      expect(canonicalLineage).toBeDefined()
+      expect(filesystem.allowWrite).toContain(canonicalLineage as string)
+      expect(filesystem.denyRead).toContain(canonicalSubmissionsParent)
+      expect(filesystem.denyWrite).not.toContain(canonicalSubmissionsParent)
+      expect(filesystem.denyRead).toContain(canonicalProviderSessionsParent)
+      expect(filesystem.denyWrite).not.toContain(canonicalProviderSessionsParent)
+      expect(filesystem.denyWrite).toContain(path.join(canonicalAttempt, "control"))
+      expect(filesystem.denyWrite).toContain(path.join(canonicalAttempt, "inbox"))
+      expect(filesystem.allowRead).not.toContain(siblingAttempt)
+      expect(filesystem.allowWrite).not.toContain(siblingAttempt)
+      expect(filesystem.allowRead).not.toContain(siblingLineage)
+      expect(filesystem.allowWrite).not.toContain(siblingLineage)
+      expect(JSON.stringify(filesystem)).not.toContain(lexicalStateAncestor)
+    } finally {
+      process.env.ORCHESTRATE_STATE_DIR = defaultStateRoot
+      await rm(canonicalStateAncestor, { recursive: true, force: true })
+    }
+  })
+
+  test("canonicalizes Codex parent denial, exact attempt grant, and scratch through a symlinked state ancestor", async () => {
+    const defaultStateRoot = process.env.ORCHESTRATE_STATE_DIR as string
+    const canonicalStateAncestor = `${temporaryRoot}-canonical-codex-state-ancestor`
+    const lexicalStateAncestor = path.join(temporaryRoot, "linked-codex-state-ancestor")
+    await mkdir(canonicalStateAncestor)
+    await symlink(canonicalStateAncestor, lexicalStateAncestor)
+    process.env.ORCHESTRATE_STATE_DIR = path.join(lexicalStateAncestor, "state")
+    try {
+      const node = {
+        ...agent(),
+        id: "canonical-codex",
+        workspace: { ...workspace(), writes: ["allowed/**"] },
+        permissions: {
+          ...agent().permissions,
+          execution: { sandbox: "workspace-write" as const }
+        }
+      }
+      const runState = state(node.id)
+      await new HerdrSurface().spawn({
+        workflow: workflow(node),
+        state: runState,
+        intent: intent(node.id),
+        prompt: "Use only this canonical transport and scratch.",
+        placement: placement(node.id)
+      })
+
+      const lexicalAttempt = nodeSubmissionDirectory(runState.id, node.id, ATTEMPT_TOKEN)
+      const canonicalAttempt = await realpath(lexicalAttempt)
+      const canonicalSubmissionsParent = await realpath(submissionsRoot())
+      const canonicalScratch = path.join(canonicalAttempt, "scratch")
+      const siblingAttempt = path.join(canonicalSubmissionsParent, "sibling", "node", "token")
+      const profileDocument = await Bun.file(profileCapturePath).text()
+      const log = await Bun.file(logPath).text()
+
+      expect(canonicalAttempt).toBe(lexicalAttempt)
+      expect(profileDocument).toContain(`${JSON.stringify(canonicalSubmissionsParent)}="deny"`)
+      expect(profileDocument).toContain(
+        `${JSON.stringify(path.join(canonicalAttempt, "control"))}="read"`
+      )
+      expect(profileDocument).toContain(
+        `${JSON.stringify(path.join(canonicalAttempt, "outbox"))}="write"`
+      )
+      expect(profileDocument).not.toContain(`${JSON.stringify(canonicalAttempt)}="write"`)
+      expect(profileDocument).not.toContain(`${JSON.stringify(siblingAttempt)}="write"`)
+      expect(profileDocument).not.toContain(lexicalStateAncestor)
+      expect(log).toContain(`--env TMPDIR=${canonicalScratch}`)
+      expect(log).toContain(`--env TMP=${canonicalScratch}`)
+      expect(log).toContain(`--env TEMP=${canonicalScratch}`)
+    } finally {
+      process.env.ORCHESTRATE_STATE_DIR = defaultStateRoot
+      await rm(canonicalStateAncestor, { recursive: true, force: true })
+    }
+  })
+
+  test("rejects a Claude resume with a missing source alias at the launch boundary", async () => {
+    const node = {
+      ...claudeAgent(),
+      id: "missing-source",
+      session: { mode: "resume" as const, from: "missing", saveAs: null }
+    }
+    await expect(
+      new HerdrSurface().spawn({
+        workflow: workflow(node),
+        state: state(node.id),
+        intent: intent(node.id),
+        prompt: "Do not launch without the recorded source alias.",
+        placement: placement(node.id)
+      })
+    ).rejects.toThrow("cannot resolve its Claude session lineage")
+    expect(
+      await Bun.file(logPath)
+        .text()
+        .catch(() => "")
+    ).toBe("")
+  })
+
+  test("rejects a forged Claude lineage before it can target a claude-sessions node", async () => {
+    const node = {
+      ...claudeAgent(),
+      id: "peer",
+      session: { mode: "resume" as const, from: "collision", saveAs: null }
+    }
+    const runState: RunState = {
+      ...state(node.id),
+      sessions: {
+        collision: {
+          alias: "collision",
+          provider: "claude",
+          sessionId: "forged-session",
+          sourceNodeId: "claude-sessions",
+          lineageId: "../../state-submissions/claude-sessions"
+        }
+      }
+    }
+    await expect(
+      new HerdrSurface().spawn({
+        workflow: workflow(node),
+        state: runState,
+        intent: intent(node.id),
+        prompt: "Do not accept forged lineage state.",
+        placement: placement(node.id)
+      })
+    ).rejects.toThrow("Invalid Claude session lineage id")
+    expect(
+      await Bun.file(logPath)
+        .text()
+        .catch(() => "")
+    ).toBe("")
   })
 
   test("records session-pending when herdr never reports a lineage session id", async () => {

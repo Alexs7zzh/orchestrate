@@ -4,7 +4,7 @@ import { chmod, mkdir, mkdtemp, rm } from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 
-import type { CommandNode, WorkflowSpec } from "../src/types.js"
+import type { AttemptState, CommandNode, WorkflowSpec } from "../src/types.js"
 
 import {
   COMMAND_COMPLETION_SHAPES,
@@ -19,6 +19,9 @@ import {
   watchBeforeScan
 } from "../src/cli.js"
 import { createInitialRunState } from "../src/transition.js"
+import { injectPathInspectionForTests } from "../src/validation.js"
+import { workflowProvenance } from "./workflow-provenance-fixture.js"
+import { workflowSourceYaml } from "./workflow-source-fixture.js"
 
 const COMMANDS = [
   "validate",
@@ -159,7 +162,7 @@ describe("CLI contract", () => {
     ).toEqual(["~ presentation"])
   })
 
-  test("terminal status text does not offer stale recovery commands", () => {
+  test("terminal status text does not offer stale recovery commands", async () => {
     const workflow: WorkflowSpec = {
       name: "terminal-status",
       objective: "Do not offer terminal actions.",
@@ -229,6 +232,143 @@ describe("CLI contract", () => {
     if (build === undefined || review === undefined || reviewer === undefined) {
       throw new Error("Expected the test workflow state to contain its node and workroom seat.")
     }
+    const activeAttempt: AttemptState = {
+      attempt: 1,
+      status: "running",
+      token: "a".repeat(64),
+      pane: null,
+      providerSessionId: null,
+      startedAt: initial.updatedAt,
+      finishedAt: null,
+      exitCode: null,
+      error: null,
+      resultPath: "/tmp/submission/result.txt",
+      outputPath: "/tmp/run/output.txt"
+    }
+    const actionable = {
+      ...initial,
+      nodes: { build: { ...build, status: "running" as const, attempts: [activeAttempt] } },
+      gates: {
+        build: {
+          nodeId: "build",
+          title: "Build",
+          content: "line one\nline two",
+          digest: "gate-digest",
+          openedAt: initial.updatedAt,
+          approvedAt: null
+        }
+      },
+      pendingRevision: {
+        provenance: await workflowProvenance(workflow),
+        workflow,
+        digest: "revision-digest",
+        summary: ["preview revision"],
+        createdAt: initial.updatedAt
+      }
+    }
+    const actionableText = statusText(actionable)
+    expect(actionableText).toContain('gate build content: "line one\\nline two"\n  gate build:')
+    expect(actionableText).toContain("revision preview:")
+    expect(statusValue(actionable).pendingRevision?.preview).toMatchObject({
+      name: "terminal-status",
+      objective: "Do not offer terminal actions."
+    })
+    const activeToken = activeAttempt.token
+    expect(actionableText).toContain("restore the owning pane or resume its provider session")
+    expect(actionableText).not.toContain(activeToken)
+    expect(actionableText).not.toContain("orchestrate node-done")
+    expect(JSON.stringify(statusValue(actionable))).not.toContain(activeToken)
+    const exact = await workflowProvenance(workflow)
+    const invalid = { ...exact, origins: { ...exact.origins } }
+    delete invalid.origins["/name"]
+    const invalidRevision = {
+      ...initial,
+      pendingRevision: {
+        provenance: invalid,
+        workflow,
+        digest: "revision-digest",
+        summary: ["invalid provenance"],
+        createdAt: initial.updatedAt
+      }
+    }
+    expect(statusValue(invalidRevision)).toMatchObject({
+      needsAttention: true,
+      pendingRevision: {
+        preview: null,
+        provenanceError: expect.stringContaining("Missing final-IR origin /name")
+      }
+    })
+    expect(statusText(invalidRevision)).toContain(
+      "revision provenance: Invalid pending revision provenance"
+    )
+    expect(statusText(invalidRevision)).not.toContain("orchestrate approve terminal-run --revision")
+    const typeOrigin = exact.origins["/nodes/0/type"]
+    const nameOrigin = exact.origins["/name"]
+    if (typeOrigin === undefined || nameOrigin === undefined) {
+      throw new Error("expected real YAML provenance origins")
+    }
+    const structuralVariants = [
+      {
+        ...exact,
+        origins: {
+          ...exact.origins,
+          "/nodes/0/type": {
+            kind: "explicit" as const,
+            sourcePath: "/nodes/0/type",
+            location: typeOrigin.location
+          }
+        }
+      },
+      {
+        ...exact,
+        origins: {
+          ...exact.origins,
+          "/name": {
+            ...nameOrigin,
+            location: { ...nameOrigin.location, file: "/tmp/unrelated.yaml" }
+          }
+        }
+      }
+    ]
+    for (const provenance of structuralVariants) {
+      const structuralRevision = {
+        ...initial,
+        pendingRevision: {
+          provenance,
+          workflow,
+          digest: "revision-digest",
+          summary: ["invalid structural provenance"],
+          createdAt: initial.updatedAt
+        }
+      }
+      expect(statusValue(structuralRevision)).toMatchObject({
+        needsAttention: true,
+        pendingRevision: { preview: null, provenanceError: expect.any(String) }
+      })
+      expect(statusText(structuralRevision)).not.toContain(
+        "orchestrate approve terminal-run --revision"
+      )
+    }
+    const invalidAnnotationsRevision = {
+      ...initial,
+      pendingRevision: {
+        provenance: { ...exact, inferredNeeds: { ghost: [] } },
+        workflow,
+        digest: "revision-digest",
+        summary: ["invalid inferred annotations"],
+        createdAt: initial.updatedAt
+      }
+    }
+    expect(statusValue(invalidAnnotationsRevision)).toMatchObject({
+      needsAttention: true,
+      pendingRevision: {
+        preview: null,
+        provenanceError: expect.stringContaining('Unknown inferredNeeds node "ghost"')
+      }
+    })
+    expect(statusText(invalidAnnotationsRevision)).not.toContain(
+      "orchestrate approve terminal-run --revision"
+    )
     const stopped = {
       ...initial,
       status: "stopped" as const,
@@ -239,6 +379,7 @@ describe("CLI contract", () => {
         createdAt: initial.updatedAt
       },
       pendingRevision: {
+        provenance: await workflowProvenance(workflow),
         workflow,
         digest: "revision-digest",
         summary: ["stale revision"],
@@ -277,7 +418,7 @@ describe("CLI contract", () => {
 
   test("previews the workroom floor plan and authoritative seat assignments", async () => {
     const temporary = await mkdtemp(path.join(os.tmpdir(), "orchestrate-preview-workrooms-"))
-    const file = path.join(temporary, "workflow.json")
+    const file = path.join(temporary, "workflow.yaml")
     const spec: WorkflowSpec = {
       name: "preview-workrooms",
       objective: "Preview presentation intent.",
@@ -321,7 +462,7 @@ describe("CLI contract", () => {
           provider: "codex",
           model: "provider-default",
           effort: null,
-          prompt: "Build.",
+          prompt: "Build.\nforged node line",
           session: { mode: "fresh", from: null, saveAs: null },
           permissions: {
             execution: { sandbox: "read-only" },
@@ -335,42 +476,211 @@ describe("CLI contract", () => {
       ]
     }
     try {
-      await Bun.write(file, `${JSON.stringify(spec)}\n`)
+      await Bun.write(file, workflowSourceYaml(spec))
       const json = await capture(() => runCli(["preview", file, "--json"]))
       expect(json.code).toBe(0)
       const parsed = JSON.parse(json.output)
-      expect(parsed).toMatchObject({
-        floorPlan: {
+      expect(parsed.preview).toMatchObject({
+        presentation: {
           workrooms: [
             {
               id: "delivery",
               layout: "columns",
               settlesOn: ["build"],
-              seats: [{ id: "builder", nodes: ["build"] }]
+              seats: [{ id: "builder" }]
             }
           ]
         },
-        nodes: [{ id: "build", workroom: "delivery", seat: "builder" }]
+        nodes: [
+          {
+            id: "build",
+            workroom: "delivery",
+            seat: "builder",
+            prompt: "Build.\nforged node line"
+          }
+        ]
       })
-      expect(parsed.nodes[0].permissions).not.toHaveProperty("env")
+      expect(parsed.preview.nodes[0]).not.toHaveProperty("env")
       expect(json.output).not.toContain("private-value")
       const plain = await capture(() => runCli(["preview", file]))
-      expect(plain.output).toContain("Floor plan:")
-      expect(plain.output).toContain(
-        "Seat panes stay parked while active; settled panes follow completed-pane preferences."
-      )
-      expect(plain.output).toContain(
-        'delivery "Delivery\\nforged room" layout=columns settlesOn=build'
-      )
-      expect(plain.output).toContain('seat builder "Builder\\nforged seat" nodes=build')
+      expect(plain.output).toContain("Presentation:")
+      expect(plain.output).toContain('"label":"Delivery\\nforged room"')
+      expect(plain.output).toContain('"label":"Builder\\nforged seat"')
       expect(plain.output).not.toContain("Delivery\nforged room")
       expect(plain.output).not.toContain("Builder\nforged seat")
-      expect(plain.output).toContain("workroom=delivery seat=builder")
-      expect(plain.output).toContain(
-        'workspace=shared path=null writes=["src/**"] exclusiveResources=["release-slot"] envKeys=["REVIEW_CHANNEL"]'
-      )
+      expect(plain.output).toContain('"workroom":"delivery"')
+      expect(plain.output).toContain('"environmentKeys":["REVIEW_CHANNEL"]')
+      expect(plain.output).toContain('"prompt":"Build.\\nforged node line"')
+      expect(plain.output).not.toContain('"prompt":"\\"Build.')
+      expect(plain.output).not.toContain("Build.\nforged node line")
       expect(plain.output).not.toContain("private-value")
     } finally {
+      await rm(temporary, { recursive: true, force: true })
+    }
+  })
+
+  test("redacts curl-style callback credentials in public JSON and plain previews", async () => {
+    const temporary = await mkdtemp(path.join(os.tmpdir(), "orchestrate-preview-callback-"))
+    const file = path.join(temporary, "workflow.yaml")
+    const callback = {
+      type: "command" as const,
+      argv: [
+        "curl",
+        "-H",
+        "Authorization: Bearer short-adjacent-secret",
+        "--header",
+        "Proxy-Authorization: Basic long-adjacent-secret",
+        "--header=Authorization: Bearer equals-header-secret",
+        "--header",
+        "X-Route: stable",
+        "-u",
+        "short-user:short-password",
+        "--user=equals-user:equals-password",
+        "--url",
+        "https://adjacent:password@example.test/hook?action=publish&token=adjacent-query",
+        "--url=https://equals:password@example.test/hook?action=rollback&secret=equals-query"
+      ],
+      timeoutSeconds: 30
+    }
+    const expected = {
+      type: "command",
+      argv: [
+        "curl",
+        "-H",
+        "Authorization: [redacted]",
+        "--header",
+        "Proxy-Authorization: [redacted]",
+        "--header=Authorization: [redacted]",
+        "--header",
+        "X-Route: stable",
+        "-u",
+        "[redacted]",
+        "--user=[redacted]",
+        "--url",
+        "https://example.test/hook?action=publish&token=%5Bredacted%5D",
+        "--url=https://example.test/hook?action=rollback&secret=%5Bredacted%5D"
+      ],
+      timeoutSeconds: 30
+    }
+    const spec: WorkflowSpec = {
+      name: "callback-preview",
+      objective: "Preview callback routing without credentials.",
+      cwd: temporary,
+      concurrency: 1,
+      callback,
+      milestones: false,
+      limits: { maxStarts: null },
+      writeConflicts: "reject",
+      repeats: [],
+      nodes: [
+        {
+          id: "done",
+          type: "command",
+          title: "Done",
+          needs: [],
+          cwd: null,
+          workspace: {
+            mode: "shared",
+            path: null,
+            vcs: "none",
+            writes: [],
+            exclusiveResources: []
+          },
+          inputs: [],
+          retry: { maxAttempts: 1 },
+          gate: "none",
+          argv: ["/usr/bin/true"],
+          mutates: false,
+          inheritEnv: [],
+          env: {},
+          allowedExitCodes: [0]
+        }
+      ]
+    }
+    const secrets = [
+      "short-adjacent-secret",
+      "long-adjacent-secret",
+      "equals-header-secret",
+      "short-user",
+      "short-password",
+      "equals-user",
+      "equals-password",
+      "adjacent-query",
+      "equals-query"
+    ]
+    try {
+      await Bun.write(file, workflowSourceYaml(spec))
+      const json = await capture(() => runCli(["preview", file, "--json"]))
+      if (json.code !== 0) {
+        throw new Error(json.output)
+      }
+      expect(json.code).toBe(0)
+      expect(JSON.parse(json.output).preview.callback).toEqual(expected)
+      const plain = await capture(() => runCli(["preview", file]))
+      expect(plain.code).toBe(0)
+      expect(plain.output).toContain(`Callback: ${JSON.stringify(expected)}`)
+      expect(plain.output).toContain("X-Route: stable")
+      expect(plain.output).toContain("action=publish")
+      expect(plain.output).toContain("action=rollback")
+      for (const secret of secrets) {
+        expect(json.output).not.toContain(secret)
+        expect(plain.output).not.toContain(secret)
+      }
+    } finally {
+      await rm(temporary, { recursive: true, force: true })
+    }
+  })
+
+  test("validates source once and returns an atomic workflow and digest", async () => {
+    const temporary = await mkdtemp(path.join(os.tmpdir(), "orchestrate-validate-once-"))
+    const file = path.join(temporary, "workflow.yaml")
+    const left = path.join(temporary, "left")
+    const right = path.join(temporary, "right")
+    let leftInspections = 0
+    try {
+      await Bun.write(
+        file,
+        `name: validate-once
+objective: Keep validation output coherent.
+cwd: ${JSON.stringify(temporary)}
+limits:
+  maxStarts: null
+nodes:
+  - id: left
+    command: [/usr/bin/true]
+    mutates: true
+    workspace:
+      mode: shared
+      writes: [${JSON.stringify(left)}]
+  - id: right
+    command: [/usr/bin/true]
+    mutates: true
+    workspace:
+      mode: shared
+      writes: [${JSON.stringify(right)}]
+`
+      )
+      injectPathInspectionForTests((ancestor) => {
+        if (ancestor === left && ++leftInspections > 1) {
+          throw Object.assign(new Error("path identity changed after validation"), { code: "EIO" })
+        }
+      })
+
+      const result = await capture(() => runCli(["validate", file, "--json"]))
+      const payload = JSON.parse(result.output) as {
+        readonly ok: boolean
+        readonly workflow: unknown
+        readonly digest: unknown
+        readonly diagnostics: readonly { readonly severity: string }[]
+      }
+      expect(leftInspections).toBe(1)
+      expect(result.code).toBe(0)
+      expect(payload.ok).toBe(true)
+      expect(payload.workflow).not.toBeNull()
+      expect(typeof payload.digest).toBe("string")
+      expect(payload.diagnostics.some((diagnostic) => diagnostic.severity === "error")).toBe(false)
+    } finally {
+      injectPathInspectionForTests(null)
       await rm(temporary, { recursive: true, force: true })
     }
   })

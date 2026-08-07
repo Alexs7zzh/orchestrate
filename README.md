@@ -39,10 +39,12 @@ npm distribution are not supported.
 
 ## Terms
 
-- **Launching master** — the agent session that invokes `run`, receives trusted Herdr wake-ups, and
-  calls `reconcile`.
-- **Workflow provider session** — a node conversation lineage named by `session.saveAs` and
-  continued through `session.from`; it is distinct from the launching master.
+- **Master** — the agent session that invokes `run`, or the authenticated agent session that later
+  invokes `resume`; it receives trusted Herdr wake-ups and calls `reconcile`.
+- **Workflow provider session** — a node conversation lineage named with `session: {fresh: alias}`
+  and continued with `session: {resume: alias}` or fanned out with `session: {fork: alias}`; it is
+  distinct from the launching master. Resume and fork may add `saveAs` to name the resulting
+  lineage.
 - **Workroom tab and seat** — workflow-approved presentation identities for stable pane placement.
   A node with a seat is seatful; supporting work without one is seatless.
 - **UI placement preference** — layered global/project UI state such as `placement.workspace`; it is
@@ -55,9 +57,9 @@ then presents a prose walkthrough with the exact preview digest. The human appro
 approval is never inferred from an interactive tool or hidden terminal output.
 
 ```bash
-orchestrate validate workflow.json
-orchestrate preview workflow.json
-orchestrate run workflow.json --approve <digest>
+orchestrate validate workflow.yaml
+orchestrate preview workflow.yaml
+orchestrate run workflow.yaml --approve <digest>
 orchestrate board <run-id>
 ```
 
@@ -66,15 +68,22 @@ Start with the qualifying
 or use the [simple fan-out example](references/examples.md#simple-fan-out-and-fan-in-cli-illustration)
 when learning the lower-level CLI. The authoring contract is
 [workflow-format.md](references/workflow-format.md); consult the generated
-[workflow.schema.json](references/workflow.schema.json) only for exact structural detail.
+[workflow.schema.json](references/workflow.schema.json) for the parsed YAML `WorkflowSource`
+structure. JSON workflow authoring is not supported; runtime state, journals, CLI JSON, and the
+expanded run snapshot `workflow.json` remain machine-readable JSON protocols.
 
 Preview is read-only and prints the digest required by `run`. Preflight validates schema and
 cross-field semantics, provider commands, Herdr, paths, output schemas, worktree prerequisites, and
 declared write conflicts before state or panes are created. `run --dry-run` performs the same
 read-only preflight without creating state, worktrees, workspaces, tabs, or panes.
 
-Every agent receives a stable prompt frame with the objective, node contract, declared inputs,
-result path, and exact authenticated completion command. Dynamic inputs resolve only after their
+Every owning workflow agent receives a stable prompt frame with the objective, node contract,
+declared inputs, result path, and exact authenticated completion command. Provider-native
+delegation is disabled for workflow nodes: delegated workers are never allowed to inherit or act on
+the owner's completion contract. One typed attempt capability separates read-only launcher control,
+projected read-only inputs, the result/completion outbox, and mode-0700 scratch; providers receive no
+write grant to their common parent. The launcher supplies scratch through `TMPDIR`, `TMP`, and `TEMP`.
+Dynamic `include: path` inputs resolve only after their
 dependencies finish. Work that cannot be enumerated in advance should use a planner with a
 schema-validated result and a digest-bound approval gate before execution, not runtime-generated
 nodes.
@@ -95,9 +104,11 @@ orchestrate clean <run-id> --dry-run
 ```
 
 Orchestrate is interactive and master-driven. `run` starts the initial ready work, node agents write
-authenticated submissions, and the launching master runs `reconcile` to commit them and start newly
-ready nodes. Herdr's trusted plugin prompts that master when a workflow agent becomes blocked or
-done. Wake-ups reduce latency, but correctness never depends on delivery: a dormant submission waits
+authenticated submissions, and the current wake-owning master runs `reconcile` to commit them and
+start newly ready nodes. An authenticated agent-pane `resume` transfers wake ownership to that
+agent's exact provider session; a non-agent resume preserves the current owner. Herdr's trusted
+plugin prompts that owner when a workflow agent becomes blocked or done. Wake-ups reduce latency,
+but correctness never depends on delivery: a dormant submission waits
 durably for the next explicit reconcile. There is no per-run background controller.
 
 The board, `board --json`, and `runs --needs-attention` combine durable run state with live Herdr

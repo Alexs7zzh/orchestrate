@@ -12,19 +12,21 @@ import type {
   EventRecord,
   RunState,
   UiPreferenceLayer,
-  ValidationIssue,
+  WorkflowDiagnostic,
+  WorkflowProvenance,
   WorkflowSpec
 } from "./types.js"
 
+import { approvalPreview, originLabel } from "./approval.js"
 import { buildBoardModel, runtimeDependencyIds } from "./board-model.js"
 import { observePaneGarnish } from "./board-observation.js"
+import { submitNodeDone } from "./completion-submission.js"
 import {
   crankRun,
   handleHerdrAgentStatusEvent,
   readBoundedResult,
   reconcileRun,
-  startWorkflowRun,
-  submitNodeDone
+  startWorkflowRun
 } from "./crank.js"
 import {
   HerdrSurface,
@@ -39,6 +41,11 @@ import {
   setUiPreference,
   uiPreferencesWithOrigins
 } from "./preferences.js"
+import {
+  compileProviderLaunchIdentity,
+  compileProviderLaunchIdentityFromPath,
+  compileProviderPath
+} from "./provider-launch.js"
 import { herdrPluginHealth, installedBuild, migrateStagedInstallation, runSetup } from "./setup.js"
 import {
   acquireRunLock,
@@ -47,6 +54,7 @@ import {
   eventsPath,
   holdBlocksDependencies,
   listRunStates,
+  providerSessionRunDirectory,
   readEvents,
   readRunState,
   readUiSnapshot,
@@ -59,8 +67,9 @@ import {
   runtimeBuild,
   stateRoot
 } from "./state.js"
-import { overlappingMutableNodes, validateWorkflow } from "./validation.js"
+import { assertWorkflowProviderLaunchIsolation, overlappingMutableNodes } from "./validation.js"
 import { runUiWizard } from "./wizard.js"
+import { formatWorkflowDiagnostics, loadWorkflowSource } from "./workflow-source.js"
 
 declare const ORCHESTRATE_BUILD_EMBEDDED: string
 
@@ -87,6 +96,9 @@ function jsonErrorCode(error: unknown, message: string): JsonErrorCode {
       ? (error as { readonly code?: unknown }).code
       : undefined
   const systemCode = typeof candidateCode === "string" ? candidateCode : ""
+  if (systemCode === "validation") {
+    return "validation"
+  }
   if (/\bherdr\b/i.test(message)) {
     return "herdr"
   }
@@ -129,21 +141,27 @@ function jsonErrorCode(error: unknown, message: string): JsonErrorCode {
 export function jsonError(error: unknown): {
   readonly ok: false
   readonly error: { readonly code: JsonErrorCode; readonly message: string }
+  readonly source?: string
+  readonly diagnostics?: readonly WorkflowDiagnostic[]
 } {
   const message = error instanceof Error ? error.message : String(error)
+  const sourceError = error instanceof WorkflowSourceError ? error : null
   return {
     ok: false,
     error: {
       code: jsonErrorCode(error, message),
       message
-    }
+    },
+    ...(sourceError === null
+      ? {}
+      : { source: sourceError.source, diagnostics: sourceError.diagnostics })
   }
 }
 
 export const PUBLIC_COMMAND_HELP = {
-  validate: "Usage: orchestrate validate <workflow.json> [--json]",
-  preview: "Usage: orchestrate preview <workflow.json> [--json]",
-  run: "Usage: orchestrate run <workflow.json> --approve <sha256> [--allow-write-conflicts] [--dry-run] [--json]",
+  validate: "Usage: orchestrate validate <workflow.yaml> [--json]",
+  preview: "Usage: orchestrate preview <workflow.yaml> [--json]",
+  run: "Usage: orchestrate run <workflow.yaml> --approve <sha256> [--allow-write-conflicts] [--dry-run] [--json]",
   status: "Usage: orchestrate status [<run>] [--wait] [--json]",
   events: "Usage: orchestrate events [<run>] [--follow] [--json]",
   board: "Usage: orchestrate board [<run>] [--json]",
@@ -159,7 +177,7 @@ export const PUBLIC_COMMAND_HELP = {
   hold: "Usage: orchestrate hold <run> <node> [--json]",
   release: "Usage: orchestrate release <run> <node> [--json]",
   revise:
-    "Usage: orchestrate revise <run> <workflow.json> [--json]\n       orchestrate revise <run> --discard [--json]",
+    "Usage: orchestrate revise <run> <workflow.yaml> [--json]\n       orchestrate revise <run> --discard [--json]",
   "node-done":
     "Usage: orchestrate node-done <run> <node> --token <token> --outcome <completed|failed> [--hold] [--json]",
   "node-exit":
@@ -347,177 +365,64 @@ function output(json: boolean, value: unknown, human: string): void {
   console.log(json ? JSON.stringify(value) : human)
 }
 
-function formatIssues(issues: readonly ValidationIssue[]): string {
-  return issues.length === 0
-    ? "Valid."
-    : issues
-        .map(
-          (issue) =>
-            `${issue.severity === "error" ? "ERROR" : "WARN "} ${issue.code}: ${issue.message}`
-        )
-        .join("\n")
-}
-
 async function loadWorkflow(file: string): Promise<{
   readonly workflow: WorkflowSpec
   readonly digest: string
-  readonly issues: readonly ValidationIssue[]
+  readonly provenance: WorkflowProvenance
+  readonly diagnostics: readonly WorkflowDiagnostic[]
 }> {
-  const parsed = JSON.parse(await readFile(path.resolve(file), "utf8")) as unknown
-  const result = validateWorkflow(parsed)
-  if (result.workflow === null || result.digest === null) {
-    throw new Error(formatIssues(result.issues))
+  const result = await loadWorkflowSource(file)
+  if (result.workflow === null || result.digest === null || result.provenance === null) {
+    throw new WorkflowSourceError(result.source, result.diagnostics)
   }
   return {
     workflow: result.workflow,
     digest: result.digest,
-    issues: result.issues
+    provenance: result.provenance,
+    diagnostics: result.diagnostics
   }
 }
 
-function previewCallback(workflow: WorkflowSpec) {
-  const callback = workflow.callback
-  if (callback.type === "command") {
-    return {
-      type: callback.type,
-      executable: callback.argv[0],
-      argumentCount: Math.max(0, callback.argv.length - 1),
-      timeoutSeconds: callback.timeoutSeconds
-    }
-  }
-  if (callback.type === "webhook") {
-    let endpoint = "<invalid-url>"
-    try {
-      const parsed = new URL(callback.url)
-      parsed.username = ""
-      parsed.password = ""
-      parsed.search = ""
-      parsed.hash = ""
-      endpoint = parsed.toString()
-    } catch {
-      // Validation owns URL acceptance. Preview never exposes an unparsed secret-bearing value.
-    }
-    return {
-      type: callback.type,
-      endpoint,
-      headerNames: Object.keys(callback.headers).toSorted(),
-      timeoutSeconds: callback.timeoutSeconds
-    }
-  }
-  return callback
-}
+class WorkflowSourceError extends Error {
+  readonly code = "validation"
 
-function previewPlan(workflow: WorkflowSpec, digest: string, issues: readonly ValidationIssue[]) {
-  const depths = dependencyDepths(
-    Object.fromEntries(workflow.nodes.map((entry) => [entry.id, entry]))
-  )
-  const floorPlan =
-    workflow.presentation === undefined
-      ? null
-      : {
-          workrooms: workflow.presentation.workrooms.map((workroom) => ({
-            id: workroom.id,
-            label: workroom.label,
-            layout: workroom.layout,
-            settlesOn: workroom.settlesOn,
-            seats: workroom.seats.map((seat) => ({
-              id: seat.id,
-              label: seat.label,
-              nodes: workflow.nodes
-                .filter((node) => node.workroom === workroom.id && node.seat === seat.id)
-                .map((node) => node.id)
-            })),
-            seatlessNodes: workflow.nodes
-              .filter((node) => node.workroom === workroom.id && node.seat === undefined)
-              .map((node) => node.id)
-          }))
-        }
-  return {
-    digest,
-    name: workflow.name,
-    objective: workflow.objective,
-    cwd: workflow.cwd,
-    concurrency: workflow.concurrency,
-    limits: workflow.limits,
-    callback: previewCallback(workflow),
-    milestones: workflow.milestones,
-    writeConflicts: workflow.writeConflicts,
-    floorPlan,
-    nodes: workflow.nodes.map((node) => ({
-      id: node.id,
-      type: node.type,
-      title: node.title,
-      depth: depths.get(node.id) ?? 1,
-      needs: node.needs,
-      gate: node.gate,
-      when: node.when ?? null,
-      workroom: node.workroom ?? null,
-      seat: node.seat ?? null,
-      provider: node.type === "agent" ? node.provider : null,
-      permissions:
-        node.type === "agent"
-          ? {
-              execution: node.permissions.execution,
-              escalation: node.permissions.escalation,
-              extraArgs: node.permissions.extraArgs,
-              inheritEnv: node.permissions.inheritEnv
-            }
-          : null,
-      workspace: node.workspace,
-      environmentKeys:
-        node.type === "agent"
-          ? Object.keys(node.permissions.env).toSorted()
-          : Object.keys(node.env).toSorted()
-    })),
-    repeats: workflow.repeats,
-    issues
+  constructor(
+    readonly source: string,
+    readonly diagnostics: readonly WorkflowDiagnostic[]
+  ) {
+    super(formatWorkflowDiagnostics(diagnostics))
   }
 }
 
-function previewText(plan: ReturnType<typeof previewPlan>): string {
-  const rows = plan.nodes
-    .toSorted((left, right) => left.depth - right.depth)
-    .map(
-      (node) =>
-        `  ${String(node.depth).padStart(2)} ${node.id} [${node.type}${node.provider === null ? "" : `/${node.provider}`}] needs=${node.needs.join(",") || "-"} gate=${node.gate}${node.when === null ? "" : ` when=${node.when.node}${node.when.pointer}==${JSON.stringify(node.when.equals)}`}${
-          node.permissions === null
-            ? ""
-            : ` escalation=${node.permissions.escalation} execution=${JSON.stringify(node.permissions.execution)}`
-        } workspace=${node.workspace.mode} path=${JSON.stringify(node.workspace.path)} writes=${JSON.stringify(node.workspace.writes)} exclusiveResources=${JSON.stringify(node.workspace.exclusiveResources)} envKeys=${JSON.stringify(node.environmentKeys)}${node.workroom === null ? "" : ` workroom=${node.workroom}${node.seat === null ? "" : ` seat=${node.seat}`}`}`
-    )
-  const floorPlan =
-    plan.floorPlan === null
-      ? []
-      : [
-          "Floor plan:",
-          "  Seat panes stay parked while active; settled panes follow completed-pane preferences.",
-          ...plan.floorPlan.workrooms.flatMap((workroom) => [
-            `  ${workroom.id} ${JSON.stringify(workroom.label)} layout=${workroom.layout} settlesOn=${workroom.settlesOn.join(",")}`,
-            ...workroom.seats.map(
-              (seat) =>
-                `    seat ${seat.id} ${JSON.stringify(seat.label)} nodes=${seat.nodes.join(",") || "-"}`
-            ),
-            ...(workroom.seatlessNodes.length === 0
-              ? []
-              : [`    seatless nodes=${workroom.seatlessNodes.join(",")}`])
-          ])
-        ]
+function approvalPreviewText(
+  plan: ReturnType<typeof approvalPreview> & { readonly digest: string }
+): string {
   return [
     `${plan.name}: ${plan.objective}`,
     `Digest: ${plan.digest}`,
-    `Cwd: ${plan.cwd}`,
-    `Concurrency: ${plan.concurrency}`,
-    `Max starts: ${plan.limits.maxStarts ?? "unlimited"}`,
-    `Callback: ${JSON.stringify(plan.callback)}`,
-    `Milestones: ${plan.milestones}`,
-    `Write conflicts: ${plan.writeConflicts}`,
-    ...floorPlan,
+    `Cwd: ${plan.cwd} ${originLabel(plan.origins["/cwd"])}`,
+    `Concurrency: ${plan.concurrency} ${originLabel(plan.origins["/concurrency"])}`,
+    `Limits: ${JSON.stringify(plan.limits)} ${originLabel(plan.origins["/limits"])}`,
+    `Callback: ${JSON.stringify(plan.callback)} ${originLabel(plan.origins["/callback"])}`,
+    `Milestones: ${plan.milestones} ${originLabel(plan.origins["/milestones"])}`,
+    `Write conflicts: ${plan.writeConflicts} ${originLabel(plan.origins["/writeConflicts"])}`,
+    ...(Object.hasOwn(plan, "presentation")
+      ? [
+          `Presentation: ${JSON.stringify(plan.presentation)} ${originLabel(plan.origins["/presentation"])}`
+        ]
+      : []),
+    `Repeats: ${JSON.stringify(plan.repeats)} ${originLabel(plan.origins["/repeats"])}`,
     "Nodes:",
-    ...rows,
-    ...(plan.repeats.length === 0
-      ? []
-      : ["Repeats:", ...plan.repeats.map((repeat) => `  ${repeat.id} (max ${repeat.maxRounds})`)]),
-    ...(plan.issues.length === 0 ? [] : [formatIssues(plan.issues)])
+    ...plan.nodes
+      .toSorted((left, right) => left.depth - right.depth)
+      .map(
+        (node) =>
+          `  ${String(node.depth).padStart(2)} ${node.id} ${JSON.stringify(node)} needs-origin=${originLabel(plan.origins[`/nodes/${plan.nodes.findIndex((candidate) => candidate.id === node.id)}/needs`])}`
+      ),
+    "Origins:",
+    ...Object.entries(plan.origins)
+      .toSorted(([left], [right]) => left.localeCompare(right))
+      .map(([pointer, origin]) => `  ${pointer || "/"}: ${originLabel(origin)}`)
   ].join("\n")
 }
 
@@ -571,14 +476,43 @@ async function runPreflight(
   } catch (error) {
     checks.push({ name: "herdr", ok: false, detail: String(error) })
   }
+  const providerLaunchIdentities = []
+  const providerPath = await compileProviderPath().catch(() => null)
   for (const provider of new Set(
     workflow.nodes.flatMap((node) => (node.type === "agent" ? [node.provider] : []))
   )) {
-    const ok = await executableAvailable(provider)
+    try {
+      const identity =
+        providerPath === null
+          ? await compileProviderLaunchIdentity(provider)
+          : await compileProviderLaunchIdentityFromPath(provider, providerPath)
+      providerLaunchIdentities.push(identity)
+      checks.push({
+        name: `provider:${provider}`,
+        ok: true,
+        detail: `${identity.entry.canonicalPath} -> ${identity.executionArgv.join(" ")}`
+      })
+    } catch (error) {
+      checks.push({
+        name: `provider:${provider}`,
+        ok: false,
+        detail: error instanceof Error ? error.message : String(error)
+      })
+    }
+  }
+  try {
+    assertWorkflowProviderLaunchIsolation(workflow, providerLaunchIdentities)
     checks.push({
-      name: `provider:${provider}`,
-      ok,
-      detail: ok ? "found" : `${provider} not on PATH`
+      name: "provider-executable-authority",
+      ok: true,
+      detail:
+        "compiled provider launch executables and PATH precedence identities are outside every mutating provider write authority"
+    })
+  } catch (error) {
+    checks.push({
+      name: "provider-executable-authority",
+      ok: false,
+      detail: error instanceof Error ? error.message : String(error)
     })
   }
   const worktrees = workflow.nodes.flatMap((node) =>
@@ -691,21 +625,39 @@ export function statusValue(state: RunState, observedAttention = runNeedsAttenti
     ])
   )
   const depths = dependencyDepths(runtimeNodes)
+  let pendingRevision: null | {
+    digest: string
+    summary: readonly string[]
+    createdAt: string
+    preview: ReturnType<typeof approvalPreview> | null
+    provenanceError?: string
+  } = null
+  if (state.pendingRevision !== null) {
+    try {
+      pendingRevision = {
+        digest: state.pendingRevision.digest,
+        summary: state.pendingRevision.summary,
+        createdAt: state.pendingRevision.createdAt,
+        preview: approvalPreview(state.pendingRevision.workflow, state.pendingRevision.provenance)
+      }
+    } catch (error) {
+      pendingRevision = {
+        digest: state.pendingRevision.digest,
+        summary: state.pendingRevision.summary,
+        createdAt: state.pendingRevision.createdAt,
+        preview: null,
+        provenanceError: `Invalid pending revision provenance: ${error instanceof Error ? error.message : String(error)}`
+      }
+    }
+  }
   return {
     runId: state.id,
     name: state.workflowName,
     objective: state.objective,
     status: state.status,
-    needsAttention: observedAttention,
+    needsAttention: observedAttention || pendingRevision?.provenanceError !== undefined,
     pause: state.pause,
-    pendingRevision:
-      state.pendingRevision === null
-        ? null
-        : {
-            digest: state.pendingRevision.digest,
-            summary: state.pendingRevision.summary,
-            createdAt: state.pendingRevision.createdAt
-          },
+    pendingRevision,
     starts: state.starts,
     updatedAt: state.updatedAt,
     nodes: Object.values(state.nodes).map((node) => {
@@ -746,15 +698,18 @@ export function statusText(
   const needs = terminal
     ? []
     : [
-        ...value.gates.map(
-          (gate) =>
-            `  gate ${gate.nodeId}: orchestrate approve ${state.id} --gate ${gate.nodeId} --digest ${gate.digest}`
-        ),
+        ...value.gates.flatMap((gate) => [
+          `  gate ${gate.nodeId} content: ${JSON.stringify(gate.content)}`,
+          `  gate ${gate.nodeId}: orchestrate approve ${state.id} --gate ${gate.nodeId} --digest ${gate.digest}`
+        ]),
         ...(state.pendingRevision === null
           ? []
-          : [
-              `  revision: orchestrate approve ${state.id} --revision ${state.pendingRevision.digest}`
-            ]),
+          : value.pendingRevision?.provenanceError === undefined
+            ? [
+                `  revision preview: ${JSON.stringify(value.pendingRevision?.preview)}`,
+                `  revision: orchestrate approve ${state.id} --revision ${state.pendingRevision.digest}`
+              ]
+            : [`  revision provenance: ${value.pendingRevision.provenanceError}`]),
         ...(state.pause?.kind === "max-rounds" && state.pause.repeatId !== null
           ? [
               `  max rounds: orchestrate resume ${state.id} --continue-rounds 1`,
@@ -782,12 +737,11 @@ export function statusText(
   const recovery = terminal
     ? []
     : Object.values(state.nodes).flatMap((node) => {
-        const attempt = node.attempts.at(-1)
-        if (node.type !== "agent" || node.status !== "running" || attempt === undefined) {
+        if (node.type !== "agent" || node.status !== "running") {
           return []
         }
         return [
-          `  ${node.id}: orchestrate node-done ${state.id} ${node.id} --token ${attempt.token} --outcome failed`
+          `  ${node.id}: inspect status, restore the owning pane or resume its provider session, and let that same owner finish and submit completion`
         ]
       })
   return [
@@ -795,7 +749,7 @@ export function statusText(
     `Status: ${state.status}${value.needsAttention ? " — needs attention" : ""}`,
     `Objective: ${state.objective}`,
     ...(needs.length === 0 ? [] : ["Needs you:", ...needs]),
-    ...(recovery.length === 0 ? [] : ["If a running pane disappeared:", ...recovery]),
+    ...(recovery.length === 0 ? [] : ["Running-agent recovery:", ...recovery]),
     "Nodes:",
     ...value.nodes
       .toSorted((left, right) => left.depth - right.depth)
@@ -827,7 +781,9 @@ interface ObservedRun {
 }
 
 function garnishNeedsAttention(garnish: Readonly<Record<string, PaneGarnish>>): boolean {
-  return Object.values(garnish).some((sample) => sample.condition !== "live")
+  return Object.values(garnish).some(
+    (sample) => sample.condition !== "live" && sample.condition !== "submitted"
+  )
 }
 
 async function observeRuns(states: readonly RunState[]): Promise<readonly ObservedRun[]> {
@@ -1183,12 +1139,16 @@ async function doctorReport(): Promise<{
   const plugin = await herdrPluginHealth()
   checks.push({ name: "herdr-plugin", ...plugin })
   for (const provider of ["codex", "claude"] as const) {
-    const ok = await executableAvailable(provider)
-    checks.push({
-      name: provider,
-      ok,
-      detail: ok ? "found" : "not found (optional until used)"
-    })
+    try {
+      const identity = await compileProviderLaunchIdentity(provider)
+      checks.push({ name: provider, ok: true, detail: identity.entry.canonicalPath })
+    } catch (error) {
+      checks.push({
+        name: provider,
+        ok: false,
+        detail: `${error instanceof Error ? error.message : String(error)} (optional until used)`
+      })
+    }
   }
   try {
     await ensureStateDirectories()
@@ -1322,6 +1282,7 @@ async function inspectCleanRun(runDir: string, repair: boolean) {
       )
     ],
     worktrees: [...new Set(worktrees)],
+    providerSessionDirectory: providerSessionRunDirectory(state.id),
     directory: runDir
   }
   return { state, workflow, item }
@@ -1383,16 +1344,52 @@ export async function runCli(
 
   if (command === "validate") {
     shape(command, parsed, 1, 1, [])
-    const raw = JSON.parse(await readFile(path.resolve(parsed.positionals[0] as string), "utf8"))
-    const result = validateWorkflow(raw)
-    output(json, result, formatIssues(result.issues))
-    return result.workflow === null ? EXIT_ERROR : EXIT_OK
+    const result = await loadWorkflowSource(parsed.positionals[0] as string)
+    const valid =
+      result.workflow !== null &&
+      result.digest !== null &&
+      result.provenance !== null &&
+      !result.diagnostics.some((diagnostic) => diagnostic.severity === "error")
+    const envelope = {
+      ok: valid,
+      source: result.source,
+      workflow: valid ? result.workflow : null,
+      digest: valid ? result.digest : null,
+      diagnostics: result.diagnostics
+    }
+    output(
+      json,
+      envelope,
+      result.diagnostics.length === 0 ? "Valid." : formatWorkflowDiagnostics(result.diagnostics)
+    )
+    return valid ? EXIT_OK : EXIT_ERROR
   }
   if (command === "preview") {
     shape(command, parsed, 1, 1, [])
-    const loaded = await loadWorkflow(parsed.positionals[0] as string)
-    const plan = previewPlan(loaded.workflow, loaded.digest, loaded.issues)
-    output(json, plan, previewText(plan))
+    const loaded = await loadWorkflowSource(parsed.positionals[0] as string)
+    if (loaded.workflow === null || loaded.digest === null || loaded.provenance === null) {
+      const envelope = {
+        ok: false,
+        source: loaded.source,
+        digest: null,
+        preview: null,
+        diagnostics: loaded.diagnostics
+      }
+      output(json, envelope, formatWorkflowDiagnostics(loaded.diagnostics))
+      return EXIT_ERROR
+    }
+    const plan = { digest: loaded.digest, ...approvalPreview(loaded.workflow, loaded.provenance) }
+    output(
+      json,
+      {
+        ok: true,
+        source: loaded.source,
+        digest: loaded.digest,
+        preview: plan,
+        diagnostics: loaded.diagnostics
+      },
+      approvalPreviewText(plan)
+    )
     return EXIT_OK
   }
   if (command === "run") {
@@ -1695,14 +1692,25 @@ export async function runCli(
       type: "propose-revision",
       workflow: loaded.workflow,
       digest: loaded.digest,
-      summary
+      summary,
+      provenance: loaded.provenance
     })
     output(
       json,
-      { runId: result.state.id, digest: loaded.digest, summary },
-      [`Proposed revision for ${result.state.id}.`, ...summary, `Digest: ${loaded.digest}`].join(
-        "\n"
-      )
+      {
+        runId: result.state.id,
+        digest: loaded.digest,
+        summary,
+        preview: approvalPreview(loaded.workflow, loaded.provenance)
+      },
+      [
+        `Proposed revision for ${result.state.id}.`,
+        ...summary,
+        approvalPreviewText({
+          digest: loaded.digest,
+          ...approvalPreview(loaded.workflow, loaded.provenance)
+        })
+      ].join("\n")
     )
     return EXIT_OK
   }
@@ -1713,9 +1721,8 @@ export async function runCli(
     if (token === null || (outcome !== "completed" && outcome !== "failed")) {
       throw new Error(HELP[command])
     }
-    const runDir = runDirectory(parsed.positionals[0] as string)
     const result = await submitNodeDone(
-      runDir,
+      parsed.positionals[0] as string,
       parsed.positionals[1] as string,
       token,
       outcome,
@@ -1781,6 +1788,7 @@ export async function runCli(
       runId: string
       panes: readonly string[]
       worktrees: readonly string[]
+      providerSessionDirectory: string
       directory: string
     }>
     if (has(parsed, "dry-run")) {

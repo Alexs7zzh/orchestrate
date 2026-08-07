@@ -12,9 +12,10 @@ import type {
   WorkflowNode
 } from "./types.js"
 
+import { approvalPreview } from "./approval.js"
 import { holdBlocksDependencies } from "./state.js"
 
-export type PaneCondition = "live" | "gone" | "blocked" | "done"
+export type PaneCondition = "live" | "gone" | "blocked" | "done" | "submitted"
 
 export interface PaneGarnish {
   readonly condition: PaneCondition
@@ -45,9 +46,9 @@ export interface AttemptMetric {
 }
 
 export interface StalledPaneView {
-  readonly condition: "gone" | "blocked" | "done"
+  readonly condition: "gone" | "blocked" | "done" | "submitted"
   readonly detail: string
-  readonly manualCommand: string | null
+  readonly guidanceCommand: string
 }
 
 export interface BoardNodeView {
@@ -130,11 +131,13 @@ export interface GateAttention extends AttentionBase {
   readonly kind: "gate"
   readonly nodeId: string
   readonly digest: string
+  readonly content: string
 }
 
 export interface RevisionAttention extends AttentionBase {
   readonly kind: "revision"
   readonly digest: string
+  readonly preview: ReturnType<typeof approvalPreview> | null
 }
 
 export interface MaxRoundsAttention extends AttentionBase {
@@ -376,8 +379,8 @@ export function revisionApprovalCommand(runId: string, digest: string): string {
   return `orchestrate approve ${runId} --revision ${digest}`
 }
 
-export function nodeDoneCommand(runId: string, nodeId: string, token: string): string {
-  return `orchestrate node-done ${runId} ${nodeId} --token ${token} --outcome completed`
+export function stalledInspectionCommand(runId: string): string {
+  return `orchestrate status ${runId}`
 }
 
 function stalledPane(
@@ -388,21 +391,32 @@ function stalledPane(
   if (node.status !== "running" || garnish === undefined || garnish.condition === "live") {
     return null
   }
-  const attempt = node.attempts.at(-1)
-  const manualCommand =
-    node.type === "agent" && attempt !== undefined
-      ? nodeDoneCommand(state.id, node.id, attempt.token)
-      : null
+  if (garnish.condition === "submitted") {
+    return {
+      condition: "submitted",
+      detail: garnish.detail ?? "Authenticated completion submitted; pending reconcile.",
+      guidanceCommand: `orchestrate reconcile ${state.id}`
+    }
+  }
+  const ownerGuidance =
+    node.type === "agent"
+      ? garnish.condition === "gone"
+        ? "Inspect status, restore the owning pane or resume its provider session, and let that same owner finish and submit completion."
+        : garnish.condition === "blocked"
+          ? "Inspect the owning pane, resolve its blocker, and resume that same owner; only that owner may finish and submit completion."
+          : "Inspect status and the declared result, then restore or resume the owning provider session so that same owner can finish and submit completion."
+      : "Inspect status and the command pane, then use launcher-owned recovery to resume or reconcile the attempt."
+  const observedDetail =
+    garnish.detail ??
+    (garnish.condition === "gone"
+      ? "Pane gone — human needed."
+      : garnish.condition === "blocked"
+        ? "Agent is blocked — human needed."
+        : "Result missing: agent finished without authenticated node-done — recovery needed.")
   return {
     condition: garnish.condition,
-    detail:
-      garnish.detail ??
-      (garnish.condition === "gone"
-        ? "Pane gone — human needed."
-        : garnish.condition === "blocked"
-          ? "Agent is blocked — human needed."
-          : "Result missing: agent finished without authenticated node-done — recovery needed."),
-    manualCommand
+    detail: `${observedDetail} ${ownerGuidance}`,
+    guidanceCommand: stalledInspectionCommand(state.id)
   }
 }
 
@@ -429,26 +443,37 @@ function buildAttention(
       kind: "gate",
       nodeId: gate.nodeId,
       digest: gate.digest,
+      content: gate.content,
       title: `Approve ${gate.title}`,
-      detail: `Digest ${gate.digest}`,
+      detail: `Content ${JSON.stringify(gate.content)}\nDigest ${gate.digest}`,
       command: gateApprovalCommand(state.id, gate)
     }))
 
-  const revisions: RevisionAttention[] =
-    state.pendingRevision === null
-      ? []
-      : [
-          {
-            kind: "revision",
-            digest: state.pendingRevision.digest,
-            title: "Approve pending revision",
-            detail:
-              state.pendingRevision.summary.length === 0
-                ? `Digest ${state.pendingRevision.digest}`
-                : state.pendingRevision.summary.join("; "),
-            command: revisionApprovalCommand(state.id, state.pendingRevision.digest)
-          }
-        ]
+  const revisions: RevisionAttention[] = []
+  if (state.pendingRevision !== null) {
+    try {
+      revisions.push({
+        kind: "revision",
+        digest: state.pendingRevision.digest,
+        title: "Approve pending revision",
+        detail:
+          state.pendingRevision.summary.length === 0
+            ? `Digest ${state.pendingRevision.digest}`
+            : state.pendingRevision.summary.join("; "),
+        command: revisionApprovalCommand(state.id, state.pendingRevision.digest),
+        preview: approvalPreview(state.pendingRevision.workflow, state.pendingRevision.provenance)
+      })
+    } catch (error) {
+      revisions.push({
+        kind: "revision",
+        digest: state.pendingRevision.digest,
+        title: "Pending revision has invalid provenance",
+        detail: `Cannot approve until provenance is repaired: ${error instanceof Error ? error.message : String(error)}`,
+        command: null,
+        preview: null
+      })
+    }
+  }
 
   const maxRounds: MaxRoundsAttention[] =
     state.pause?.kind !== "max-rounds" || state.pause.repeatId === null
@@ -523,7 +548,7 @@ function buildAttention(
   )
 
   const stalled: StalledPaneAttention[] = nodes.flatMap((node) => {
-    if (node.stalledPane === null) {
+    if (node.stalledPane === null || node.stalledPane.condition === "submitted") {
       return []
     }
     return [
@@ -538,7 +563,7 @@ function buildAttention(
               ? `${node.title}: result missing`
               : `${node.title}: pane gone`,
         detail: node.stalledPane.detail,
-        command: node.stalledPane.manualCommand
+        command: node.stalledPane.guidanceCommand
       }
     ]
   })

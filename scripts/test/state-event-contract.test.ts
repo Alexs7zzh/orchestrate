@@ -91,6 +91,7 @@ describe("state and event contract", () => {
   test("rejects non-canonical array indices during replay", () => {
     const first = state({
       pendingRevision: {
+        provenance: { source: "/tmp/workflow.yaml", origins: {}, inferredNeeds: {} },
         workflow: {} as never,
         digest: "b".repeat(64),
         summary: ["first"],

@@ -17,9 +17,12 @@ Orchestrate is an interactive, master-driven DAG coordinator for Herdr. Herdr is
 available and internally consistent during ordinary operation. Orchestrate does not attempt to be a
 fault-tolerant distributed system around Herdr.
 
-The launching master agent is the scheduler after the initial ready nodes start. When a workflow
+The current master agent is the scheduler after the initial ready nodes start. `run` captures the
+launching agent session; an explicit `resume` from another authenticated Herdr agent session
+transfers wake ownership to that session. A resume from a non-agent terminal retains the prior
+owner. When a workflow
 agent becomes blocked or done, Herdr invokes the trusted Orchestrate plugin event hook. The hook maps
-that pane to its live attempt and prompts the captured master to reconcile a valid submission or
+that pane to its live attempt and prompts the current master to reconcile a valid submission or
 debug a missing one. The master runs `orchestrate reconcile` to validate submitted results, commit
 transitions, and start newly ready work. If the master is not available, the run remains durably
 dormant; unattended progression is not a default guarantee.
@@ -35,18 +38,45 @@ time is safe, and correctness never depends on receiving a wake-up.
   authenticated node submissions, dependency readiness, holds, gates, repeats, workroom/seat
   occupancy, and revisions.
 - The master agent owns reconciliation, debugging, and recovery decisions.
-- A node agent owns only its declared task writes and its exact token-addressed result submission.
-  It never writes authoritative run state or schedules another node.
+- The owning workflow agent alone owns its declared task writes and exact token-addressed result
+  submission. Provider-native delegation is disabled or denied; delegated workers cannot inherit
+  or exercise that completion contract. It never writes authoritative run state or schedules
+  another node.
 
 ## Guaranteed behavior
 
-- A workflow is schema-validated and digest-approved before a run starts.
+- YAML source is strictly parsed, normalized, expanded-schema/semantically validated, then
+  domain-separated canonically digested before a run starts. Digests are recomputed at start,
+  revision, and gate trust boundaries.
 - Provider agents cannot write authoritative Orchestrate state, another attempt's submission, or
-  installed control assets.
-- `node-done` records a token-addressed result submission without reading authoritative state,
-  calling Herdr, or performing scheduling. Repeating the same submission replaces the same envelope;
-  reconciliation authenticates the active token and rejects stale tokens rather than applying them
-  to another attempt.
+  installed control assets. Claude exposes only Bash; its required native sandbox is therefore the
+  only provider filesystem channel, while Agent/Task delegation and built-in filesystem tools are
+  absent from the tool surface.
+- Claude session projects are isolated per canonical lineage outside node submission transport;
+  resume and fork reuse only their source lineage project, and a session-bearing peer receives no
+  sibling-lineage or alternate completion-channel grant. Claude cannot read a sibling attempt or
+  sibling lineage through sandboxed Bash, and has no alternate built-in filesystem channel.
+- Both providers receive launcher-owned `TMPDIR`, `TMP`, and `TEMP` pointing to scratch inside only
+  their token-scoped transport; ambient temp and undeclared workspace writes are not granted.
+  Each launch is governed by one immutable, typed attempt capability manifest whose four canonical
+  directory identities are pairwise distinct: launcher-owned read-only `control/`, launcher-projected
+  read-only `inbox/`, provider-writable `outbox/`, and mode-0700 provider-writable `scratch/`.
+  Provider policy, launch, projection, completion submission, and reconciliation consume those same
+  identities; no provider receives a write grant to their common parent.
+  Provider lookup and configuration use launcher-owned `PATH`, `HOME`, and provider control roots;
+  authored agent environment cannot select a different executable or configuration directory. The
+  compiled launch identity freezes an absolute, nonempty, unambiguous `PATH`, pins the provider's
+  complete native or supported shebang/interpreter chain and exact fixed argv, and binds every
+  executable plus every earlier lookup directory. Those identities and the canonical effective
+  control roots are outside every mutating node's root and write authority and are
+  revalidated before provider start.
+- `node-done` requires the owner's declared nonempty token-local result, then records a strict,
+  versioned token-addressed submission bound to that bounded read's raw-byte SHA-256 and length.
+  It reads only the immutable attempt-local completion contract and exact no-follow result: it does
+  not read workflow/run authority, acquire the run lock, call Herdr, or schedule. Reconciliation
+  reloads the bound manifest and contract, independently verifies the exact result bytes before
+  parsing, validates the live output schema and active attempt/token/path/status, and rejects stale
+  tokens rather than applying them to another attempt.
 - The trusted Herdr plugin event hook, not the provider sandbox, performs the best-effort,
   session-checked master wake for blocked and done workflow agents.
 - Concurrent `reconcile` invocations are serialized by the run lock. One commits while later

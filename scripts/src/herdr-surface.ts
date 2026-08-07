@@ -2,7 +2,7 @@ import { Option, Schema } from "effect"
 import { spawn } from "node:child_process"
 import { createHash, randomUUID } from "node:crypto"
 import { lstatSync, realpathSync } from "node:fs"
-import { access, mkdir, readFile, rm } from "node:fs/promises"
+import { access, chmod, lstat, mkdir, readFile, rm } from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 
@@ -21,6 +21,19 @@ import type {
 } from "./types.js"
 
 import {
+  compileAttemptCapabilityManifest,
+  ensureAttemptTrustIdentities,
+  loadExistingAttemptCapabilityManifest,
+  verifyAttemptTrustIdentities,
+  type AttemptCapabilityManifest,
+  type ProjectedInputCapability
+} from "./attempt-capability.js"
+import {
+  projectResultBytes,
+  readAuthenticatedCompletionEvidence,
+  readBoundedRegularFileEvidence
+} from "./completion-evidence.js"
+import {
   decodeHerdrAgentInfoResponse,
   decodeHerdrErrorResponse,
   decodeHerdrPaneCurrentResponse,
@@ -32,23 +45,37 @@ import {
   decodeHerdrWorkspaceListResponse
 } from "./herdr-api.generated.js"
 import { HERDR_SCHEMA_BASELINE_VERSION, MINIMUM_HERDR_VERSION } from "./herdr-contract.js"
-import { NodeDoneSubmissionSchema, SpawnReceiptSchema } from "./schema.js"
+import { sourceRuntimeId } from "./prompt-inputs.js"
+import {
+  compileWorkflowProviderLaunchIdentities,
+  materializeProviderRelay,
+  revalidateProviderLaunchIdentity
+} from "./provider-launch.js"
+import { SpawnReceiptSchema } from "./schema.js"
+import { claudeSessionLineageId } from "./session-lineage.js"
 import {
   atomicWriteFile,
   atomicWriteJson,
-  completionSubmissionPath,
+  attemptCapabilityManifestPath,
   readRunState,
   readWorkflow,
+  providerSessionsRoot,
   runDirectory,
   stateRoot,
-  submissionRunDirectory,
+  submissionInboxArtifactPath,
   submissionsRoot
 } from "./state.js"
 import {
   assertProviderAuthorityIsolation,
+  assertWorkflowProviderLaunchIsolation,
+  DeclaredPathInspectionError,
+  isLauncherOwnedAgentEnvironment,
   isMutatingProviderNode,
   normalizedStaticPrefix,
-  orchestrateAuthorityPaths,
+  orchestrateAuthorityPolicy,
+  PathInspectionError,
+  launcherHomePath,
+  providerControlRoot,
   resolveThroughExistingAncestor
 } from "./validation.js"
 import { seatSpecFor, templateForRuntimeNode } from "./workflow-lookup.js"
@@ -65,7 +92,6 @@ const AGENT_SESSION_POLL_MS = 50
 // prompt wait must outlast it or a healthy launch records an ambiguous spawn.
 const AGENT_PROMPT_ACCEPT_TIMEOUT_MS = 60_000
 
-const decodeNodeDoneSubmission = Schema.decodeUnknownOption(NodeDoneSubmissionSchema)
 const decodeSpawnReceipt = Schema.decodeUnknownOption(SpawnReceiptSchema)
 
 function asError(error: unknown): Error {
@@ -216,6 +242,17 @@ function nodeEnvironment(node: WorkflowNode): Record<string, string> {
     : { ...inheritedEnvironment(node.inheritEnv), ...node.env }
 }
 
+function assertAgentEnvironmentAuthority(node: AgentNode): void {
+  const inherited = node.permissions.inheritEnv.find(isLauncherOwnedAgentEnvironment)
+  const explicit = Object.keys(node.permissions.env).find(isLauncherOwnedAgentEnvironment)
+  const reserved = inherited ?? explicit
+  if (reserved !== undefined) {
+    throw new Error(
+      `Agent node "${node.id}" persisted launcher-owned environment variable "${reserved}"; revalidate the workflow before spawning.`
+    )
+  }
+}
+
 function workspacePath(workflow: WorkflowSpec, node: WorkflowNode): string {
   return node.workspace.path ?? node.cwd ?? workflow.cwd
 }
@@ -353,7 +390,15 @@ function providerWriteRoots(node: WorkflowNode, sourceRoot: string): readonly st
   }
   return node.workspace.writes.map((pattern) => {
     const unresolved = path.resolve(sourceRoot, normalizedStaticPrefix(pattern))
-    const resolved = resolveThroughExistingAncestor(unresolved)
+    let resolved: string
+    try {
+      resolved = resolveThroughExistingAncestor(unresolved)
+    } catch (error) {
+      if (error instanceof PathInspectionError) {
+        throw new DeclaredPathInspectionError(node.id, pattern, unresolved, error)
+      }
+      throw error
+    }
     if (resolved !== unresolved) {
       throw new Error(
         `Mutating provider node "${node.id}" write prefix ${JSON.stringify(pattern)} contains a symlink component; use the canonical target.`
@@ -367,7 +412,19 @@ function stableProviderRoot(workflow: WorkflowSpec, node: WorkflowNode, candidat
   const resolved = realpathSync.native(candidate)
   if (isMutatingProviderNode(node)) {
     for (let cursor = resolved; ; cursor = path.dirname(cursor)) {
-      if (lstatSync(cursor).isSymbolicLink()) {
+      let symbolic = false
+      try {
+        inspectProviderAncestorForTests?.(node.id, cursor)
+        symbolic = lstatSync(cursor).isSymbolicLink()
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code
+        const message = error instanceof Error ? error.message : String(error)
+        throw new Error(
+          `Mutating provider node "${node.id}" could not inspect root ancestor "${cursor}"${code === undefined ? "" : ` (${code})`}: ${message}`,
+          { cause: error }
+        )
+      }
+      if (symbolic) {
         throw new Error(
           `Mutating provider node "${node.id}" root "${resolved}" contains a symlink component.`
         )
@@ -385,6 +442,8 @@ function stableProviderRoot(workflow: WorkflowSpec, node: WorkflowNode, candidat
 
 let beforeProviderBoundaryForTests: (() => void | Promise<void>) | null = null
 let afterAgentPromptForTests: (() => void | Promise<void>) | null = null
+let inspectProviderAncestorForTests: ((nodeId: string, ancestor: string) => void) | null = null
+const codexProfileAdaptersByPane = new Map<string, string>()
 
 export function injectBeforeProviderBoundaryForTests(
   hook: (() => void | Promise<void>) | null
@@ -400,6 +459,15 @@ export function injectAfterAgentPromptForTests(hook: (() => void | Promise<void>
     throw new TypeError("Prompt-delivery injection is unavailable in embedded production builds.")
   }
   afterAgentPromptForTests = hook
+}
+
+export function injectProviderAncestorInspectionForTests(
+  hook: ((nodeId: string, ancestor: string) => void) | null
+): void {
+  if (typeof ORCHESTRATE_BUILD_EMBEDDED === "string") {
+    throw new TypeError("Provider-ancestor injection is unavailable in embedded production builds.")
+  }
+  inspectProviderAncestorForTests = hook
 }
 
 export async function removeWorkflowWorktrees(
@@ -432,16 +500,16 @@ export async function removeWorkflowWorktrees(
 export function orchestrateExecutable(): string {
   const invoked = process.argv[1]
   if (invoked !== undefined && path.basename(invoked).startsWith("orchestrate")) {
-    return path.resolve(invoked)
+    return realpathSync.native(path.resolve(invoked))
   }
   if (path.basename(process.execPath).startsWith("orchestrate")) {
-    return path.resolve(process.execPath)
+    return realpathSync.native(path.resolve(process.execPath))
   }
   const explicit = process.env.ORCHESTRATE_BIN?.trim()
   if (explicit !== undefined && explicit.length > 0) {
-    return path.resolve(explicit)
+    return realpathSync.native(path.resolve(explicit))
   }
-  return path.resolve(new URL("../orchestrate.mjs", import.meta.url).pathname)
+  return realpathSync.native(path.resolve(new URL("../orchestrate.mjs", import.meta.url).pathname))
 }
 
 function attemptFor(state: RunState, intent: SpawnIntent): AttemptState {
@@ -485,23 +553,103 @@ function capturesProviderSession(node: AgentNode, state: RunState, intent: Spawn
   return node.session.saveAs !== null || sessionLaunchMode(node, state, intent) === "fork"
 }
 
-function codexControlProfile(paneId: string): string {
-  const suffix = createHash("sha256").update(paneId).digest("hex").slice(0, 24)
-  return `orchestrate-control-${suffix}`
+function codexControlProfile(token: string): string {
+  return `orchestrate-attempt-${token}`
 }
 
-function codexControlProfileDocument(
+export async function projectAttemptPathInputs(
+  workflow: WorkflowSpec,
+  state: RunState,
+  runtimeNodeId: string,
+  node: AgentNode,
+  token: string
+): Promise<readonly ProjectedInputCapability[]> {
+  const projected: ProjectedInputCapability[] = []
+  for (const [inputIndex, input] of node.inputs.entries()) {
+    if (input.include !== "path") {
+      continue
+    }
+    const sourceNodeId = sourceRuntimeId(workflow, state, runtimeNodeId, input)
+    if (sourceNodeId === null) {
+      continue
+    }
+    const source = state.nodes[sourceNodeId]
+    if (source?.status === "skipped") {
+      throw new Error(
+        `Input "${input.from}" for node "${runtimeNodeId}" requests a path from a skipped node.`
+      )
+    }
+    if (source === undefined || source.resultPath === null) {
+      throw new Error(`Input "${input.from}" for node "${runtimeNodeId}" has no completed result.`)
+    }
+    let evidence: Awaited<ReturnType<typeof readBoundedRegularFileEvidence>>
+    if (source.type === "agent") {
+      const sourceAttempt = source.attempts
+        .toReversed()
+        .find((candidate) => candidate.resultPath === source.resultPath)
+      if (sourceAttempt === undefined) {
+        throw new Error(
+          `Input "${input.from}" for node "${runtimeNodeId}" has no authenticated producer attempt.`
+        )
+      }
+      const authenticated = await readAuthenticatedCompletionEvidence({
+        runId: state.id,
+        nodeId: sourceNodeId,
+        token: sourceAttempt.token,
+        resultPath: source.resultPath
+      })
+      const bytes = authenticated.declaredResultBytes
+      const hasher = new Bun.CryptoHasher("sha256")
+      hasher.update(bytes)
+      evidence = {
+        bytes,
+        text: authenticated.declaredResult,
+        sha256: hasher.digest("hex"),
+        byteLength: bytes.byteLength
+      }
+    } else {
+      evidence = await readBoundedRegularFileEvidence(
+        source.resultPath,
+        `Path input from command node "${sourceNodeId}"`
+      )
+      if (typeof source.result !== "string" || evidence.text !== source.result) {
+        throw new Error(
+          `Path input from command node "${sourceNodeId}" changed after its result was committed.`
+        )
+      }
+    }
+    const destination = submissionInboxArtifactPath(
+      state.id,
+      runtimeNodeId,
+      token,
+      inputIndex,
+      sourceNodeId
+    )
+    const copied = await projectResultBytes(
+      destination,
+      evidence.bytes,
+      `Projected path input from node "${sourceNodeId}"`
+    )
+    await chmod(destination, 0o400)
+    projected.push({
+      inputIndex,
+      sourceNodeId,
+      path: destination,
+      sha256: copied.sha256,
+      byteLength: copied.byteLength
+    })
+  }
+  return projected
+}
+
+export function codexControlProfileDocument(
   profile: string,
-  submissionDirectory: string,
-  writeRoots: readonly string[]
+  manifest: AttemptCapabilityManifest
 ): string {
   const filesystem = [
-    [submissionsRoot(), "deny"],
-    [submissionDirectory, "write"],
-    ...writeRoots.map((writeRoot) => [writeRoot, "write"] as const),
-    ...orchestrateAuthorityPaths()
-      .filter((protectedPath) => protectedPath !== submissionsRoot())
-      .map((protectedPath) => [protectedPath, "deny"] as const)
+    ...manifest.access.unreadableRoots.map((protectedPath) => [protectedPath, "deny"] as const),
+    ...manifest.access.readableRoots.map((readRoot) => [readRoot, "read"] as const),
+    ...manifest.access.writableRoots.map((writeRoot) => [writeRoot, "write"] as const)
   ].map(([candidate, permission]) => `${JSON.stringify(candidate)}=${JSON.stringify(permission)}`)
   return [
     `default_permissions=${JSON.stringify(profile)}`,
@@ -515,43 +663,12 @@ function codexControlProfileDocument(
   ].join("\n")
 }
 
-function codexProfilePath(profile: string): string {
-  const configuredHome = process.env.CODEX_HOME?.trim()
-  const codexHome =
-    configuredHome === undefined || configuredHome.length === 0
-      ? path.join(os.homedir(), ".codex")
-      : path.resolve(configuredHome)
+function codexProfilePath(profile: string, codexHome = providerControlRoot("codex")): string {
   return path.join(codexHome, `${profile}.config.toml`)
-}
-
-function claudeAbsolutePattern(directory: string): string {
-  return `${path.resolve(directory)}/**`
 }
 
 function shellQuote(value: string): string {
   return `'${value.replaceAll("'", `'"'"'`)}'`
-}
-
-function claudeNodeDoneRule(
-  state: RunState,
-  intent: SpawnIntent,
-  outcome: "completed" | "failed",
-  hold = false
-): string {
-  const command = [
-    orchestrateExecutable(),
-    "node-done",
-    state.id,
-    intent.nodeId,
-    "--token",
-    intent.token,
-    "--outcome",
-    outcome
-  ]
-  if (hold) {
-    command.push("--hold")
-  }
-  return `Bash(${command.map(shellQuote).join(" ")})`
 }
 
 function codexArguments(
@@ -561,7 +678,14 @@ function codexArguments(
   sessionMode: SessionSpec["mode"]
 ) {
   const approval = node.permissions.escalation === "deny" ? "never" : "on-request"
-  const args: string[] = ["--ask-for-approval", approval, "--profile", profile]
+  const args: string[] = [
+    "--ask-for-approval",
+    approval,
+    "--profile",
+    profile,
+    "--disable",
+    "multi_agent"
+  ]
   if (node.permissions.escalation === "auto-review") {
     args.push("--config", 'approvals_reviewer="auto_review"')
   }
@@ -581,41 +705,57 @@ function codexArguments(
   return args
 }
 
-// Claude sessions are project-scoped by launch directory, so every node of a
-// session lineage must start from the same cwd or --resume cannot find the
-// saved session. The run-shared directory lives beside the token-addressed
-// submission dirs and grants no access to authoritative state or other
-// completion channels.
-function claudeSessionLineage(node: Extract<AgentNode, { readonly provider: "claude" }>): boolean {
-  return node.session.saveAs !== null || node.session.mode !== "fresh"
-}
-
-async function claudeLineageDirectory(runId: string): Promise<string> {
-  const directory = path.join(submissionRunDirectory(runId), "claude-sessions")
-  await mkdir(directory, { recursive: true, mode: 0o755 })
+// Claude sessions are project-scoped by launch directory. Each canonical
+// lineage therefore gets one launcher-owned project outside node submission
+// transport, while resume and fork launches reuse that exact directory.
+async function claudeLineageDirectory(runId: string, lineageId: string): Promise<string> {
+  if (!/^[0-9a-f]{64}$/.test(lineageId)) {
+    throw new Error(`Invalid Claude session lineage id for run "${runId}".`)
+  }
+  const directory = path.join(providerSessionsRoot(), runId, "claude", lineageId)
+  await mkdir(directory, { recursive: true, mode: 0o700 })
+  await chmod(directory, 0o700)
   return realpathSync.native(directory)
 }
 
-function claudeSettingsDocument(
-  node: Extract<AgentNode, { readonly provider: "claude" }>,
-  state: RunState,
-  intent: SpawnIntent,
-  submissionDirectory: string,
-  sourceRoot: string,
-  lineageDirectory: string | null
+function pathContainsOrEquals(relative: string): boolean {
+  return (
+    relative === "" ||
+    (relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative))
+  )
+}
+
+function pathsOverlap(left: string, right: string): boolean {
+  return (
+    pathContainsOrEquals(path.relative(left, right)) ||
+    pathContainsOrEquals(path.relative(right, left))
+  )
+}
+
+export function claudeSettingsDocument(
+  _node: Extract<AgentNode, { readonly provider: "claude" }>,
+  manifest: AttemptCapabilityManifest
 ): string {
-  const writeRoots = providerWriteRoots(node, sourceRoot)
-  const protectedPaths = orchestrateAuthorityPaths()
-  const protectedWritePaths = protectedPaths.filter((candidate) => candidate !== submissionsRoot())
-  const lineage = lineageDirectory === null ? [] : [lineageDirectory]
+  // Claude already denies writes outside its cwd and explicit allowWrite
+  // roots. Keep the explicit deny set bounded to launcher-owned directories
+  // that can themselves be the cwd. Expanding every immutable installation or
+  // provider directory into denyWrite makes the macOS Seatbelt profile grow
+  // with unrelated user state and eventually exceeds execve's argument limit.
+  const protectedWritePaths = [
+    ...new Set([
+      ...manifest.access.unreadableRoots.filter(
+        (root) => !manifest.access.writableRoots.some((writeRoot) => pathsOverlap(root, writeRoot))
+      ),
+      manifest.access.completionExecutablePath,
+      manifest.trust.control.path,
+      manifest.trust.inbox.path,
+      ...(manifest.lineageRoot === null ? [] : [manifest.lineageRoot])
+    ])
+  ]
   return JSON.stringify({
     permissions: {
-      allow: [
-        claudeNodeDoneRule(state, intent, "completed"),
-        claudeNodeDoneRule(state, intent, "completed", true),
-        claudeNodeDoneRule(state, intent, "failed")
-      ],
-      deny: protectedWritePaths.map((candidate) => `Edit(${claudeAbsolutePattern(candidate)})`)
+      allow: ["Bash"],
+      deny: []
     },
     sandbox: {
       enabled: true,
@@ -623,13 +763,185 @@ function claudeSettingsDocument(
       autoAllowBashIfSandboxed: true,
       allowUnsandboxedCommands: false,
       filesystem: {
-        allowRead: [submissionDirectory, ...lineage],
-        allowWrite: [...writeRoots, submissionDirectory, ...lineage],
-        denyRead: protectedPaths,
+        // Claude's allowWrite does not imply read access when a denyRead
+        // parent protects sibling attempts. Read-write roots must therefore
+        // be reopened explicitly as both capabilities.
+        allowRead: [
+          ...new Set([...manifest.access.readableRoots, ...manifest.access.writableRoots])
+        ],
+        allowWrite: [...manifest.access.writableRoots],
+        denyRead: [...manifest.access.unreadableRoots],
         denyWrite: protectedWritePaths
       }
     }
   })
+}
+
+export interface PreparedAttemptLaunchCapabilities {
+  readonly manifest: AttemptCapabilityManifest
+  readonly profile: string | null
+  readonly profileAdapterPath: string | null
+  readonly environment: Readonly<Record<string, string>>
+}
+
+export async function prepareAttemptLaunchCapabilities(
+  workflow: WorkflowSpec,
+  node: AgentNode,
+  state: RunState,
+  intent: SpawnIntent,
+  sourceRoot: string,
+  lineageDirectory: string | null
+): Promise<PreparedAttemptLaunchCapabilities> {
+  await Promise.all(
+    [submissionsRoot(), providerSessionsRoot()].map(async (directory) => {
+      await mkdir(directory, { recursive: true, mode: 0o700 })
+      await chmod(directory, 0o700)
+    })
+  )
+  const trust = await ensureAttemptTrustIdentities(state.id, intent.nodeId, intent.token)
+  const providerRoot = providerControlRoot(node.provider)
+  const sourceRoots = [sourceRoot, ...(lineageDirectory === null ? [] : [lineageDirectory])]
+  const declaredWriteRoots = [
+    ...providerWriteRoots(node, sourceRoot),
+    ...(lineageDirectory === null ? [] : [lineageDirectory])
+  ]
+  const profile = node.provider === "codex" ? codexControlProfile(intent.token) : null
+  const manifestPath = attemptCapabilityManifestPath(state.id, intent.nodeId, intent.token)
+  const existingManifest = await access(manifestPath).then(
+    () => true,
+    (error: unknown) => {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+        return false
+      }
+      throw error
+    }
+  )
+  if (existingManifest) {
+    const loaded = await loadExistingAttemptCapabilityManifest(
+      state.id,
+      intent.nodeId,
+      intent.token
+    )
+    const manifest = loaded.manifest
+    if (
+      manifest.attempt.attempt !== intent.attempt ||
+      manifest.attempt.provider !== node.provider ||
+      manifest.providerControlRoot !== providerRoot ||
+      manifest.lineageRoot !== lineageDirectory ||
+      JSON.stringify(manifest.sourceRoots) !== JSON.stringify(sourceRoots) ||
+      JSON.stringify(manifest.declaredWriteRoots) !== JSON.stringify(declaredWriteRoots)
+    ) {
+      throw new Error("Existing attempt capability does not match the planned provider launch.")
+    }
+    await revalidateProviderLaunchIdentity(manifest.providerLaunch, manifest.providerRelay)
+    const profileAdapterPath =
+      profile === null ? null : codexProfilePath(profile, manifest.providerControlRoot)
+    if (profileAdapterPath !== null) {
+      const asset = manifest.policyAssets.find((candidate) => candidate.kind === "codex-profile")
+      if (asset === undefined) {
+        throw new Error("Codex attempt capability has no policy profile asset.")
+      }
+      await atomicWriteFile(profileAdapterPath, await readFile(asset.path, "utf8"), 0o600)
+      await chmod(profileAdapterPath, 0o600)
+    }
+    return {
+      manifest,
+      profile,
+      profileAdapterPath,
+      environment: {
+        PATH: manifest.providerRelay.environmentPath,
+        HOME: launcherHomePath(),
+        ...(node.provider === "codex"
+          ? { CODEX_HOME: manifest.providerControlRoot }
+          : { CLAUDE_CONFIG_DIR: manifest.providerControlRoot }),
+        TMPDIR: manifest.trust.scratch.path,
+        TMP: manifest.trust.scratch.path,
+        TEMP: manifest.trust.scratch.path,
+        ORCHESTRATE_COMPLETION_CONTRACT: manifest.completion.contractPath
+      }
+    }
+  }
+  const launchIdentities = await compileWorkflowProviderLaunchIdentities(workflow)
+  assertWorkflowProviderLaunchIsolation(workflow, launchIdentities)
+  const providerLaunch = launchIdentities.find((candidate) => candidate.provider === node.provider)
+  if (providerLaunch === undefined) {
+    throw new Error(`Provider executable "${node.provider}" is not on the launcher-owned PATH.`)
+  }
+  const providerRelay = await materializeProviderRelay(
+    providerLaunch,
+    path.join(trust.control.path, "provider-launcher")
+  )
+  const projectedInputs = await projectAttemptPathInputs(
+    workflow,
+    state,
+    intent.nodeId,
+    node,
+    intent.token
+  )
+  const authority = orchestrateAuthorityPolicy()
+  const manifest = await compileAttemptCapabilityManifest(
+    {
+      runId: state.id,
+      nodeId: intent.nodeId,
+      attempt: intent.attempt,
+      token: intent.token,
+      provider: node.provider,
+      sourceRoots,
+      declaredWriteRoots,
+      providerControlRoot: providerRoot,
+      lineageRoot: lineageDirectory,
+      providerLaunch,
+      providerRelay,
+      unreadableRoots: authority.denyReadRoots,
+      immutableRoots: authority.denyWriteRoots,
+      completionExecutablePath: orchestrateExecutable(),
+      projectedInputs,
+      output: node.output
+    },
+    async (draft) =>
+      node.provider === "codex"
+        ? [
+            {
+              kind: "codex-profile" as const,
+              path: path.join(draft.trust.control.path, "codex-profile.toml"),
+              content: codexControlProfileDocument(profile as string, draft)
+            }
+          ]
+        : [
+            {
+              kind: "claude-settings" as const,
+              path: draft.assets.claudeSettingsPath,
+              content: claudeSettingsDocument(node, draft)
+            }
+          ]
+  )
+  const profileAdapterPath =
+    profile === null ? null : codexProfilePath(profile, manifest.providerControlRoot)
+  if (profileAdapterPath !== null) {
+    const asset = manifest.policyAssets.find((candidate) => candidate.kind === "codex-profile")
+    if (asset === undefined) {
+      throw new Error("Codex attempt capability has no policy profile asset.")
+    }
+    await atomicWriteFile(profileAdapterPath, await readFile(asset.path, "utf8"), 0o600)
+    await chmod(profileAdapterPath, 0o600)
+  }
+  await verifyAttemptTrustIdentities(manifest.trust)
+  return {
+    manifest,
+    profile,
+    profileAdapterPath,
+    environment: {
+      PATH: manifest.providerRelay.environmentPath,
+      HOME: launcherHomePath(),
+      ...(node.provider === "codex"
+        ? { CODEX_HOME: manifest.providerControlRoot }
+        : { CLAUDE_CONFIG_DIR: manifest.providerControlRoot }),
+      TMPDIR: manifest.trust.scratch.path,
+      TMP: manifest.trust.scratch.path,
+      TEMP: manifest.trust.scratch.path,
+      ORCHESTRATE_COMPLETION_CONTRACT: manifest.completion.contractPath
+    }
+  }
 }
 
 // The launch command is typed into a PTY whose canonical-mode input buffer
@@ -647,8 +959,14 @@ function claudeArguments(
     "--settings",
     settingsPath,
     "--permission-mode",
-    "dontAsk",
+    // Native sandbox paths are the attempt boundary. Bypass interactive
+    // permission prompts so ordinary sandboxed commands are never stranded in
+    // a non-interactive pane by inherited user defaults.
+    "bypassPermissions",
     "--tools",
+    // Bash is the only provider tool. Its subprocesses are constrained by the
+    // fail-closed native sandbox; filesystem tools and Agent/Task delegation
+    // never enter the tool surface.
     "Bash"
   ]
   // --safe-mode disables user hooks, including the herdr hook that reports
@@ -672,12 +990,11 @@ function claudeArguments(
   return args
 }
 
-async function prepareProviderLaunch(
+export async function prepareProviderLaunchArguments(
   node: AgentNode,
   state: RunState,
   intent: SpawnIntent,
-  sourceRoot: string,
-  paneId: string
+  capabilities: PreparedAttemptLaunchCapabilities
 ): Promise<{
   readonly args: readonly string[]
   readonly providerSessionId: string | null
@@ -685,32 +1002,27 @@ async function prepareProviderLaunch(
   const source = sourceSession(node, state)
   const sessionMode = sessionLaunchMode(node, state, intent)
   const captureSession = capturesProviderSession(node, state, intent)
-  const transportDirectory = path.dirname(attemptFor(state, intent).resultPath)
   if (node.provider === "claude") {
-    const settingsPath = path.join(transportDirectory, "claude-settings.json")
-    const lineageDirectory = claudeSessionLineage(node)
-      ? await claudeLineageDirectory(state.id)
-      : null
-    await atomicWriteFile(
-      settingsPath,
-      claudeSettingsDocument(node, state, intent, transportDirectory, sourceRoot, lineageDirectory)
-    )
     const sessionId = !captureSession
       ? null
       : sessionMode === "resume"
         ? (source as string)
         : randomUUID()
     return {
-      args: claudeArguments(node, source, settingsPath, sessionId, sessionMode),
+      args: claudeArguments(
+        node,
+        source,
+        capabilities.manifest.assets.claudeSettingsPath,
+        sessionId,
+        sessionMode
+      ),
       providerSessionId: sessionId
     }
   }
-  const profile = codexControlProfile(paneId)
-  const profilePath = codexProfilePath(profile)
-  await atomicWriteFile(
-    profilePath,
-    codexControlProfileDocument(profile, transportDirectory, providerWriteRoots(node, sourceRoot))
-  )
+  const profile = capabilities.profile
+  if (profile === null) {
+    throw new TypeError("Codex attempt capability has no profile identity.")
+  }
   return {
     args: codexArguments(node, source, profile, sessionMode),
     providerSessionId: null
@@ -1118,22 +1430,19 @@ function isSpawnReceipt(value: unknown): value is SpawnReceipt {
   return Option.isSome(decodeSpawnReceipt(value))
 }
 
-async function hasTokenValidSubmission(
+async function hasValidCompletionEvidence(
   state: RunState,
   intent: SpawnIntent,
   attempt: AttemptState
 ): Promise<boolean> {
-  const value = await readFile(completionSubmissionPath(attempt.resultPath), "utf8")
-    .then((raw) => JSON.parse(raw) as unknown)
-    .catch(() => null)
-  const submission = Option.getOrNull(decodeNodeDoneSubmission(value))
-  if (submission === null) {
-    return false
-  }
-  return (
-    submission.runId === state.id &&
-    submission.nodeId === intent.nodeId &&
-    submission.token === intent.token
+  return readAuthenticatedCompletionEvidence({
+    runId: state.id,
+    nodeId: intent.nodeId,
+    token: intent.token,
+    resultPath: attempt.resultPath
+  }).then(
+    () => true,
+    () => false
   )
 }
 
@@ -1371,33 +1680,38 @@ export class HerdrSurface {
         `Claude node "${intent.nodeId}" must use dontAsk and launcher-owned arguments.`
       )
     }
+    if (node.type === "agent") {
+      assertAgentEnvironmentAuthority(node)
+    }
     const preparedCwd = await prepareWorkspace(workflow, state, intent.nodeId, node)
     assertProviderAuthorityIsolation(workflow, node, preparedCwd)
     await mkdir(path.dirname(attempt.outputPath), {
       recursive: true,
       mode: 0o700
     })
-    if (node.type === "agent") {
-      await mkdir(path.dirname(attempt.resultPath), {
-        recursive: true,
-        mode: 0o700
-      })
-    }
     const hook = beforeProviderBoundaryForTests
     beforeProviderBoundaryForTests = null
-    await hook?.()
-    const currentIntendedCwd = realpathSync.native(intendedCwd)
-    if (currentIntendedCwd !== preparedCwd) {
-      throw new Error(
-        `Provider root for node "${intent.nodeId}" changed during launch; refusing pathname reuse.`
-      )
-    }
     const sourceRoot = stableProviderRoot(workflow, node, preparedCwd)
+    const claudeLineageId =
+      node.type === "agent" && node.provider === "claude"
+        ? claudeSessionLineageId(node, state)
+        : null
+    const lineageDirectory =
+      claudeLineageId === null ? null : await claudeLineageDirectory(state.id, claudeLineageId)
+    const capabilities =
+      node.type === "agent"
+        ? await prepareAttemptLaunchCapabilities(
+            workflow,
+            node,
+            state,
+            intent,
+            sourceRoot,
+            lineageDirectory
+          )
+        : null
     const providerCwd =
       node.type === "agent" && node.provider === "claude"
-        ? node.session.saveAs !== null || node.session.mode !== "fresh"
-          ? await claudeLineageDirectory(state.id)
-          : realpathSync.native(path.dirname(attempt.resultPath))
+        ? (lineageDirectory ?? capabilities?.manifest.trust.inbox.path ?? sourceRoot)
         : sourceRoot
     let replacementPane: PaneReference | null = null
     let observedWorkroomAnchor: PaneReference | null = null
@@ -1419,13 +1733,17 @@ export class HerdrSurface {
     }
     const environment = {
       ...nodeEnvironment(node),
+      ...capabilities?.environment,
       ORCHESTRATE_BIN: orchestrateExecutable(),
       ORCHESTRATE_STATE_DIR: stateRoot(),
       ORCHESTRATE_RUN_ID: state.id,
       ORCHESTRATE_NODE_ID: intent.nodeId,
       ORCHESTRATE_NODE_TOKEN: intent.token,
       ORCHESTRATE_OUTPUT_PATH: attempt.outputPath,
-      ORCHESTRATE_RESULT_PATH: attempt.resultPath,
+      ORCHESTRATE_RESULT_PATH:
+        capabilities?.manifest.completion === undefined
+          ? attempt.resultPath
+          : path.join(capabilities.manifest.trust.outbox.path, "result.txt"),
       ORCHESTRATE_SOURCE_ROOT: sourceRoot
     }
     const workspaceId =
@@ -1544,9 +1862,60 @@ export class HerdrSurface {
         } satisfies SpawnReceipt)
         return observation
       }
+      if (capabilities === null) {
+        throw new TypeError(`Agent node "${intent.nodeId}" has no attempt capability manifest.`)
+      }
 
-      const launch = await prepareProviderLaunch(node, state, intent, sourceRoot, pane.paneId)
+      const launch = await prepareProviderLaunchArguments(node, state, intent, capabilities)
       launchSessionId = launch.providerSessionId
+      if (capabilities.profileAdapterPath !== null) {
+        codexProfileAdaptersByPane.set(pane.paneId, capabilities.profileAdapterPath)
+      }
+      await hook?.()
+      const currentIntendedCwd = realpathSync.native(intendedCwd)
+      if (currentIntendedCwd !== preparedCwd) {
+        throw new Error(
+          `Provider root for node "${intent.nodeId}" changed during launch; refusing pathname reuse.`
+        )
+      }
+      await verifyAttemptTrustIdentities(capabilities.manifest.trust)
+      const reloadedCapability = await loadExistingAttemptCapabilityManifest(
+        state.id,
+        intent.nodeId,
+        intent.token
+      )
+      if (reloadedCapability.manifest.capabilityDigest !== capabilities.manifest.capabilityDigest) {
+        throw new Error("Attempt capability manifest changed before provider start.")
+      }
+      for (const projected of capabilities.manifest.projectedInputs) {
+        const current = await readBoundedRegularFileEvidence(
+          projected.path,
+          `Projected input ${projected.inputIndex}`
+        )
+        if (
+          current.sha256 !== projected.sha256 ||
+          current.byteLength !== projected.byteLength ||
+          ((await lstat(projected.path)).mode & 0o777) !== 0o400
+        ) {
+          throw new Error(`Projected input ${projected.inputIndex} changed before provider start.`)
+        }
+      }
+      if (capabilities.profileAdapterPath !== null) {
+        const asset = capabilities.manifest.policyAssets.find(
+          (candidate) => candidate.kind === "codex-profile"
+        )
+        const adapter = await readBoundedRegularFileEvidence(
+          capabilities.profileAdapterPath,
+          "Codex policy profile adapter"
+        )
+        if (asset === undefined || adapter.sha256 !== asset.sha256) {
+          throw new Error("Codex policy profile adapter changed before provider start.")
+        }
+      }
+      await revalidateProviderLaunchIdentity(
+        capabilities.manifest.providerLaunch,
+        capabilities.manifest.providerRelay
+      )
       await startAgentWhenShellReady([
         "agent",
         "start",
@@ -1575,15 +1944,16 @@ export class HerdrSurface {
       // sandboxes can already read; authoritative run state stays denied.
       let prompt = fullPrompt
       if (Buffer.byteLength(fullPrompt, "utf8") > PROMPT_INLINE_LIMIT_BYTES) {
-        const deliveredPromptPath = path.join(path.dirname(attempt.resultPath), "prompt.txt")
+        const deliveredPromptPath = path.join(capabilities.manifest.trust.inbox.path, "prompt.txt")
         await atomicWriteFile(deliveredPromptPath, request.prompt)
+        await chmod(deliveredPromptPath, 0o400)
         // Provenance and visible intent matter here: a bare "read this file
         // and follow it exactly" pointing at an opaque token path matches the
         // prompt-injection silhouette and can trip provider safety classifiers
         // (observed: Fable 5 flagging the message and downgrading the model).
         prompt = `${
           node.provider === "claude" ? `Source workspace: ${sourceRoot}\n\n` : ""
-        }You are a workflow agent started by this machine's orchestrate launcher. Your task briefing was too large to deliver inline, so the launcher that started this session saved it to ${deliveredPromptPath} (inside this attempt's own readable transport directory). Read that file and carry out the task it describes.`
+        }You are the sole completion owner for this workflow node, started by this machine's orchestrate launcher. Your task briefing and completion contract were too large to deliver inline, so the launcher saved it to ${deliveredPromptPath} (inside this attempt's own readable transport directory). Read that file and carry out the task it describes. Delegated workers must never write the result or invoke node-done; you must write the declared result and successfully invoke node-done yourself before your final response.`
       }
       const deliveryMarker = `orchestrate-delivery:${intent.token}`
       prompt = `${prompt}\n\n[${deliveryMarker}]`
@@ -1657,7 +2027,7 @@ export class HerdrSurface {
         const node = templateForRuntimeNode(request.workflow, request.state, request.intent.nodeId)
         if (
           node.type === "agent" &&
-          (await hasTokenValidSubmission(request.state, request.intent, attempt))
+          (await hasValidCompletionEvidence(request.state, request.intent, attempt))
         ) {
           // A launcher-chosen id recorded in the receipt was fixed before the
           // prompt, so a token-valid submission from that pane necessarily
@@ -1716,7 +2086,7 @@ export class HerdrSurface {
       const node = templateForRuntimeNode(request.workflow, request.state, request.intent.nodeId)
       const promptOrCommandMayHaveRun = recorded.status !== "created"
       if (promptOrCommandMayHaveRun) {
-        const submitted = await hasTokenValidSubmission(request.state, request.intent, attempt)
+        const submitted = await hasValidCompletionEvidence(request.state, request.intent, attempt)
         const hasExactSessionAttribution =
           node.type !== "agent" ||
           !capturesProviderSession(node, request.state, request.intent) ||
@@ -1727,16 +2097,25 @@ export class HerdrSurface {
             providerSessionId: recorded.providerSessionId
           }
         }
-        await rm(codexProfilePath(codexControlProfile(recorded.pane.paneId)), {
-          force: true
-        }).catch(() => undefined)
+        if (node.type === "agent" && node.provider === "codex") {
+          await rm(
+            codexProfilePath(
+              codexControlProfile(request.intent.token),
+              providerControlRoot("codex")
+            ),
+            { force: true }
+          ).catch(() => undefined)
+        }
         throw new Error(
           `Spawn for node "${request.intent.nodeId}" lost pane "${recorded.pane.paneId}" after launch; failing this attempt instead of reusing its completion token.`
         )
       }
-      await rm(codexProfilePath(codexControlProfile(recorded.pane.paneId)), { force: true }).catch(
-        () => undefined
-      )
+      if (node.type === "agent" && node.provider === "codex") {
+        await rm(
+          codexProfilePath(codexControlProfile(request.intent.token), providerControlRoot("codex")),
+          { force: true }
+        ).catch(() => undefined)
+      }
       await rm(receiptPath(attempt), { force: true })
     }
     return this.spawn(request)
@@ -1857,7 +2236,11 @@ export class HerdrSurface {
         throw error
       }
     }
-    await rm(codexProfilePath(codexControlProfile(paneId)), { force: true }).catch(() => undefined)
+    const profileAdapter = codexProfileAdaptersByPane.get(paneId)
+    if (profileAdapter !== undefined) {
+      codexProfileAdaptersByPane.delete(paneId)
+      await rm(profileAdapter, { force: true }).catch(() => undefined)
+    }
   }
 
   async renamePane(paneId: string, label: string): Promise<void> {

@@ -65,15 +65,19 @@ external-action boundary.
 
 `run` captures the launching master, persists the run, presents its initial events, starts initial
 ready work, and returns. It does not create a detached controller, credential, lease, presentation
-cursor, filesystem watcher, or delivery outbox. The launching master is the scheduler after that
-point. When Herdr reports a workflow agent as blocked or done, the installed Orchestrate plugin event
+cursor, filesystem watcher, or delivery outbox. The captured wake owner is the scheduler after that
+point. An explicit `resume` from an authenticated Herdr agent pane transfers wake ownership to that
+current agent session; a resume from a non-agent terminal preserves the current owner. When Herdr
+reports a workflow agent as blocked or done, the installed Orchestrate plugin event
 hook runs outside the provider sandbox, maps the pane and workspace to the live attempt, and prompts
-the captured master session. A valid done submission requests reconciliation; missing or invalid
-submission data requests debugging after one short re-check that suppresses the prompt when the
-agent is observed working again, because provider status can flap through done mid-task. The debug
-prompt names the pane, points at the saved `prompt.txt`, and directs the master to
-`orchestrate status` for the recovery command. This
-wake-up is a latency hint; the master or human can safely run `orchestrate reconcile` at any time.
+the current master session. Valid authenticated evidence from either status requests reconciliation.
+Without valid evidence, blocked requests immediate attention; done requests debugging after one
+short re-check that suppresses the prompt when the agent is observed working again, because provider
+status can flap through done mid-task. The debug prompt names the pane, points at the saved
+`prompt.txt`, and directs the master to `orchestrate status` for inspection and restore/resume
+guidance. After restoration, the same owning provider session must write the declared result and
+submit `node-done`; status does not expose a token-bearing substitute. This wake-up is a latency
+hint; the master or human can safely run `orchestrate reconcile` at any time.
 The bridge also consumes `pane.closed` and `pane.exited`: a pane vanishing under a durably running
 node without a valid submission prompts the master with the `ui restore` command, while teardown
 after a valid submission stays silent. A plugin startup hook raises one attention notification
@@ -87,14 +91,22 @@ kernel-held per-run lock. Concurrent invocations wait and then observe the lates
 Readers replay a missing, invalid, torn, stale, or divergent snapshot without writing. A locked
 mutation repairs the snapshot before it proceeds.
 
-`node-done` runs inside the provider sandbox. It writes only an authenticated completion envelope
-beside the result in that attempt's submission directory. It does not acquire the run lock, read or
-write authoritative run state, construct a surface, or call Herdr. `reconcile` consumes the
-envelope, validates the active token and result, commits completion, and starts newly ready work.
+`node-done` runs inside the provider sandbox. The owning workflow agent must first write its
+declared nonempty `outbox/result.txt`; `node-done` reads the mode-0600 completion contract from that
+attempt's `control/`, reads the result once with a bounded no-follow open, validates completed JSON
+against the contract schema, and only then writes a strict, versioned authenticated
+`outbox/completion.json` containing the exact raw bytes' SHA-256 and length. Delegated
+workers never inherit or exercise the owner's result or completion contract. Free-text answers,
+provider idle state, pane nudges, and unauthenticated inference are not completion. `node-done` does
+not acquire the run lock, read workflow or run authority, write authoritative run state, construct
+a surface, or call Herdr. `reconcile` reloads the manifest and completion contract, consumes the
+envelope, validates the live attempt/token/provider/path/status and output schema, verifies the exact
+result bytes before parsing, commits completion, and starts newly ready work.
 Repeated submissions for the same token replace the same envelope; stale tokens are rejected during
-reconciliation. Reconcile processes independent valid submissions before reporting malformed,
-stale, or schema-invalid envelopes; its error names each exact envelope and the replace-or-remove
-remedy. Trusted reads reject any agent or command result larger than 1 MiB before parsing,
+reconciliation. Reconcile accumulates malformed, stale, or schema-invalid envelope diagnostics
+while processing trusted transitions and spawns to a fixed point; its aggregate nonzero error then
+names each exact envelope and the replace-or-remove remedy. Trusted reads reject any agent or
+command result larger than 1 MiB before parsing,
 journaling, input rendering, or CLI return. Command panes retain their authenticated `node-exit`
 completion path and may crank synchronously because they are not provider-sandboxed.
 
@@ -104,32 +116,83 @@ tree. The run is dormant until a later explicit reconcile consumes them. `status
 
 ### Provider sandbox boundary
 
-Agent launch creates one implicit channel rooted at the exact token-addressed attempt submission
-directory. Codex expresses that allowance as a launcher-owned permission profile. Claude expresses
-it as a launcher-owned settings file inside the attempt transport directory — provider
+Agent launch compiles one immutable `AttemptCapabilityManifest` for the token. It records four
+pairwise-distinct canonical directory identities: launcher-owned provider-readable/non-writable
+`control/`, launcher-projected provider-readable/non-writable `inbox/`, provider-writable `outbox/`,
+and provider-writable mode-0700 `scratch/`. Policies grant only the exact read/write identities and
+never their common attempt parent. `control/` contains the completion contract, provider policy,
+and pinned provider relay; `outbox/` is reserved for `result.txt` and `completion.json`.
+Codex expresses that boundary as a launcher-owned permission profile. Claude expresses
+it as a launcher-owned settings file inside `control/` — provider
 configuration never rides the typed launch line, whose PTY input buffer is capped — and runs from
-that exact directory under `dontAsk`, `--safe-mode`, sandboxed Bash only, exact completion rules,
-and a required native sandbox with unsandboxed fallback disabled; only canonical declared source
-prefixes are added as sandbox writes. Provider panes receive no write
+the exact inbox for an untracked fresh session or from its exact launcher-owned lineage
+project for session-bearing work. The authored `dontAsk` contract is compiled into a launcher-owned
+`bypassPermissions` invocation with `--safe-mode`, only Bash exposed, and a required native sandbox
+whose unsandboxed fallback is disabled. This removes interactive permission stalls without exposing
+Agent/Task delegation or built-in filesystem tools. Only canonical declared source prefixes are
+added as sandbox writes; each write root is also reopened for reads beneath the denied submission
+parent. Both providers
+receive launcher-owned `TMPDIR`, `TMP`, and `TEMP` values naming an existing mode-0700 `scratch/`
+directory inside the exact token submission directory. This permits attempt-local intermediate
+files without granting ambient temporary-directory or undeclared workspace writes. Provider launch
+compilation rejects empty or relative `PATH` entries and deterministically omits later canonical
+aliases while preserving their first precedence position. It records every
+lookup directory through the winning entry, content-binds each executable, resolves supported
+absolute and `/usr/bin/env` shebang chains (including strict `env -S`), rejects malformed or cyclic
+chains, and produces one exact terminal executable and fixed argv. Spawn materializes a
+canonical-name relay under launcher control that uses only those pinned values, then supplies the
+pane with the frozen launcher-owned `PATH`, `HOME`, and matching `CODEX_HOME` or
+`CLAUDE_CONFIG_DIR`; later ambient `PATH` changes cannot retarget the launch. The effective provider control roots are resolved
+through their deepest existing ancestors and protected from every mutating sandbox root and write
+prefix. Preflight and the spawn boundary likewise resolve every provider used anywhere in the
+workflow and reject any mutating node root or declared write prefix that could replace any
+executable, interpreter, relay interpreter, or earlier lookup directory in those identities,
+including a different provider used
+by a later node or retry. File identity, executable mode, bounded content digest, and lookup
+directory identity are rechecked immediately before provider start. Authored agent environment cannot replace provider
+lookup or control configuration, and launch rechecks persisted IR before creating a provider pane.
+Provider panes
+receive no write
 capability to `runs/<id>`, including `state.json`, `events.json`, locks, workflow/UI snapshots,
 receipts, or any other authoritative state. `danger-full-access` is not a valid workflow sandbox.
 Validation and launch both reject a mutating provider sandbox root or write prefix whose resolved
 path is equal to, below, or above the configured state root or installed Orchestrate control assets.
 This includes custom `ORCHESTRATE_STATE_DIR` roots, all other submissions,
 runtime versions, executable links, and installed provider skills. The exact token submission
-directory injected by launch is the only completion write channel. Provider roots are canonicalized
-before use; a pathname whose identity changes after preparation or a declared write prefix with a
-symlink component is rejected before any Herdr workspace, tab, or pane creation. Existing Git
+`outbox/` and `scratch/` identities are the only attempt-local write channels. Claude session projects live
+outside the node-submission tree in a mode-0700 directory per launcher-derived canonical lineage;
+fresh independent lineages are disjoint, while resume and fork reuse their source lineage project.
+The Claude sandbox denies both canonical submission and provider-session parents, then reopens only
+the exact canonical attempt transport and lineage project for sandboxed Bash; it never grants a
+sibling lineage or another node's submission. Those parents and exact children are created and
+canonicalized before policy comparison and emission, including when a configured-state ancestor is
+a symlink. Codex applies the same canonical submission-parent denial and exact-attempt carve-out, and
+both providers receive the canonical identity of the exact attempt scratch directory. Provider
+roots are canonicalized before use; a pathname whose identity changes after preparation, a declared
+write prefix with a symlink component, or any ancestor inspection failure is rejected with node, declared pattern,
+candidate, inspected ancestor, and errno context before any
+Herdr workspace, tab, or pane creation. Existing Git
 worktree targets are reused only when their canonical top level, common repository, and exact
 expanded branch all match the runtime declaration.
+
+The native sandbox boundary has opt-in real-provider contract probes. From `scripts/`, run
+`bun run test:provider:live` to execute the Codex and Claude probes serially. Individual provider
+diagnosis may set `ORCHESTRATE_NATIVE_SANDBOX_PROBE=codex` or `claude` when invoking either probe
+file directly. The probes use the production attempt preparation and launch path. They exercise
+completion prevalidation and trusted reconciliation, agent and command result
+projection, inbox/control immutability, producer isolation, delegation ownership, scratch recovery,
+and the declared workspace boundary. They invoke authenticated provider CLIs and are therefore
+gated out of ordinary deterministic verification.
 
 ### Origin handoff
 
 When launch occurs inside a Herdr agent pane, the run records the origin pane plus the launching
-master's provider session ID. Herdr provides lifecycle event dispatch and the prompt transport for
-the trusted plugin wake.
+master's provider session ID as the initial wake owner. An explicit `resume` from an authenticated
+Herdr agent pane transfers wake ownership to that agent's exact provider session; a resume from a
+non-agent terminal preserves the current owner. Herdr provides lifecycle event dispatch and the
+prompt transport for the trusted plugin wake.
 The provider node receives neither Herdr control authority nor authoritative state access. A
-foreground reconcile may also prompt that exact launching master session
+foreground reconcile may also prompt the exact current wake-owning master session
 when the workflow completes or reaches actionable non-human attention: exhausted failure, gate,
 downstream hold set at completion, revision, fuse, or round limit. Human pause and stop are
 intentionally silent because their initiator already knows. The handoff contains only bounded
@@ -159,11 +222,13 @@ dependency release. Gates, restore, revision reconciliation, and replay consume 
 
 ### Pause, restore, and live status
 
-Herdr agent status `done` is only a live observation: while durable status is `running`, it means
-the authenticated result is missing and requires action; it never implies durable completion.
+Herdr agent status `done` is only a live observation and never implies durable completion. While
+durable status is `running`, a valid token-matched result and completion envelope takes precedence
+over blocked, done, or gone and is shown as submitted and pending reconcile; without that
+authenticated evidence, done requires owner recovery.
 Interactive board refresh, `board --json`, and `runs --needs-attention` use the same classifier and
-default-selection rule. Explicit blocked/done/gone observations need attention; idle, unknown, and
-working states remain transient.
+default-selection rule. Explicit blocked/done/gone observations without authenticated completion
+evidence need attention; submitted/pending-reconcile, idle, unknown, and working states do not.
 
 `pause` prevents new starts and allows live panes to finish. Pause kind is stored on each journal
 event so handoff replay does not infer intent from later state. `resume` continues scheduling.
@@ -245,12 +310,21 @@ workroom settlement anchor because `skipped` is a durable scheduler-owned termin
 
 An approval gate stores the exact rendered prompt or command content and its digest. Approve with
 both node ID and digest. Editing inputs changes the content and therefore requires a new digest.
-The `gate.opened` event message contains the full paste-ready approve command, and `status` and the
-non-interactive board mark a not-yet-started gated node with `approval gate ahead`.
+The gate token is the canonical `gate-content` digest of `{content:<exact rendered content>}` and is
+recomputed from stored content at approval. The `gate.opened` event message contains the full
+paste-ready approve command. Human status and board output print the exact JSON-escaped gate content
+immediately before that command; JSON output continues to expose the content. They also mark a
+not-yet-started gated node with `approval gate ahead`.
 
-`revise` validates a complete replacement workflow, checks immutable completed work and active
-sessions, prints a structural summary, and stores the proposal. `approve --revision <digest>`
-applies it atomically and journals the full workflow so replay also restores `workflow.json`.
+`revise` validates a complete replacement YAML workflow, checks immutable completed work and active
+sessions, prints the complete redacted approval preview plus the canonical `workflow-ir` digest,
+and stores the expanded proposal, summary, digest, and exact source provenance. Status, board, and
+approval recompute the preview purely from that durable workflow and provenance; provenance is
+explanatory and never changes the digest or runtime behavior. Proposal computes the digest instead
+of trusting input. `approve --revision <digest>` recomputes the pending workflow digest, requires
+stored and supplied values to match, validates exact final-IR origins and inferred-dependency
+annotations, applies atomically,
+and journals the full workflow plus the same provenance so replay also restores `workflow.json`.
 While a proposal is pending, live attempts may finish and record their outcomes, but neither new
 intents nor reconciliation/spawn of already-planned old-plan intents may start a pane. Approving or
 discarding the proposal removes that scheduling barrier.
@@ -276,7 +350,7 @@ Every started node executes in a real Herdr pane; a scheduler-skipped node creat
 approved workrooms provide stable workroom tabs with ordered `columns` or `rows` seats. A seatful
 node bypasses matcher-selected tab/split grouping and uses its declared workroom and seat; only one
 live attempt may occupy it. A seatless node that names a workroom remains supporting, transient
-work. Command nodes are always seatless in V1 and continue to execute in transient Herdr panes
+work. Command nodes are always seatless and continue to execute in transient Herdr panes
 rather than a background process.
 
 Workrooms inherit the effective UI `placement.workspace` preference: the dedicated run workspace or
@@ -306,7 +380,7 @@ fresh matcher-selected tab. A transient occupancy-verification transport failure
 without durable attention, while a genuine contradiction durably marks it for attention. Both
 cases block sibling seat launches in the workroom until reconciliation can observe the occupancy;
 unrelated workrooms and seatless work may continue. The planned intent stays intact and consumes no
-retry. Automatic fresh-provider fallback and alias rebinding are outside V1.
+retry. Automatic fresh-provider fallback and alias rebinding are not supported.
 
 The declared layout and seat order determine split intent and preview order. Herdr owns the actual
 tab and split geometry, so recovery guarantees logical seat identity and co-location inside the
@@ -319,9 +393,12 @@ Focus policy may focus only attention events or every start.
 
 The interactive board refreshes on a bounded clock as well as journal writes, so elapsed time and
 Herdr garnish remain live. Herdr `idle` and `unknown` startup samples are transient. For a durably
-running agent, `done` proves the provider finished without submitting `node-done`; the board shows
-that node once in NEEDS YOU with its authenticated recovery command. `blocked` and an explicitly
-missing pane also produce pane-related human attention.
+running agent, blocked, `done`, or a missing pane with valid authenticated completion evidence is
+shown as submitted and pending reconcile, not as human attention. Without that evidence, `done` is
+result missing, while `blocked` and an explicitly missing pane produce the same kind of
+owner-recovery attention. Human status and board output offer inspection and restore/resume guidance but never
+expose the owner's token or a `node-done` recovery command: restore or resume the owning provider
+session and let that same owner finish and submit completion.
 
 Notifications are classified as attention, milestone, or progress and routed to Herdr, the board,
 or silence. Workflow callbacks can be a command, webhook, platform notification, or none. Callback
@@ -360,10 +437,12 @@ subprocess cannot make one build read state created by another build.
 
 ## Cleanup
 
-`clean --dry-run` lists panes, opted-in worktrees, and the run directory. Without dry-run it takes
-the run lock, refuses an unsettled run, closes recorded panes, removes each Git worktree whose
+`clean --dry-run` lists panes, opted-in worktrees, the run directory, and the exact run-owned
+provider-session directory without removing any of them. Without dry-run it takes the run lock,
+refuses an unsettled run, closes recorded panes, removes each Git worktree whose
 declaration has `removeOnClean: true` only after revalidating its repository and exact expanded
-branch, then removes run files. `setup --remove` behavior is described under
+branch, then removes the run's submission transport, provider-session data, and authoritative run
+files. `setup --remove` behavior is described under
 [Installation and upgrades](#installation-and-upgrades).
 
 ## Preference storage
